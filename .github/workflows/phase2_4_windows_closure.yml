@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - phase2-4-ci
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:

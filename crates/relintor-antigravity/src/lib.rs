@@ -38,7 +38,9 @@ pub const PRODUCTION_PROCESS_TIMEOUT: Duration = Duration::from_secs(45 * 60);
 pub const PRODUCTION_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
-    let mut command = Command::new(program);
+    let command = Command::new(program);
+    #[cfg(windows)]
+    let mut command = command;
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
