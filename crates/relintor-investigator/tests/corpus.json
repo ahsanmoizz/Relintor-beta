@@ -1,0 +1,12 @@
+[
+  {"name":"public-marketing","idea":"A public marketing website for a new studio","documents":["Launch page should be discoverable"]},
+  {"name":"authenticated-saas","idea":"An authenticated SaaS application where teams log in","documents":[]},
+  {"name":"internal-utility","idea":"An internal company utility for employees","documents":[]},
+  {"name":"payment-workflow","idea":"A payment and financial settlement workflow","documents":[]},
+  {"name":"ai-application","idea":"An AI assistant using an LLM","documents":[]},
+  {"name":"desktop-local","idea":"A local-first offline desktop utility","documents":[]},
+  {"name":"mobile","idea":"A mobile app for iOS and Android","documents":[]},
+  {"name":"web3","idea":"A blockchain wallet and Web3 application","documents":[]},
+  {"name":"api","idea":"An API backend service with endpoints","documents":[]},
+  {"name":"contradictory","idea":"A local-only project","documents":["No account required","Users login with email and cloud synchronization"]}
+]

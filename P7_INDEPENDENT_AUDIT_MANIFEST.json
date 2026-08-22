@@ -1,0 +1,16 @@
+{
+  "package": "Relintor P7 Independent Audit Repair Gate",
+  "verdict": "MILESTONE_7_REPAIR_REQUIRED",
+  "p8_must_not_start": true,
+  "findings": [
+    "P7-IA-01 desktop dispatch command does not dispatch agent work",
+    "P7-IA-02 durable execution ledger accepts tampering",
+    "P7-IA-03 continuation/retry can reset task budgets",
+    "P7-IA-04 configured cost budgets are not enforced",
+    "P7-IA-05 task completion can bypass scheduler authority",
+    "P7-IA-06 lexical path scope can be escaped and empty mutable paths are accepted",
+    "P7-IA-07 adapter dispatch synthesizes successful process result",
+    "P7-IA-08 trusted signer set is not bound to the sealed registry identity",
+    "P7-IA-09 safe-parallel positive test is synthetic; production scope remains conservative"
+  ]
+}

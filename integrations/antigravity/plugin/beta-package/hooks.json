@@ -1,0 +1,39 @@
+{
+  "relintor-authority": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"%RELINTOR_ANTIGRAVITY_BRIDGE_PATH%\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"%RELINTOR_ANTIGRAVITY_BRIDGE_PATH%\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"%RELINTOR_ANTIGRAVITY_BRIDGE_PATH%\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

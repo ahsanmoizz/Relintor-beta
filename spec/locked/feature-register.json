@@ -1,0 +1,871 @@
+{
+  "brand": "Relintor",
+  "release": "Antigravity full release",
+  "feature_count": 144,
+  "features": [
+    {
+      "id": "A-01",
+      "category": "Identity, Install & Licensing",
+      "feature": "One-click signed installer per supported OS",
+      "phase": "P1/P2"
+    },
+    {
+      "id": "A-02",
+      "category": "Identity, Install & Licensing",
+      "feature": "First-run environment health check",
+      "phase": "P1/P2"
+    },
+    {
+      "id": "A-03",
+      "category": "Identity, Install & Licensing",
+      "feature": "Account sign-in without API keys",
+      "phase": "P1/P2"
+    },
+    {
+      "id": "A-04",
+      "category": "Identity, Install & Licensing",
+      "feature": "Device registration",
+      "phase": "P1/P2"
+    },
+    {
+      "id": "A-05",
+      "category": "Identity, Install & Licensing",
+      "feature": "Secure token storage in OS keychain",
+      "phase": "P1/P2"
+    },
+    {
+      "id": "A-06",
+      "category": "Identity, Install & Licensing",
+      "feature": "Signed entitlement lease",
+      "phase": "P1/P2"
+    },
+    {
+      "id": "A-07",
+      "category": "Identity, Install & Licensing",
+      "feature": "Offline grace handling",
+      "phase": "P1/P2"
+    },
+    {
+      "id": "A-08",
+      "category": "Identity, Install & Licensing",
+      "feature": "Automatic signed updates",
+      "phase": "P1/P2"
+    },
+    {
+      "id": "A-09",
+      "category": "Identity, Install & Licensing",
+      "feature": "Antigravity installation detection",
+      "phase": "P1/P2"
+    },
+    {
+      "id": "A-10",
+      "category": "Identity, Install & Licensing",
+      "feature": "Antigravity version compatibility check",
+      "phase": "P1/P2"
+    },
+    {
+      "id": "A-11",
+      "category": "Identity, Install & Licensing",
+      "feature": "Founder complimentary entitlement support",
+      "phase": "P1/P2"
+    },
+    {
+      "id": "A-12",
+      "category": "Identity, Install & Licensing",
+      "feature": "Uninstall preserving/exporting user evidence choice",
+      "phase": "P1/P2"
+    },
+    {
+      "id": "B-01",
+      "category": "Project Intake & Takeover",
+      "feature": "New Project creation",
+      "phase": "P3/P5"
+    },
+    {
+      "id": "B-02",
+      "category": "Project Intake & Takeover",
+      "feature": "Existing Project Takeover",
+      "phase": "P3/P5"
+    },
+    {
+      "id": "B-03",
+      "category": "Project Intake & Takeover",
+      "feature": "Folder/repository picker",
+      "phase": "P3/P5"
+    },
+    {
+      "id": "B-04",
+      "category": "Project Intake & Takeover",
+      "feature": "Multi-document intake",
+      "phase": "P3/P5"
+    },
+    {
+      "id": "B-05",
+      "category": "Project Intake & Takeover",
+      "feature": "Repository inventory",
+      "phase": "P3/P5"
+    },
+    {
+      "id": "B-06",
+      "category": "Project Intake & Takeover",
+      "feature": "Build-system detection",
+      "phase": "P3/P5"
+    },
+    {
+      "id": "B-07",
+      "category": "Project Intake & Takeover",
+      "feature": "Dependency graph discovery",
+      "phase": "P3/P5"
+    },
+    {
+      "id": "B-08",
+      "category": "Project Intake & Takeover",
+      "feature": "Route/API discovery",
+      "phase": "P3/P5"
+    },
+    {
+      "id": "B-09",
+      "category": "Project Intake & Takeover",
+      "feature": "Database/schema discovery",
+      "phase": "P3/P5"
+    },
+    {
+      "id": "B-10",
+      "category": "Project Intake & Takeover",
+      "feature": "Test/CI discovery",
+      "phase": "P3/P5"
+    },
+    {
+      "id": "B-11",
+      "category": "Project Intake & Takeover",
+      "feature": "Deployment/config discovery",
+      "phase": "P3/P5"
+    },
+    {
+      "id": "B-12",
+      "category": "Project Intake & Takeover",
+      "feature": "Capability reality classification",
+      "phase": "P3/P5"
+    },
+    {
+      "id": "C-01",
+      "category": "Investigation & Decisions",
+      "feature": "Intent extraction",
+      "phase": "P4/P5"
+    },
+    {
+      "id": "C-02",
+      "category": "Investigation & Decisions",
+      "feature": "Persona/user-journey extraction",
+      "phase": "P4/P5"
+    },
+    {
+      "id": "C-03",
+      "category": "Investigation & Decisions",
+      "feature": "Structured investigator questions",
+      "phase": "P4/P5"
+    },
+    {
+      "id": "C-04",
+      "category": "Investigation & Decisions",
+      "feature": "Why-this-matters explanations",
+      "phase": "P4/P5"
+    },
+    {
+      "id": "C-05",
+      "category": "Investigation & Decisions",
+      "feature": "Recommended defaults",
+      "phase": "P4/P5"
+    },
+    {
+      "id": "C-06",
+      "category": "Investigation & Decisions",
+      "feature": "Not-sure decision support",
+      "phase": "P4/P5"
+    },
+    {
+      "id": "C-07",
+      "category": "Investigation & Decisions",
+      "feature": "Architecture decision records",
+      "phase": "P4/P5"
+    },
+    {
+      "id": "C-08",
+      "category": "Investigation & Decisions",
+      "feature": "Risk register",
+      "phase": "P4/P5"
+    },
+    {
+      "id": "C-09",
+      "category": "Investigation & Decisions",
+      "feature": "Non-functional requirement extraction",
+      "phase": "P4/P5"
+    },
+    {
+      "id": "C-10",
+      "category": "Investigation & Decisions",
+      "feature": "Assumption tracking",
+      "phase": "P4/P5"
+    },
+    {
+      "id": "C-11",
+      "category": "Investigation & Decisions",
+      "feature": "Conflict detection across docs/answers",
+      "phase": "P4/P5"
+    },
+    {
+      "id": "C-12",
+      "category": "Investigation & Decisions",
+      "feature": "Blueprint review and founder approval",
+      "phase": "P4/P5"
+    },
+    {
+      "id": "D-01",
+      "category": "Professional Standards Intelligence",
+      "feature": "Versioned standards registry",
+      "phase": "P6"
+    },
+    {
+      "id": "D-02",
+      "category": "Professional Standards Intelligence",
+      "feature": "Signed standards-pack updates",
+      "phase": "P6"
+    },
+    {
+      "id": "D-03",
+      "category": "Professional Standards Intelligence",
+      "feature": "Applicability predicates",
+      "phase": "P6"
+    },
+    {
+      "id": "D-04",
+      "category": "Professional Standards Intelligence",
+      "feature": "Web frontend pack",
+      "phase": "P6"
+    },
+    {
+      "id": "D-05",
+      "category": "Professional Standards Intelligence",
+      "feature": "Backend/API pack",
+      "phase": "P6"
+    },
+    {
+      "id": "D-06",
+      "category": "Professional Standards Intelligence",
+      "feature": "Database/data pack",
+      "phase": "P6"
+    },
+    {
+      "id": "D-07",
+      "category": "Professional Standards Intelligence",
+      "feature": "Auth/security pack",
+      "phase": "P6"
+    },
+    {
+      "id": "D-08",
+      "category": "Professional Standards Intelligence",
+      "feature": "Accessibility/SEO/performance packs",
+      "phase": "P6"
+    },
+    {
+      "id": "D-09",
+      "category": "Professional Standards Intelligence",
+      "feature": "DevOps/observability pack",
+      "phase": "P6"
+    },
+    {
+      "id": "D-10",
+      "category": "Professional Standards Intelligence",
+      "feature": "AI/ML and data-engineering packs",
+      "phase": "P6"
+    },
+    {
+      "id": "D-11",
+      "category": "Professional Standards Intelligence",
+      "feature": "Blockchain/mobile/desktop packs",
+      "phase": "P6"
+    },
+    {
+      "id": "D-12",
+      "category": "Professional Standards Intelligence",
+      "feature": "Payments/privacy/integration packs",
+      "phase": "P6"
+    },
+    {
+      "id": "E-01",
+      "category": "Requirements, Tasks & Sealing",
+      "feature": "Stable requirement IDs",
+      "phase": "P6"
+    },
+    {
+      "id": "E-02",
+      "category": "Requirements, Tasks & Sealing",
+      "feature": "Requirement source provenance",
+      "phase": "P6"
+    },
+    {
+      "id": "E-03",
+      "category": "Requirements, Tasks & Sealing",
+      "feature": "Acceptance criteria",
+      "phase": "P6"
+    },
+    {
+      "id": "E-04",
+      "category": "Requirements, Tasks & Sealing",
+      "feature": "Evidence obligation per requirement",
+      "phase": "P6"
+    },
+    {
+      "id": "E-05",
+      "category": "Requirements, Tasks & Sealing",
+      "feature": "Requirement dependency graph",
+      "phase": "P6"
+    },
+    {
+      "id": "E-06",
+      "category": "Requirements, Tasks & Sealing",
+      "feature": "Task decomposition",
+      "phase": "P6"
+    },
+    {
+      "id": "E-07",
+      "category": "Requirements, Tasks & Sealing",
+      "feature": "Task dependency graph",
+      "phase": "P6"
+    },
+    {
+      "id": "E-08",
+      "category": "Requirements, Tasks & Sealing",
+      "feature": "Task-to-requirement traceability",
+      "phase": "P6"
+    },
+    {
+      "id": "E-09",
+      "category": "Requirements, Tasks & Sealing",
+      "feature": "Mission contract hash",
+      "phase": "P6"
+    },
+    {
+      "id": "E-10",
+      "category": "Requirements, Tasks & Sealing",
+      "feature": "Seal & Build action",
+      "phase": "P6"
+    },
+    {
+      "id": "E-11",
+      "category": "Requirements, Tasks & Sealing",
+      "feature": "Scope-change detection",
+      "phase": "P6"
+    },
+    {
+      "id": "E-12",
+      "category": "Requirements, Tasks & Sealing",
+      "feature": "Explicit defer/N-A decision records",
+      "phase": "P6"
+    },
+    {
+      "id": "F-01",
+      "category": "Antigravity Execution Adapter",
+      "feature": "Antigravity plugin installation",
+      "phase": "P3"
+    },
+    {
+      "id": "F-02",
+      "category": "Antigravity Execution Adapter",
+      "feature": "Pre-tool interception",
+      "phase": "P3"
+    },
+    {
+      "id": "F-03",
+      "category": "Antigravity Execution Adapter",
+      "feature": "Post-tool evidence capture",
+      "phase": "P3"
+    },
+    {
+      "id": "F-04",
+      "category": "Antigravity Execution Adapter",
+      "feature": "Stop-hook integration",
+      "phase": "P3"
+    },
+    {
+      "id": "F-05",
+      "category": "Antigravity Execution Adapter",
+      "feature": "Headless execution runner",
+      "phase": "P3"
+    },
+    {
+      "id": "F-06",
+      "category": "Antigravity Execution Adapter",
+      "feature": "Structured task packets",
+      "phase": "P3"
+    },
+    {
+      "id": "F-07",
+      "category": "Antigravity Execution Adapter",
+      "feature": "Exact action binding",
+      "phase": "P3"
+    },
+    {
+      "id": "F-08",
+      "category": "Antigravity Execution Adapter",
+      "feature": "Automatic low-risk permission decisions",
+      "phase": "P3"
+    },
+    {
+      "id": "F-09",
+      "category": "Antigravity Execution Adapter",
+      "feature": "Authority lease enforcement",
+      "phase": "P3"
+    },
+    {
+      "id": "F-10",
+      "category": "Antigravity Execution Adapter",
+      "feature": "Transcript/artifact collection",
+      "phase": "P3"
+    },
+    {
+      "id": "F-11",
+      "category": "Antigravity Execution Adapter",
+      "feature": "Subagent/worktree awareness",
+      "phase": "P3"
+    },
+    {
+      "id": "F-12",
+      "category": "Antigravity Execution Adapter",
+      "feature": "Adapter compatibility certification",
+      "phase": "P3"
+    },
+    {
+      "id": "G-01",
+      "category": "Execution Orchestration & Watchdog",
+      "feature": "Dependency-aware scheduler",
+      "phase": "P7"
+    },
+    {
+      "id": "G-02",
+      "category": "Execution Orchestration & Watchdog",
+      "feature": "Safe parallel execution",
+      "phase": "P7"
+    },
+    {
+      "id": "G-03",
+      "category": "Execution Orchestration & Watchdog",
+      "feature": "Per-task budgets",
+      "phase": "P7"
+    },
+    {
+      "id": "G-04",
+      "category": "Execution Orchestration & Watchdog",
+      "feature": "Retry strategy",
+      "phase": "P7"
+    },
+    {
+      "id": "G-05",
+      "category": "Execution Orchestration & Watchdog",
+      "feature": "Clean-context turn restart",
+      "phase": "P7"
+    },
+    {
+      "id": "G-06",
+      "category": "Execution Orchestration & Watchdog",
+      "feature": "No-progress detection",
+      "phase": "P7"
+    },
+    {
+      "id": "G-07",
+      "category": "Execution Orchestration & Watchdog",
+      "feature": "Repeated-command loop detection",
+      "phase": "P7"
+    },
+    {
+      "id": "G-08",
+      "category": "Execution Orchestration & Watchdog",
+      "feature": "Edit/revert oscillation detection",
+      "phase": "P7"
+    },
+    {
+      "id": "G-09",
+      "category": "Execution Orchestration & Watchdog",
+      "feature": "Usage/cost telemetry",
+      "phase": "P7"
+    },
+    {
+      "id": "G-10",
+      "category": "Execution Orchestration & Watchdog",
+      "feature": "Diagnostic task injection",
+      "phase": "P7"
+    },
+    {
+      "id": "G-11",
+      "category": "Execution Orchestration & Watchdog",
+      "feature": "Execution termination at safe boundary",
+      "phase": "P7"
+    },
+    {
+      "id": "G-12",
+      "category": "Execution Orchestration & Watchdog",
+      "feature": "Next-turn continuation when mission remains incomplete",
+      "phase": "P7"
+    },
+    {
+      "id": "H-01",
+      "category": "Evidence & Verification",
+      "feature": "Content-addressed evidence store",
+      "phase": "P8"
+    },
+    {
+      "id": "H-02",
+      "category": "Evidence & Verification",
+      "feature": "Build evidence",
+      "phase": "P8"
+    },
+    {
+      "id": "H-03",
+      "category": "Evidence & Verification",
+      "feature": "Unit/integration/e2e test evidence",
+      "phase": "P8"
+    },
+    {
+      "id": "H-04",
+      "category": "Evidence & Verification",
+      "feature": "Static-analysis evidence",
+      "phase": "P8"
+    },
+    {
+      "id": "H-05",
+      "category": "Evidence & Verification",
+      "feature": "API/database evidence",
+      "phase": "P8"
+    },
+    {
+      "id": "H-06",
+      "category": "Evidence & Verification",
+      "feature": "Browser runtime evidence",
+      "phase": "P8"
+    },
+    {
+      "id": "H-07",
+      "category": "Evidence & Verification",
+      "feature": "Screenshot/video artifact evidence",
+      "phase": "P8"
+    },
+    {
+      "id": "H-08",
+      "category": "Evidence & Verification",
+      "feature": "Accessibility/performance evidence",
+      "phase": "P8"
+    },
+    {
+      "id": "H-09",
+      "category": "Evidence & Verification",
+      "feature": "Security-scan evidence",
+      "phase": "P8"
+    },
+    {
+      "id": "H-10",
+      "category": "Evidence & Verification",
+      "feature": "Environment fingerprinting",
+      "phase": "P8"
+    },
+    {
+      "id": "H-11",
+      "category": "Evidence & Verification",
+      "feature": "Independent AI verifier",
+      "phase": "P8"
+    },
+    {
+      "id": "H-12",
+      "category": "Evidence & Verification",
+      "feature": "Evidence confidence grading",
+      "phase": "P8"
+    },
+    {
+      "id": "I-01",
+      "category": "Completion Authority",
+      "feature": "Implemented-but-unverified state",
+      "phase": "P8"
+    },
+    {
+      "id": "I-02",
+      "category": "Completion Authority",
+      "feature": "Evidence freshness validation",
+      "phase": "P8"
+    },
+    {
+      "id": "I-03",
+      "category": "Completion Authority",
+      "feature": "Impact-based evidence invalidation",
+      "phase": "P8"
+    },
+    {
+      "id": "I-04",
+      "category": "Completion Authority",
+      "feature": "Requirement coverage gate",
+      "phase": "P8"
+    },
+    {
+      "id": "I-05",
+      "category": "Completion Authority",
+      "feature": "Failed-test visibility",
+      "phase": "P8"
+    },
+    {
+      "id": "I-06",
+      "category": "Completion Authority",
+      "feature": "Skipped-test accounting",
+      "phase": "P8"
+    },
+    {
+      "id": "I-07",
+      "category": "Completion Authority",
+      "feature": "Unknown-state accounting",
+      "phase": "P8"
+    },
+    {
+      "id": "I-08",
+      "category": "Completion Authority",
+      "feature": "Accepted-risk state",
+      "phase": "P8"
+    },
+    {
+      "id": "I-09",
+      "category": "Completion Authority",
+      "feature": "Blocked-external state",
+      "phase": "P8"
+    },
+    {
+      "id": "I-10",
+      "category": "Completion Authority",
+      "feature": "False-DONE prevention rules",
+      "phase": "P8"
+    },
+    {
+      "id": "I-11",
+      "category": "Completion Authority",
+      "feature": "Verified completion certificate",
+      "phase": "P8"
+    },
+    {
+      "id": "I-12",
+      "category": "Completion Authority",
+      "feature": "Evidence manifest export",
+      "phase": "P8"
+    },
+    {
+      "id": "J-01",
+      "category": "Recovery & Integrity",
+      "feature": "Periodic checkpoints",
+      "phase": "P9"
+    },
+    {
+      "id": "J-02",
+      "category": "Recovery & Integrity",
+      "feature": "Git/worktree snapshot support",
+      "phase": "P9"
+    },
+    {
+      "id": "J-03",
+      "category": "Recovery & Integrity",
+      "feature": "Untracked-file snapshot support",
+      "phase": "P9"
+    },
+    {
+      "id": "J-04",
+      "category": "Recovery & Integrity",
+      "feature": "Local test database checkpoint hooks",
+      "phase": "P9"
+    },
+    {
+      "id": "J-05",
+      "category": "Recovery & Integrity",
+      "feature": "Emergency stop",
+      "phase": "P9"
+    },
+    {
+      "id": "J-06",
+      "category": "Recovery & Integrity",
+      "feature": "Stopped-incomplete state",
+      "phase": "P9"
+    },
+    {
+      "id": "J-07",
+      "category": "Recovery & Integrity",
+      "feature": "Crash detection",
+      "phase": "P9"
+    },
+    {
+      "id": "J-08",
+      "category": "Recovery & Integrity",
+      "feature": "Orphan process reconciliation",
+      "phase": "P9"
+    },
+    {
+      "id": "J-09",
+      "category": "Recovery & Integrity",
+      "feature": "External edit detection",
+      "phase": "P9"
+    },
+    {
+      "id": "J-10",
+      "category": "Recovery & Integrity",
+      "feature": "Resume integrity check",
+      "phase": "P9"
+    },
+    {
+      "id": "J-11",
+      "category": "Recovery & Integrity",
+      "feature": "Revalidation workflow",
+      "phase": "P9"
+    },
+    {
+      "id": "J-12",
+      "category": "Recovery & Integrity",
+      "feature": "Action-specific rollback/compensation registry",
+      "phase": "P9"
+    },
+    {
+      "id": "K-01",
+      "category": "GUI, Activity & Teams",
+      "feature": "Four-item primary navigation",
+      "phase": "P1/P10/P11"
+    },
+    {
+      "id": "K-02",
+      "category": "GUI, Activity & Teams",
+      "feature": "Home project launcher",
+      "phase": "P1/P10/P11"
+    },
+    {
+      "id": "K-03",
+      "category": "GUI, Activity & Teams",
+      "feature": "Guided investigator UI",
+      "phase": "P1/P10/P11"
+    },
+    {
+      "id": "K-04",
+      "category": "GUI, Activity & Teams",
+      "feature": "Blueprint review UI",
+      "phase": "P1/P10/P11"
+    },
+    {
+      "id": "K-05",
+      "category": "GUI, Activity & Teams",
+      "feature": "Mission cockpit",
+      "phase": "P1/P10/P11"
+    },
+    {
+      "id": "K-06",
+      "category": "GUI, Activity & Teams",
+      "feature": "Requirement/evidence drilldown",
+      "phase": "P1/P10/P11"
+    },
+    {
+      "id": "K-07",
+      "category": "GUI, Activity & Teams",
+      "feature": "Plain-language failure UI",
+      "phase": "P1/P10/P11"
+    },
+    {
+      "id": "K-08",
+      "category": "GUI, Activity & Teams",
+      "feature": "Activity timeline",
+      "phase": "P1/P10/P11"
+    },
+    {
+      "id": "K-09",
+      "category": "GUI, Activity & Teams",
+      "feature": "Team memberships/roles",
+      "phase": "P1/P10/P11"
+    },
+    {
+      "id": "K-10",
+      "category": "GUI, Activity & Teams",
+      "feature": "Shared project policy",
+      "phase": "P1/P10/P11"
+    },
+    {
+      "id": "K-11",
+      "category": "GUI, Activity & Teams",
+      "feature": "Team evidence/audit view",
+      "phase": "P1/P10/P11"
+    },
+    {
+      "id": "K-12",
+      "category": "GUI, Activity & Teams",
+      "feature": "Account/privacy/billing UI",
+      "phase": "P1/P10/P11"
+    },
+    {
+      "id": "L-01",
+      "category": "Cloud, Subscription & Admin",
+      "feature": "Account/organization service",
+      "phase": "P2/P10/P11"
+    },
+    {
+      "id": "L-02",
+      "category": "Cloud, Subscription & Admin",
+      "feature": "Subscription entitlement engine",
+      "phase": "P2/P10/P11"
+    },
+    {
+      "id": "L-03",
+      "category": "Cloud, Subscription & Admin",
+      "feature": "Monthly/annual billing adapter",
+      "phase": "P2/P10/P11"
+    },
+    {
+      "id": "L-04",
+      "category": "Cloud, Subscription & Admin",
+      "feature": "Server-side AI gateway",
+      "phase": "P2/P10/P11"
+    },
+    {
+      "id": "L-05",
+      "category": "Cloud, Subscription & Admin",
+      "feature": "AI provider abstraction",
+      "phase": "P2/P10/P11"
+    },
+    {
+      "id": "L-06",
+      "category": "Cloud, Subscription & Admin",
+      "feature": "Per-plan AI budgets",
+      "phase": "P2/P10/P11"
+    },
+    {
+      "id": "L-07",
+      "category": "Cloud, Subscription & Admin",
+      "feature": "Minimal-context broker protocol",
+      "phase": "P2/P10/P11"
+    },
+    {
+      "id": "L-08",
+      "category": "Cloud, Subscription & Admin",
+      "feature": "Founder admin console",
+      "phase": "P2/P10/P11"
+    },
+    {
+      "id": "L-09",
+      "category": "Cloud, Subscription & Admin",
+      "feature": "Complimentary user/company grants",
+      "phase": "P2/P10/P11"
+    },
+    {
+      "id": "L-10",
+      "category": "Cloud, Subscription & Admin",
+      "feature": "Admin audit trail",
+      "phase": "P2/P10/P11"
+    },
+    {
+      "id": "L-11",
+      "category": "Cloud, Subscription & Admin",
+      "feature": "Signed standards/update distribution",
+      "phase": "P2/P10/P11"
+    },
+    {
+      "id": "L-12",
+      "category": "Cloud, Subscription & Admin",
+      "feature": "Service health/version rollout controls",
+      "phase": "P2/P10/P11"
+    }
+  ]
+}

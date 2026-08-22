@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+  "apps/desktop/src-tauri",
+  "crates/relintor-core",
+  "crates/relintor-contracts",
+  "crates/relintor-evidence",
+  "crates/relintor-distribution",
+  "crates/relintor-execution",
+  "crates/relintor-standards",
+  "crates/relintor-antigravity",
+  "crates/relintor-investigator",
+  "crates/relintor-takeover",
+  "services/cloud-api",
+  "services/ai-gateway",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.96"
+license = "Proprietary"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "package_id": "com.relintor.antigravity",
+  "package_version": "0.1.0",
+  "protocol_version": "relintor-antigravity-hooks-v1",
+  "target_triple": "x86_64-pc-windows-msvc",
+  "supported_antigravity_versions": [
+    "1."
+  ],
+  "files": [
+    {
+      "relative_path": "bridge-manifest.json",
+      "sha256": "03e3b7c1559d4074c7f7ccabf45c738168df9ec177009e110df3da0e11f9fc3f"
+    },
+    {
+      "relative_path": "hooks.json",
+      "sha256": "e4c6164a750072e17f867327e11e6bf303b4ebd04fcfae1725f7ecde3597fe7d"
+    },
+    {
+      "relative_path": "plugin.json",
+      "sha256": "a94b3974dc0a09b311abf3482d3d0fccb111f5b8cf5626620fa1bdd36618729d"
+    },
+    {
+      "relative_path": "relintor-antigravity-bridge.exe",
+      "sha256": "e914ffe7904940990a51f43d85da1d34b8536ad0e0871e521ab5e4ed5b67b75d"
+    }
+  ],
+  "key_id": "0918bc34b503e98bb76d741d6168787d87153f3adf96d45c9a24eb02e0d2240d",
+  "signature": "+jp/6H9odm59LE205iZGqEZLsnFON/8PNI9Air9FS/ADXeLSxJYVQzFoXM52CpMsznVGqtwDfm5eiwDJYyGbDQ=="
+}

@@ -1,0 +1,10 @@
+{
+  "verdict": "MILESTONE_6_CLOSURE_REPAIR_REQUIRED",
+  "findings": [
+    "P6-FC-01 production GUI does not represent the full applicability fact set and defaults target desktop",
+    "P6-FC-02 Seal & Build is not bound to the exact review digest displayed by the caller",
+    "P6-FC-03 semantically identical fact sets are order-sensitive",
+    "P6-FC-04 explicit project defer/N-A state is not correctly propagated into task execution handoff"
+  ],
+  "p7_must_not_start": true
+}

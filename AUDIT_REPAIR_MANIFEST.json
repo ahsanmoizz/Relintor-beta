@@ -1,0 +1,26 @@
+{
+  "package": "Relintor P6 Independent Audit Repair Gate",
+  "verdict": "MILESTONE_6_REPAIR_REQUIRED",
+  "created_for": "Independent audit of P6 Standards + Requirement Graph + Sealing",
+  "files": [
+    "tooling/evidence/milestone-6-independent-audit.md",
+    "crates/relintor-standards/tests/independent_p6_source_audit.rs",
+    "APPLY_AND_VERIFY_P6.md"
+  ],
+  "production_source_replacements": false,
+  "p7_must_not_start": true,
+  "findings": [
+    "P6-IA-01 P4/P5 project requirements are not imported into the sealed graph",
+    "P6-IA-02 missing facts silently become N/A",
+    "P6-IA-03 applicable critical rules can disappear with matching task cleanup",
+    "P6-IA-04 applicability ledger can be forged without deterministic pre-seal recomputation",
+    "P6-IA-05 non-waivable critical rules can be deferred",
+    "P6-IA-06 task coverage links are not cross-checked with task requirement ownership",
+    "P6-IA-07 registry digest is order-sensitive through pack digests",
+    "P6-IA-08 seal manifest/identity metadata is not fully cryptographically bound",
+    "P6-IA-09 persistence primary keys lose stable IDs across missions/revisions",
+    "P6-IA-10 persistence/load do not enforce seal integrity",
+    "P6-IA-11 desktop Seal & Build/trusted production registry path is not wired",
+    "P6-IA-12 per-requirement sealed_hash is never populated"
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "package": "Relintor P8 Final Product/Authority Closure Gate",
+  "verdict": "MILESTONE_8_FINAL_PRODUCT_REPAIR_REQUIRED",
+  "p9_must_not_start": true,
+  "findings": [
+    "P8-FC-01 desktop verification does not execute required collectors",
+    "P8-FC-02 public production test-fixture evidence minting APIs",
+    "P8-FC-03 VerificationReport uses forgeable unkeyed checksum",
+    "P8-FC-04 public non-P7 verification/certificate authority paths",
+    "P8-FC-05 collector binding is caller-selected rather than sealed-plan-bound",
+    "P8-FC-06 H-02/H-03/H-04 collector gaps and shallow H-05..H-09 acceptance",
+    "P8-FC-07 ProductionAiProvider is a fail-only stub, not gateway integration",
+    "P8-FC-08 raw app-data completion/evidence HMAC key",
+    "P8-FC-09 accepted-risk/deferred accounting is not proven per requirement"
+  ]
+}

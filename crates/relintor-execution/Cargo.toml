@@ -1,0 +1,19 @@
+[package]
+name = "relintor-execution"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+relintor-antigravity = { path = "../relintor-antigravity" }
+relintor-core = { path = "../relintor-core" }
+relintor-standards = { path = "../relintor-standards" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
+walkdir = "2"
+
+[dev-dependencies]
+base64 = "0.22"
+ed25519-dalek = "2"

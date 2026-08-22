@@ -1,0 +1,8 @@
+{
+  "verdict": "MILESTONE_8_CC_END_TO_END_REPAIR_REQUIRED",
+  "p9_must_not_start": true,
+  "findings": [
+    "P8-CC-E2E-01 criterion-specific provenance is not wired through the production orchestrator/evaluator",
+    "P8-CC-E2E-02 public AiProviderResult can still be fabricated then authenticated by the engine"
+  ]
+}

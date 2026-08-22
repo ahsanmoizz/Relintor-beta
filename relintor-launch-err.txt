@@ -1,0 +1,5 @@
+
+thread 'main' (2936) panicked at apps\desktop\src-tauri\src\lib.rs:2612:10:
+error while running Relintor desktop: PluginInitialization("updater", "Error deserializing 'plugins.updater' within your Tauri configuration: invalid type: null, expected struct Config")
+stack backtrace:
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.

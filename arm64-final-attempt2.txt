@@ -1,0 +1,197 @@
+$ tauri "build" "--target" "aarch64-pc-windows-msvc" "--bundles" "nsis"
+        Info Looking up installed tauri packages to check mismatched versions...
+     Running beforeBuildCommand `pnpm build`
+$ tsc -b && vite build
+[36mvite v7.3.6 [32mbuilding client environment for production...[36m[39m
+transforming...
+[32m✓[39m 32 modules transformed.
+rendering chunks...
+computing gzip size...
+[2mdist/[22m[32mindex.html                 [39m[1m[2m  0.48 kB[22m[1m[22m[2m │ gzip:  0.31 kB[22m
+[2mdist/[22m[35massets/index-D55yr7TT.css  [39m[1m[2m 16.24 kB[22m[1m[22m[2m │ gzip:  3.91 kB[22m
+[2mdist/[22m[36massets/index-BYJepkKn.js   [39m[1m[2m243.94 kB[22m[1m[22m[2m │ gzip: 74.71 kB[22m
+[32m✓ built in 1.06s[39m
+   Compiling aws-lc-sys v0.44.0
+warning: aws-lc-sys@0.44.0: Environment Variable found 'AWS_LC_SYS_CMAKE_BUILDER': '1'
+warning: aws-lc-sys@0.44.0: Value: 1 is true.
+warning: aws-lc-sys@0.44.0: Environment Variable found 'CARGO_ENCODED_RUSTFLAGS': ''
+warning: aws-lc-sys@0.44.0: Emitting configuration: cargo:rustc-cfg=universal
+warning: aws-lc-sys@0.44.0: Building with: CMake
+warning: aws-lc-sys@0.44.0: Symbol Prefix: Some("aws_lc_0_44_0")
+warning: aws-lc-sys@0.44.0: Environment Variable found 'CMAKE': 'cmake'
+warning: aws-lc-sys@0.44.0: CMAKE environment variable set: cmake
+warning: aws-lc-sys@0.44.0: Target platform: 'aarch64-pc-windows-msvc'
+error: failed to run custom build command for `aws-lc-sys v0.44.0`
+
+Caused by:
+  process didn't exit successfully: `D:\Relintor\target\release\build\aws-lc-sys-410b386b8f065bee\build-script-main` (exit code: 101)
+  --- stdout
+  cargo:rerun-if-env-changed=AWS_LC_SYS_NO_PREFIX_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_NO_PREFIX
+  cargo:rerun-if-env-changed=AWS_LC_SYS_PREGENERATING_BINDINGS_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_PREGENERATING_BINDINGS
+  cargo:rerun-if-env-changed=AWS_LC_SYS_EXTERNAL_BINDGEN_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_EXTERNAL_BINDGEN
+  cargo:rerun-if-env-changed=AWS_LC_SYS_NO_ASM_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_NO_ASM
+  cargo:rerun-if-env-changed=AWS_LC_SYS_PREBUILT_NASM_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_PREBUILT_NASM
+  cargo:rerun-if-env-changed=AWS_LC_SYS_C_STD_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_C_STD
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CMAKE_BUILDER_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CMAKE_BUILDER
+  cargo:warning=Environment Variable found 'AWS_LC_SYS_CMAKE_BUILDER': '1'
+  cargo:warning=Value: 1 is true.
+  cargo:rerun-if-env-changed=AWS_LC_SYS_NO_PREGENERATED_SRC_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_NO_PREGENERATED_SRC
+  cargo:rerun-if-env-changed=AWS_LC_SYS_SMALL_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_SMALL
+  cargo:rerun-if-env-changed=AWS_LC_SYS_EFFECTIVE_TARGET_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_EFFECTIVE_TARGET
+  cargo:rerun-if-env-changed=AWS_LC_SYS_NO_JITTER_ENTROPY_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_NO_JITTER_ENTROPY
+  cargo:rerun-if-env-changed=AWS_LC_SYS_NO_U1_BINDINGS_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_NO_U1_BINDINGS
+  cargo:rerun-if-env-changed=AWS_LC_SYS_INCLUDES_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_INCLUDES
+  cargo:rerun-if-env-changed=AWS_LC_SYS_SANITIZER_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_SANITIZER
+  cargo:rerun-if-env-changed=AWS_LC_SYS_LINK_WHOLE_ARCHIVE_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_LINK_WHOLE_ARCHIVE
+  cargo:rerun-if-env-changed=AWS_LC_SYS_STATIC_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_STATIC
+  cargo:rerun-if-env-changed=AWS_LC_SYS_SYSTEM_DIR_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_SYSTEM_DIR
+  cargo:rerun-if-env-changed=AWS_LC_SYS_USE_SYSTEM_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_USE_SYSTEM
+  cargo:rerun-if-env-changed=AWS_LC_SYS_SYSTEM_BINDINGS_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_SYSTEM_BINDINGS
+  cargo:rerun-if-env-changed=AWS_LC_SYS_SYSTEM_SKIP_VERSION_CHECK_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_SYSTEM_SKIP_VERSION_CHECK
+  cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS
+  cargo:warning=Environment Variable found 'CARGO_ENCODED_RUSTFLAGS': ''
+  cargo:warning=Emitting configuration: cargo:rustc-cfg=universal
+  cargo:rustc-cfg=universal
+  cargo:rerun-if-env-changed=OPENSSL_DIR_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=OPENSSL_DIR
+  cargo:rerun-if-env-changed=OPENSSL_INCLUDE_DIR_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=OPENSSL_INCLUDE_DIR
+  cargo:rerun-if-env-changed=OPENSSL_LIB_DIR_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=OPENSSL_LIB_DIR
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CMAKE_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CMAKE
+  cargo:rerun-if-env-changed=CMAKE_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=CMAKE
+  cargo:warning=Building with: CMake
+  cargo:warning=Symbol Prefix: Some("aws_lc_0_44_0")
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CMAKE_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CMAKE
+  cargo:rerun-if-env-changed=CMAKE_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=CMAKE
+  cargo:warning=Environment Variable found 'CMAKE': 'cmake'
+  cargo:warning=CMAKE environment variable set: cmake
+  cargo:warning=Target platform: 'aarch64-pc-windows-msvc'
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CMAKE_GENERATOR_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CMAKE_GENERATOR
+  cargo:rerun-if-env-changed=CMAKE_GENERATOR_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=CMAKE_GENERATOR
+  cargo:rerun-if-env-changed=AWS_LC_SYS_TARGET_CFLAGS_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_TARGET_CFLAGS
+  cargo:rerun-if-env-changed=TARGET_CFLAGS_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=TARGET_CFLAGS
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CFLAGS_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CFLAGS
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=CFLAGS
+  cargo:rerun-if-env-changed=AWS_LC_SYS_TARGET_CFLAGS_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_TARGET_CFLAGS
+  cargo:rerun-if-env-changed=TARGET_CFLAGS_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=TARGET_CFLAGS
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CFLAGS_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CFLAGS
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=CFLAGS
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CMAKE_TOOLCHAIN_FILE_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CMAKE_TOOLCHAIN_FILE
+  cargo:rerun-if-env-changed=CMAKE_TOOLCHAIN_FILE_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=CMAKE_TOOLCHAIN_FILE
+  cargo:rerun-if-env-changed=VCINSTALLDIR
+  VCINSTALLDIR = Some(D:\DevTools\VSBuildTools\VC\)
+  cargo:rerun-if-env-changed=VSCMD_ARG_TGT_ARCH
+  VSCMD_ARG_TGT_ARCH = Some(arm64)
+  PATH = Some(D:\Relintor\target\release;D:\Relintor\target\release\deps;D:\Relintor-rustup\toolchains\1.96.0-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;D:\Relintor\apps\desktop\node_modules\.bin;C:\Users\A\AppData\Roaming\npm\node_modules\pnpm\dist\node-gyp-bin;D:\Relintor\node_modules\.bin;D:\Relintor-tooling\LLVM\bin;D:\DevTools\VSBuildTools\VC\Tools\MSVC\14.44.35207\bin\HostX64\ARM64;D:\DevTools\VSBuildTools\VC\Tools\MSVC\14.44.35207\bin\HostX64\x64;D:\DevTools\VSBuildTools\Common7\IDE\VC\VCPackages;D:\DevTools\VSBuildTools\Common7\IDE\CommonExtensions\Microsoft\TestWindow;D:\DevTools\VSBuildTools\MSBuild\Current\bin\Roslyn;D:\DevTools\VSBuildTools\Team Tools\DiagnosticsHub\Collector;D:\DevTools\VSBuildTools\Common7\IDE\Extensions\Microsoft\CodeCoverage.Console;C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\\x64;C:\Program Files (x86)\Windows Kits\10\bin\\x64;D:\DevTools\VSBuildTools\\MSBuild\Current\Bin\amd64;C:\Windows\Microsoft.NET\Framework64\v4.0.30319;D:\DevTools\VSBuildTools\Common7\IDE\;D:\DevTools\VSBuildTools\Common7\Tools\;D:\Relintor-tooling\LLVM\bin;D:\Relintor-rustup\toolchains\1.96.0-x86_64-pc-windows-msvc\bin;D:\Relintor-cargo-home\bin;D:\DevTools\VSBuildTools\VC\Tools\MSVC\14.44.35207\bin\HostX64\ARM64;D:\DevTools\VSBuildTools\VC\Tools\MSVC\14.44.35207\bin\HostX64\x64;D:\DevTools\VSBuildTools\Common7\IDE\VC\VCPackages;D:\DevTools\VSBuildTools\Common7\IDE\CommonExtensions\Microsoft\TestWindow;D:\DevTools\VSBuildTools\MSBuild\Current\bin\Roslyn;D:\DevTools\VSBuildTools\Team Tools\DiagnosticsHub\Collector;D:\DevTools\VSBuildTools\Common7\IDE\Extensions\Microsoft\CodeCoverage.Console;C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\\x64;C:\Program Files (x86)\Windows Kits\10\bin\\x64;D:\DevTools\VSBuildTools\\MSBuild\Current\Bin\amd64;C:\Windows\Microsoft.NET\Framework64\v4.0.30319;D:\DevTools\VSBuildTools\Common7\IDE\;D:\DevTools\VSBuildTools\Common7\Tools\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\nodejs\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Users\A\AppData\Local\Programs\Python\Python312\Scripts\;C:\Users\A\AppData\Local\Programs\Python\Python312\;C:\Users\A\AppData\Local\Programs\Python\Launcher\;C:\Users\A\.cargo\bin;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Users\A\AppData\Local\Microsoft\WindowsApps;C:\Program Files\nodejs;C:\Users\A\AppData\Local\Programs\Microsoft VS Code\bin;D:\Antigravity\bin;C:\Users\A\AppData\Roaming\npm;D:\Windsurf\bin;D:\Kiro\bin;C:\msys64\ucrt64\bin;;C:\Users\A\AppData\Local\Onus\bin;D:\DevTools\VSBuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;D:\DevTools\VSBuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;D:\DevTools\VSBuildTools\Common7\IDE\VC\Linux\bin\ConnectionManagerExe;D:\DevTools\VSBuildTools\VC\vcpkg;D:\DevTools\VSBuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;D:\DevTools\VSBuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;D:\DevTools\VSBuildTools\Common7\IDE\VC\Linux\bin\ConnectionManagerExe;D:\DevTools\VSBuildTools\VC\vcpkg)
+  cargo:rerun-if-env-changed=CC_aarch64-pc-windows-msvc
+  CC_aarch64-pc-windows-msvc = None
+  cargo:rerun-if-env-changed=CC_aarch64_pc_windows_msvc
+  CC_aarch64_pc_windows_msvc = None
+  cargo:rerun-if-env-changed=TARGET_CC
+  TARGET_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=TARGET_CFLAGS
+  TARGET_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_pc_windows_msvc
+  CFLAGS_aarch64_pc_windows_msvc = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-pc-windows-msvc
+  CFLAGS_aarch64-pc-windows-msvc = None
+  cargo:rerun-if-env-changed=AWS_LC_SYS_TARGET_CC_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_TARGET_CC
+  cargo:rerun-if-env-changed=TARGET_CC_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=TARGET_CC
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CC_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CC
+  cargo:rerun-if-env-changed=CC_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=CC
+  cargo:rerun-if-env-changed=AWS_LC_SYS_TARGET_CXX_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_TARGET_CXX
+  cargo:rerun-if-env-changed=TARGET_CXX_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=TARGET_CXX
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CXX_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CXX
+  cargo:rerun-if-env-changed=CXX_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=CXX
+  cargo:rerun-if-env-changed=CMAKE_GENERATOR
+  CMAKE_TOOLCHAIN_FILE_aarch64-pc-windows-msvc = None
+  CMAKE_TOOLCHAIN_FILE_aarch64_pc_windows_msvc = None
+  TARGET_CMAKE_TOOLCHAIN_FILE = None
+  CMAKE_TOOLCHAIN_FILE = None
+  CMAKE_GENERATOR_aarch64-pc-windows-msvc = None
+  CMAKE_GENERATOR_aarch64_pc_windows_msvc = None
+  TARGET_CMAKE_GENERATOR = None
+  CMAKE_GENERATOR = None
+  CMAKE_PREFIX_PATH_aarch64-pc-windows-msvc = None
+  CMAKE_PREFIX_PATH_aarch64_pc_windows_msvc = None
+  TARGET_CMAKE_PREFIX_PATH = None
+  CMAKE_PREFIX_PATH = None
+  CMAKE_aarch64-pc-windows-msvc = None
+  CMAKE_aarch64_pc_windows_msvc = None
+  TARGET_CMAKE = None
+  CMAKE = Some("cmake")
+  Not searching for unused variables given on the command line.
+  -- Configuring incomplete, errors occurred!
+
+  --- stderr
+  running: "cmake" "D:\\Relintor-cargo-home\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\aws-lc-sys-0.44.0" "-B" "D:\\Relintor\\target\\aarch64-pc-windows-msvc\\release\\build\\aws-lc-sys-351617cf2d0d89da\\out\\build" "-G" "Visual Studio 17 2022" "-AARM64" "-T" "ClangCL,host=x64" "-DBUILD_SHARED_LIBS=0" "-DBORINGSSL_PREFIX=aws_lc_0_44_0_" "-DBORINGSSL_PREFIX_HEADERS=D:\\Relintor-cargo-home\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\aws-lc-sys-0.44.0\\generated-include" "-DBUILD_TESTING=OFF" "-DBUILD_TOOL=OFF" "-DENABLE_SOURCE_MODIFICATION=OFF" "-DBUILD_LIBSSL=OFF" "-DDISABLE_PERL=ON" "-DDISABLE_GO=ON" "-DOPENSSL_SMALL=OFF" "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL" "-DCMAKE_GENERATOR_PLATFORM=ARM64" "-DCMAKE_SYSTEM_NAME=Windows" "-DCMAKE_SYSTEM_PROCESSOR=ARM64" "-DCMAKE_INSTALL_PREFIX=D:\\Relintor\\target\\aarch64-pc-windows-msvc\\release\\build\\aws-lc-sys-351617cf2d0d89da\\out" "-DCMAKE_C_FLAGS= -nologo -MD -Brepro -W0" "-DCMAKE_C_FLAGS_RELEASE= -nologo -MD -Brepro -W0" "-DCMAKE_CXX_FLAGS= -nologo -MD -Brepro -W0" "-DCMAKE_CXX_FLAGS_RELEASE= -nologo -MD -Brepro -W0" "-DCMAKE_ASM_FLAGS= -nologo -MD -Brepro -W0" "-DCMAKE_ASM_FLAGS_RELEASE= -nologo -MD -Brepro -W0" "-DCMAKE_BUILD_TYPE=Release" "--no-warn-unused-cli"
+  CMake Error at CMakeLists.txt:6 (project):
+    Generator
+
+      Visual Studio 17 2022
+
+    could not find any instance of Visual Studio.
+
+
+
+
+  thread 'main' (5492) panicked at D:\Relintor-cargo-home\registry\src\index.crates.io-1949cf8c6b5b557f\cmake-0.1.58\src\lib.rs:1132:5:
+
+  command did not execute successfully, got: exit code: 1
+
+  build script failed, must exit now
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+failed to build app: failed to build app
+       Error failed to build app: failed to build app
+[ELIFECYCLE] Command failed with exit code 1.

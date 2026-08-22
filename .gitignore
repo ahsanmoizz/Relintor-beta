@@ -1,0 +1,29 @@
+node_modules/
+dist/
+target/
+build/
+.next/
+coverage/
+*.log
+*.tsbuildinfo
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+.pnpm-store/
+
+# The downloaded source package is an input artifact, not repository authority.
+# spec/locked/ is the single checked-in sealed authority copy.
+/relintor_sealed_product_package/
+.cargo-home/
+target*/
+previous-x64-installer/
+*.key
+*.pem
+*.p12
+*.pfx

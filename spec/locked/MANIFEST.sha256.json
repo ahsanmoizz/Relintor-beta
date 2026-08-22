@@ -1,0 +1,70 @@
+{
+  "00_PRODUCT_CONSTITUTION.md": {
+    "sha256": "3b2dc8cca05a3f4c7b30a185f52f61b33072291c3d71658992f20092aac6d11c",
+    "bytes": 4426
+  },
+  "01_UX_UI_SPEC.md": {
+    "sha256": "cf4b439c132d01180fc78a2998b8cad6cd7d167b894a01af41cb764e88f18924",
+    "bytes": 8269
+  },
+  "02_SYSTEM_ARCHITECTURE.md": {
+    "sha256": "45b839432374e0c259743251a1669d70801c99aff58bc982f14a78a08d930eaa",
+    "bytes": 4018
+  },
+  "03_ANTIGRAVITY_INTEGRATION_CONTRACT.md": {
+    "sha256": "3dfa4b9d1a5079e01e6067a18388124b4236748716d54995378324cbeecf352b",
+    "bytes": 4017
+  },
+  "04_INVESTIGATION_AND_STANDARDS_ENGINE.md": {
+    "sha256": "f549cc8de44242db3f292c7bdf114a2d10a4c444682fafdf27ea563a840dd045",
+    "bytes": 3194
+  },
+  "05_REQUIREMENT_EVIDENCE_GRAPH.md": {
+    "sha256": "c7059b94bac417fa7b90999dc14c26f1a8c083d57eada6f9d6ffa8a69f807694",
+    "bytes": 2226
+  },
+  "06_EXECUTION_WATCHDOG_RECOVERY.md": {
+    "sha256": "eb9a996b4c2a000617e9f92b5857c430f725e660ab3934605d9b0a5584ab04ad",
+    "bytes": 2944
+  },
+  "07_SUBSCRIPTIONS_TEAMS_ADMIN.md": {
+    "sha256": "64c6ca23afd9e7ed76f9a6603664938928f126732aa2ef3fe366db51da832fd2",
+    "bytes": 2791
+  },
+  "08_FEATURE_REGISTER_144.md": {
+    "sha256": "41feab5bc7760127e5dea875b7e65958a91296d7bf1d7e76d29ab045583aa78c",
+    "bytes": 7758
+  },
+  "09_IMPLEMENTATION_PHASES.md": {
+    "sha256": "4c8a7f67f2d2a9ce9700bf1b733908bb8b23a43e05a43054d8f93171c5971f3a",
+    "bytes": 5240
+  },
+  "10_VERIFICATION_AND_RELEASE_GATES.md": {
+    "sha256": "8a78f70fa1cf267dbc5243a1d14b6e30b8ef757581cb98ba9707beb8569fd8db",
+    "bytes": 3384
+  },
+  "11_COMPETITIVE_POSITIONING.md": {
+    "sha256": "faae151382d9b8830cf027c2fd9d338d3ed6f0154873fac294740bbc32a4341f",
+    "bytes": 1874
+  },
+  "12_BRAND_AND_HERO.md": {
+    "sha256": "cb973be178c4c5389902b71033814f86b5d347cb9c08a56c0b8a72e0fccbe1e9",
+    "bytes": 2517
+  },
+  "README.md": {
+    "sha256": "e90f9d25ef8a1f99503f968522b5566faf246f548b94650be75f75cdfad803cc",
+    "bytes": 2813
+  },
+  "RELINTOR_MASTER_SPEC.md": {
+    "sha256": "d7413ba40fe30d67b2c2768829385db26118e99b92dacc1fd50c54517a16f194",
+    "bytes": 52823
+  },
+  "feature-register.json": {
+    "sha256": "ec66e25d15b378202c66670f2cd99e007a97fc8b0256f408fca926e8d865a05f",
+    "bytes": 21840
+  },
+  "hero-prototype.html": {
+    "sha256": "d78c6cc1d5a8b8818ca44b045bc82456277f7270d78507df3aa3cd7fb746d7ca",
+    "bytes": 6558
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "registry_id": "relintor-professional-standards",
+  "registry_version": 1,
+  "registry_digest": "71ba3888da412815e1a837ad4e201911e2600055f4970f5c331cdcdeacb80a1d",
+  "signer_key_id": "relintor-production-2026",
+  "algorithm": "Ed25519",
+  "public_key": "QwRr/kCSs+lJlOraFdzCDYqqB7ZY/TlU644O+4vcpd4=",
+  "signature": "eubtNWk6HASCN7RaYFV9YDyiqRG8PnrHSMmtkwNcmpAio4FGBHkkXB6RMcig7dixZCQQtk7I/DyKkpFTJ++WCQ=="
+}

@@ -1,0 +1,43 @@
+:root { font-family: Georgia, serif; color: #40352d; background: #f5f1e6; --paper: #fffcf5; --ink: #40352d; --muted: #766451; --line: #d7cbb5; --accent: #af8256; }
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: var(--paper); }
+a { color: inherit; }
+a:focus-visible { outline: 3px solid #6c4a30; outline-offset: 4px; }
+.site-shell { max-width: 1240px; margin: auto; padding: 0 34px; }
+.site-nav { display: flex; justify-content: space-between; align-items: center; gap: 20px; min-height: 102px; border-bottom: 1px solid var(--line); }
+.site-nav > div { display: flex; align-items: center; gap: 24px; font-size: 14px; }
+.wordmark { display: flex; align-items: center; width: 112px; height: 80px; overflow: hidden; text-decoration: none; }
+.brand-logo { display: block; width: 100%; height: 100%; object-fit: contain; border-radius: 3px; }
+.nav-cta { padding: 9px 13px; border: 1px solid var(--ink); text-decoration: none; }
+.hero { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(260px, .8fr); align-items: center; gap: 70px; padding: 110px 0 90px; }
+.eyebrow { margin: 0 0 20px; color: var(--muted); font: 11px "Courier New", monospace; letter-spacing: .13em; }
+h1, h2, h3, p { margin-top: 0; }
+h1 { max-width: 760px; margin-bottom: 24px; font-size: clamp(48px, 7vw, 88px); line-height: .98; letter-spacing: -.055em; font-weight: 500; }
+.hero-lede { max-width: 650px; color: var(--muted); font-size: 19px; line-height: 1.7; }
+.hero-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; }
+.button { display: inline-block; padding: 13px 17px; text-decoration: none; border: 1px solid var(--ink); }
+.button-dark { color: #f5f1e6; background: var(--ink); }
+.button-light { background: transparent; }
+.download-note { margin: 12px 0 0; color: var(--muted); font: 11px "Courier New", monospace; letter-spacing: .06em; text-transform: uppercase; }
+.truth-note { margin: 22px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.hero-object { display: grid; align-content: space-between; min-height: 360px; padding: 22px; color: #f5f1e6; background: #614b3d; box-shadow: 12px 14px 0 #d4c8aa; transform: rotate(3deg); font-family: "Courier New", monospace; }
+.hero-object span { font-size: 11px; letter-spacing: .1em; }
+.hero-object strong { font-size: clamp(34px, 5vw, 56px); line-height: .9; letter-spacing: .04em; }
+.hero-object small { font-size: 11px; }
+.proof-strip { display: flex; flex-wrap: wrap; gap: 20px 34px; padding: 19px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); color: var(--muted); font: 11px "Courier New", monospace; letter-spacing: .05em; text-transform: uppercase; }
+.proof-strip span::before { content: "✓"; color: var(--accent); margin-right: 7px; }
+.workflow { padding: 100px 0 80px; }
+.workflow h2, .audience-grid h2 { max-width: 600px; font-size: clamp(32px, 5vw, 56px); line-height: 1; letter-spacing: -.04em; font-weight: 500; }
+.workflow-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 45px; }
+.workflow-grid article { padding: 20px; border-top: 2px solid var(--ink); }
+.workflow-grid b { color: var(--accent); font: 18px "Courier New", monospace; }
+.workflow-grid h3 { margin: 28px 0 10px; font-size: 20px; }
+.workflow-grid p, .audience-grid p { color: var(--muted); line-height: 1.65; }
+.audience-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; padding-bottom: 100px; }
+.audience-grid > div { padding: 34px; background: #eee6d8; }
+.text-link { display: inline-block; margin-top: 12px; font-weight: 700; }
+.footer-brand-logo { display: block; width: 98px; height: 70px; object-fit: contain; border-radius: 3px; }
+footer { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 25px 0 40px; border-top: 1px solid var(--line); color: var(--muted); font: 11px "Courier New", monospace; letter-spacing: .06em; text-transform: uppercase; }
+@media (max-width: 760px) { .site-shell { padding: 0 20px; } .site-nav > div a:not(.nav-cta) { display: none; } .hero { grid-template-columns: 1fr; gap: 44px; padding: 70px 0 60px; } .hero-object { min-height: 260px; } .workflow-grid, .audience-grid { grid-template-columns: 1fr; } footer { flex-direction: column; } }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }

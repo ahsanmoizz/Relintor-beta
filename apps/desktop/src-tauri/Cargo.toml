@@ -1,0 +1,51 @@
+[package]
+name = "relintor-desktop"
+version = "0.1.0"
+description = "Relintor desktop authority shell"
+authors = ["Relintor"]
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "relintor_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+ed25519-dalek = "2"
+rand = "0.10"
+
+relintor-antigravity = { path = "../../../crates/relintor-antigravity" }
+relintor-core = { path = "../../../crates/relintor-core" }
+relintor-distribution = { path = "../../../crates/relintor-distribution" }
+relintor-evidence = { path = "../../../crates/relintor-evidence", default-features = false }
+relintor-execution = { path = "../../../crates/relintor-execution" }
+relintor-investigator = { path = "../../../crates/relintor-investigator" }
+relintor-standards = { path = "../../../crates/relintor-standards" }
+relintor-takeover = { path = "../../../crates/relintor-takeover" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-updater = "2"
+url = "2"
+
+# Relintor Windows ARM64:
+# reqwest's "rustls" feature selects AWS-LC.
+# ARM64 uses Rustls + ring instead to avoid aws-lc-sys native build.
+[target.'cfg(all(target_os = "windows", target_arch = "aarch64"))'.dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+
+# Existing behavior for every other target.
+[target.'cfg(not(all(target_os = "windows", target_arch = "aarch64")))'.dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl"] }

@@ -1,0 +1,17 @@
+{
+  "package": "Relintor P8 Independent Source Audit Gate",
+  "verdict": "MILESTONE_8_REPAIR_REQUIRED",
+  "p9_must_not_start": true,
+  "findings": [
+    "P8-IA-01 P8 is not wired into desktop/Tauri product path",
+    "P8-IA-02 caller-created metadata can manufacture strong PASS evidence",
+    "P8-IA-03 caller-mutated VerificationReport can be certified",
+    "P8-IA-04 P8 does not authenticate the actual P7 execution ledger",
+    "P8-IA-05 invalidation tombstones are unauthenticated/deletable",
+    "P8-IA-06 H-05..H-09 are observation DTOs rather than collectors",
+    "P8-IA-07 AI verifier is not production-wired/integrated into completion",
+    "P8-IA-08 non-machine acceptance criteria can disappear",
+    "P8-IA-09 N/A/deferred incorrectly imply accepted-risk completion",
+    "P8-IA-10 impact-based invalidation is disconnected from freshness"
+  ]
+}

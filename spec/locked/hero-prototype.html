@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Relintor — Don't trust done. Prove it.</title>
+<style>
+:root {
+  --card: #fffcf5; --ring: #a67c52; --input: #dbd0ba; --muted: #ece5d8;
+  --accent: #d4c8aa; --border: #dbd0ba; --radius: .25rem; --primary: #a67c52;
+  --sidebar: #ece5d8; --secondary: #e2d8c3; --background: #f5f1e6;
+  --foreground: #4a3f35; --destructive: #b54a35; --muted-foreground: #7d6b56;
+  --shadow-color: rgba(62,48,38,.12);
+}
+* { box-sizing:border-box }
+body { margin:0; background:var(--background); color:var(--foreground);
+  font-family: Georgia, "Times New Roman", serif; }
+.wrap { max-width:1180px; margin:0 auto; padding:0 28px; }
+nav { height:76px; display:flex; align-items:center; justify-content:space-between;
+  border-bottom:1px solid var(--border); }
+.brand { font-weight:700; letter-spacing:.08em; font-size:18px }
+.nav-right { display:flex; align-items:center; gap:18px; font-size:14px }
+.pill { border:1px solid var(--border); padding:10px 14px; border-radius:999px; background:var(--card) }
+.hero { min-height:calc(100vh - 76px); display:grid; grid-template-columns:1.06fr .94fr; gap:56px;
+  align-items:center; padding:72px 0 88px; }
+.eyebrow { font-family:"Courier New", monospace; font-size:12px; letter-spacing:.13em; color:var(--muted-foreground);
+  margin-bottom:22px; }
+h1 { font-size:clamp(48px,6vw,82px); line-height:.98; letter-spacing:-.045em; margin:0 0 24px; font-weight:500; }
+h1 strong { color:var(--primary); font-weight:700 }
+.lede { max-width:690px; font-size:19px; line-height:1.7; color:var(--muted-foreground); }
+.actions { display:flex; gap:12px; flex-wrap:wrap; margin:32px 0 36px }
+button { font:inherit; border-radius:var(--radius); padding:13px 18px; border:1px solid var(--foreground); cursor:pointer; }
+.primary { background:var(--foreground); color:var(--background); box-shadow:3px 4px 0 var(--accent); }
+.secondary { background:transparent; color:var(--foreground); }
+.proofline { display:flex; flex-wrap:wrap; gap:10px 18px; font-family:"Courier New",monospace;
+  font-size:12px; color:var(--muted-foreground); }
+.proofline span::before { content:"✓ "; color:var(--primary); font-weight:bold }
+.machine { background:var(--card); border:1px solid var(--border); border-radius:var(--radius);
+  box-shadow:8px 10px 0 var(--shadow-color); overflow:hidden; }
+.machine-head { display:flex; justify-content:space-between; padding:12px 14px; border-bottom:1px solid var(--border);
+  font-family:"Courier New",monospace; font-size:11px; color:var(--muted-foreground); background:var(--muted); }
+.ascii { margin:0; padding:30px; font:14px/1.55 "Courier New", monospace; white-space:pre; overflow:auto; min-height:415px; }
+.status { border-top:1px solid var(--border); padding:16px 18px; display:grid; grid-template-columns:1fr auto; gap:12px;
+  font-family:"Courier New",monospace; font-size:12px; }
+.good { color:#6d5b3c; font-weight:700 }
+.lower { border-top:1px solid var(--border); padding:22px 0 34px; display:grid; grid-template-columns:repeat(3,1fr); gap:18px; }
+.card { border-left:1px solid var(--border); padding:4px 20px; }
+.card:first-child { border-left:0; padding-left:0 }
+.card b { display:block; margin-bottom:7px; font-size:15px }
+.card p { margin:0; color:var(--muted-foreground); line-height:1.55; font-size:14px }
+@media(max-width:850px) {
+  .hero { grid-template-columns:1fr; padding-top:46px }
+  .nav-right a { display:none }
+  .lower { grid-template-columns:1fr }
+  .card, .card:first-child { border-left:0; border-top:1px solid var(--border); padding:18px 0 0 }
+}
+@media(prefers-reduced-motion:no-preference) {
+  .machine { animation:rise .7s ease-out both }
+  @keyframes rise { from { transform:translateY(14px); opacity:.3 } to { transform:none; opacity:1 } }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav>
+  <div class="brand">RELINTOR</div>
+  <div class="nav-right">
+    <a>How it works</a><a>Proof</a><a>Pricing</a>
+    <span class="pill">Guardian active ●</span>
+  </div>
+</nav>
+<section class="hero">
+  <div>
+    <div class="eyebrow">EXECUTION AUTHORITY FOR AI-BUILT SOFTWARE</div>
+    <h1>Your AI can say it finished.<br><strong>Relintor makes it prove it.</strong></h1>
+    <p class="lede">Describe a product or hand Relintor an existing codebase. It finds the missing engineering decisions, seals the requirements, supervises Antigravity, and refuses completion until the evidence matches the promise.</p>
+    <div class="actions">
+      <button class="primary">Build with Relintor</button>
+      <button class="secondary">Take over a project</button>
+    </div>
+    <div class="proofline">
+      <span>Requirements accounted</span><span>Evidence attached</span>
+      <span>Safe recovery</span><span>No API keys</span>
+    </div>
+  </div>
+  <div class="machine">
+    <div class="machine-head"><span>mission://checkout-redesign</span><span>SEALED</span></div>
+<pre class="ascii">
+          HUMAN INTENT
+               │
+               ▼
+      ┌──────────────────┐
+      │  SEALED MISSION  │
+      │  38 requirements │
+      └────────┬─────────┘
+               │
+          ┌────▼────┐
+          │  BUILD  │  Antigravity
+          └────┬────┘
+               │
+      ┌────────▼─────────┐
+      │     EVIDENCE     │
+      │ build  ✓         │
+      │ tests  ✓         │
+      │ runtime ...      │
+      └────────┬─────────┘
+               │
+           ┌───▼───┐
+           │ PROVE │
+           └───┬───┘
+               │
+               ▼
+        VERIFIED COMPLETE
+              ✓
+</pre>
+    <div class="status"><span>requirements 38/38 · unknown 0 · failed 0</span><span class="good">PROOF VALID</span></div>
+  </div>
+</section>
+<section class="lower">
+ <div class="card"><b>It investigates first.</b><p>The user does not need to already know the architecture, security, SEO, testing, or deployment questions.</p></div>
+ <div class="card"><b>The agent cannot grade itself.</b><p>Implementation and verification are separated. Deterministic failure always outranks AI opinion.</p></div>
+ <div class="card"><b>Stopping does not destroy truth.</b><p>Emergency stop checkpoints the mission and records exactly what remains incomplete.</p></div>
+</section>
+</div>
+</body>
+</html>

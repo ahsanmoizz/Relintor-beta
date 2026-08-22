@@ -1,0 +1,389 @@
+$ tauri "build" "--target" "aarch64-pc-windows-msvc" "--bundles" "nsis"
+        Info Looking up installed tauri packages to check mismatched versions...
+     Running beforeBuildCommand `pnpm build`
+$ tsc -b && vite build
+[36mvite v7.3.6 [32mbuilding client environment for production...[36m[39m
+transforming...
+[32m✓[39m 32 modules transformed.
+rendering chunks...
+computing gzip size...
+[2mdist/[22m[32mindex.html                 [39m[1m[2m  0.48 kB[22m[1m[22m[2m │ gzip:  0.31 kB[22m
+[2mdist/[22m[35massets/index-D55yr7TT.css  [39m[1m[2m 16.24 kB[22m[1m[22m[2m │ gzip:  3.91 kB[22m
+[2mdist/[22m[36massets/index-BYJepkKn.js   [39m[1m[2m243.94 kB[22m[1m[22m[2m │ gzip: 74.71 kB[22m
+[32m✓ built in 1.16s[39m
+   Compiling aws-lc-sys v0.44.0
+warning: aws-lc-sys@0.44.0: Environment Variable found 'AWS_LC_SYS_CMAKE_BUILDER': '1'
+warning: aws-lc-sys@0.44.0: Value: 1 is true.
+warning: aws-lc-sys@0.44.0: Environment Variable found 'CARGO_ENCODED_RUSTFLAGS': ''
+warning: aws-lc-sys@0.44.0: Emitting configuration: cargo:rustc-cfg=universal
+warning: aws-lc-sys@0.44.0: Building with: CMake
+warning: aws-lc-sys@0.44.0: Symbol Prefix: Some("aws_lc_0_44_0")
+warning: aws-lc-sys@0.44.0: Environment Variable found 'CMAKE': 'cmake'
+warning: aws-lc-sys@0.44.0: CMAKE environment variable set: cmake
+warning: aws-lc-sys@0.44.0: Target platform: 'aarch64-pc-windows-msvc'
+warning: aws-lc-sys@0.44.0: Environment Variable found 'AWS_LC_SYS_CMAKE_GENERATOR': 'Ninja'
+warning: aws-lc-sys@0.44.0: Environment Variable found 'CMAKE_GENERATOR': 'Ninja'
+warning: aws-lc-sys@0.44.0: Setting CMAKE_GENERATOR: Ninja
+warning: aws-lc-sys@0.44.0: Environment Variable found 'AWS_LC_SYS_TARGET_CC': 'D:\Relintor-tooling\LLVM\bin\clang-cl.exe'
+warning: aws-lc-sys@0.44.0: Environment Variable found 'TARGET_CC': 'D:\Relintor-tooling\LLVM\bin\clang-cl.exe'
+warning: aws-lc-sys@0.44.0: Environment Variable found 'CC_aarch64_pc_windows_msvc': 'D:\Relintor-tooling\LLVM\bin\clang-cl.exe'
+warning: aws-lc-sys@0.44.0: Setting CC_aarch64_pc_windows_msvc: D:\Relintor-tooling\LLVM\bin\clang-cl.exe
+warning: aws-lc-sys@0.44.0: Environment Variable found 'AWS_LC_SYS_TARGET_CXX': 'D:\Relintor-tooling\LLVM\bin\clang-cl.exe'
+warning: aws-lc-sys@0.44.0: Environment Variable found 'TARGET_CXX': 'D:\Relintor-tooling\LLVM\bin\clang-cl.exe'
+warning: aws-lc-sys@0.44.0: Environment Variable found 'CXX_aarch64_pc_windows_msvc': 'D:\Relintor-tooling\LLVM\bin\clang-cl.exe'
+warning: aws-lc-sys@0.44.0: Setting CXX_aarch64_pc_windows_msvc: D:\Relintor-tooling\LLVM\bin\clang-cl.exe
+warning: aws-lc-sys@0.44.0: Environment Variable found 'CMAKE_GENERATOR': 'Ninja'
+error: failed to run custom build command for `aws-lc-sys v0.44.0`
+
+Caused by:
+  process didn't exit successfully: `D:\Relintor\target\release\build\aws-lc-sys-410b386b8f065bee\build-script-main` (exit code: 101)
+  --- stdout
+  cargo:rerun-if-env-changed=AWS_LC_SYS_NO_PREFIX_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_NO_PREFIX
+  cargo:rerun-if-env-changed=AWS_LC_SYS_PREGENERATING_BINDINGS_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_PREGENERATING_BINDINGS
+  cargo:rerun-if-env-changed=AWS_LC_SYS_EXTERNAL_BINDGEN_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_EXTERNAL_BINDGEN
+  cargo:rerun-if-env-changed=AWS_LC_SYS_NO_ASM_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_NO_ASM
+  cargo:rerun-if-env-changed=AWS_LC_SYS_PREBUILT_NASM_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_PREBUILT_NASM
+  cargo:rerun-if-env-changed=AWS_LC_SYS_C_STD_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_C_STD
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CMAKE_BUILDER_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CMAKE_BUILDER
+  cargo:warning=Environment Variable found 'AWS_LC_SYS_CMAKE_BUILDER': '1'
+  cargo:warning=Value: 1 is true.
+  cargo:rerun-if-env-changed=AWS_LC_SYS_NO_PREGENERATED_SRC_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_NO_PREGENERATED_SRC
+  cargo:rerun-if-env-changed=AWS_LC_SYS_SMALL_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_SMALL
+  cargo:rerun-if-env-changed=AWS_LC_SYS_EFFECTIVE_TARGET_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_EFFECTIVE_TARGET
+  cargo:rerun-if-env-changed=AWS_LC_SYS_NO_JITTER_ENTROPY_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_NO_JITTER_ENTROPY
+  cargo:rerun-if-env-changed=AWS_LC_SYS_NO_U1_BINDINGS_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_NO_U1_BINDINGS
+  cargo:rerun-if-env-changed=AWS_LC_SYS_INCLUDES_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_INCLUDES
+  cargo:rerun-if-env-changed=AWS_LC_SYS_SANITIZER_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_SANITIZER
+  cargo:rerun-if-env-changed=AWS_LC_SYS_LINK_WHOLE_ARCHIVE_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_LINK_WHOLE_ARCHIVE
+  cargo:rerun-if-env-changed=AWS_LC_SYS_STATIC_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_STATIC
+  cargo:rerun-if-env-changed=AWS_LC_SYS_SYSTEM_DIR_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_SYSTEM_DIR
+  cargo:rerun-if-env-changed=AWS_LC_SYS_USE_SYSTEM_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_USE_SYSTEM
+  cargo:rerun-if-env-changed=AWS_LC_SYS_SYSTEM_BINDINGS_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_SYSTEM_BINDINGS
+  cargo:rerun-if-env-changed=AWS_LC_SYS_SYSTEM_SKIP_VERSION_CHECK_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_SYSTEM_SKIP_VERSION_CHECK
+  cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS
+  cargo:warning=Environment Variable found 'CARGO_ENCODED_RUSTFLAGS': ''
+  cargo:warning=Emitting configuration: cargo:rustc-cfg=universal
+  cargo:rustc-cfg=universal
+  cargo:rerun-if-env-changed=OPENSSL_DIR_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=OPENSSL_DIR
+  cargo:rerun-if-env-changed=OPENSSL_INCLUDE_DIR_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=OPENSSL_INCLUDE_DIR
+  cargo:rerun-if-env-changed=OPENSSL_LIB_DIR_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=OPENSSL_LIB_DIR
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CMAKE_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CMAKE
+  cargo:rerun-if-env-changed=CMAKE_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=CMAKE
+  cargo:warning=Building with: CMake
+  cargo:warning=Symbol Prefix: Some("aws_lc_0_44_0")
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CMAKE_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CMAKE
+  cargo:rerun-if-env-changed=CMAKE_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=CMAKE
+  cargo:warning=Environment Variable found 'CMAKE': 'cmake'
+  cargo:warning=CMAKE environment variable set: cmake
+  cargo:warning=Target platform: 'aarch64-pc-windows-msvc'
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CMAKE_GENERATOR_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CMAKE_GENERATOR
+  cargo:warning=Environment Variable found 'AWS_LC_SYS_CMAKE_GENERATOR': 'Ninja'
+  cargo:rerun-if-env-changed=CMAKE_GENERATOR_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=CMAKE_GENERATOR
+  cargo:warning=Environment Variable found 'CMAKE_GENERATOR': 'Ninja'
+  cargo:warning=Setting CMAKE_GENERATOR: Ninja
+  cargo:rerun-if-env-changed=AWS_LC_SYS_TARGET_CFLAGS_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_TARGET_CFLAGS
+  cargo:rerun-if-env-changed=TARGET_CFLAGS_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=TARGET_CFLAGS
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CFLAGS_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CFLAGS
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=CFLAGS
+  cargo:rerun-if-env-changed=AWS_LC_SYS_TARGET_CFLAGS_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_TARGET_CFLAGS
+  cargo:rerun-if-env-changed=TARGET_CFLAGS_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=TARGET_CFLAGS
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CFLAGS_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CFLAGS
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=CFLAGS
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CMAKE_TOOLCHAIN_FILE_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CMAKE_TOOLCHAIN_FILE
+  cargo:rerun-if-env-changed=CMAKE_TOOLCHAIN_FILE_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=CMAKE_TOOLCHAIN_FILE
+  cargo:rerun-if-env-changed=VCINSTALLDIR
+  VCINSTALLDIR = Some(D:\DevTools\VSBuildTools\VC\)
+  cargo:rerun-if-env-changed=VSCMD_ARG_TGT_ARCH
+  VSCMD_ARG_TGT_ARCH = Some(arm64)
+  PATH = Some(D:\Relintor\target\release;D:\Relintor\target\release\deps;D:\Relintor-rustup\toolchains\1.96.0-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;D:\Relintor\apps\desktop\node_modules\.bin;C:\Users\A\AppData\Roaming\npm\node_modules\pnpm\dist\node-gyp-bin;D:\Relintor\node_modules\.bin;D:\Relintor-tooling\LLVM\bin;D:\DevTools\VSBuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;D:\DevTools\VSBuildTools\VC\Tools\MSVC\14.44.35207\bin\HostX64\ARM64;D:\DevTools\VSBuildTools\VC\Tools\MSVC\14.44.35207\bin\HostX64\x64;D:\DevTools\VSBuildTools\Common7\IDE\VC\VCPackages;D:\DevTools\VSBuildTools\Common7\IDE\CommonExtensions\Microsoft\TestWindow;D:\DevTools\VSBuildTools\MSBuild\Current\bin\Roslyn;D:\DevTools\VSBuildTools\Team Tools\DiagnosticsHub\Collector;D:\DevTools\VSBuildTools\Common7\IDE\Extensions\Microsoft\CodeCoverage.Console;C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\\x64;C:\Program Files (x86)\Windows Kits\10\bin\\x64;D:\DevTools\VSBuildTools\\MSBuild\Current\Bin\amd64;C:\Windows\Microsoft.NET\Framework64\v4.0.30319;D:\DevTools\VSBuildTools\Common7\IDE\;D:\DevTools\VSBuildTools\Common7\Tools\;D:\Relintor-tooling\LLVM\bin;D:\DevTools\VSBuildTools\VC\Tools\MSVC\14.44.35207\bin\HostX64\ARM64;D:\DevTools\VSBuildTools\VC\Tools\MSVC\14.44.35207\bin\HostX64\x64;D:\DevTools\VSBuildTools\Common7\IDE\VC\VCPackages;D:\DevTools\VSBuildTools\Common7\IDE\CommonExtensions\Microsoft\TestWindow;D:\DevTools\VSBuildTools\MSBuild\Current\bin\Roslyn;D:\DevTools\VSBuildTools\Team Tools\DiagnosticsHub\Collector;D:\DevTools\VSBuildTools\Common7\IDE\Extensions\Microsoft\CodeCoverage.Console;C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\\x64;C:\Program Files (x86)\Windows Kits\10\bin\\x64;D:\DevTools\VSBuildTools\\MSBuild\Current\Bin\amd64;C:\Windows\Microsoft.NET\Framework64\v4.0.30319;D:\DevTools\VSBuildTools\Common7\IDE\;D:\DevTools\VSBuildTools\Common7\Tools\;D:\Relintor-tooling\LLVM\bin;D:\Relintor-rustup\toolchains\1.96.0-x86_64-pc-windows-msvc\bin;D:\Relintor-cargo-home\bin;D:\DevTools\VSBuildTools\VC\Tools\MSVC\14.44.35207\bin\HostX64\ARM64;D:\DevTools\VSBuildTools\VC\Tools\MSVC\14.44.35207\bin\HostX64\x64;D:\DevTools\VSBuildTools\Common7\IDE\VC\VCPackages;D:\DevTools\VSBuildTools\Common7\IDE\CommonExtensions\Microsoft\TestWindow;D:\DevTools\VSBuildTools\MSBuild\Current\bin\Roslyn;D:\DevTools\VSBuildTools\Team Tools\DiagnosticsHub\Collector;D:\DevTools\VSBuildTools\Common7\IDE\Extensions\Microsoft\CodeCoverage.Console;C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\\x64;C:\Program Files (x86)\Windows Kits\10\bin\\x64;D:\DevTools\VSBuildTools\\MSBuild\Current\Bin\amd64;C:\Windows\Microsoft.NET\Framework64\v4.0.30319;D:\DevTools\VSBuildTools\Common7\IDE\;D:\DevTools\VSBuildTools\Common7\Tools\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\nodejs\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Users\A\AppData\Local\Programs\Python\Python312\Scripts\;C:\Users\A\AppData\Local\Programs\Python\Python312\;C:\Users\A\AppData\Local\Programs\Python\Launcher\;C:\Users\A\.cargo\bin;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Users\A\AppData\Local\Microsoft\WindowsApps;C:\Program Files\nodejs;C:\Users\A\AppData\Local\Programs\Microsoft VS Code\bin;D:\Antigravity\bin;C:\Users\A\AppData\Roaming\npm;D:\Windsurf\bin;D:\Kiro\bin;C:\msys64\ucrt64\bin;;C:\Users\A\AppData\Local\Onus\bin;D:\DevTools\VSBuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;D:\DevTools\VSBuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;D:\DevTools\VSBuildTools\Common7\IDE\VC\Linux\bin\ConnectionManagerExe;D:\DevTools\VSBuildTools\VC\vcpkg;D:\DevTools\VSBuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;D:\DevTools\VSBuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;D:\DevTools\VSBuildTools\Common7\IDE\VC\Linux\bin\ConnectionManagerExe;D:\DevTools\VSBuildTools\VC\vcpkg;D:\DevTools\VSBuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;D:\DevTools\VSBuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;D:\DevTools\VSBuildTools\Common7\IDE\VC\Linux\bin\ConnectionManagerExe;D:\DevTools\VSBuildTools\VC\vcpkg)
+  cargo:rerun-if-env-changed=CC_aarch64-pc-windows-msvc
+  CC_aarch64-pc-windows-msvc = None
+  cargo:rerun-if-env-changed=CC_aarch64_pc_windows_msvc
+  CC_aarch64_pc_windows_msvc = Some(D:\Relintor-tooling\LLVM\bin\clang-cl.exe)
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=TARGET_CFLAGS
+  TARGET_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_pc_windows_msvc
+  CFLAGS_aarch64_pc_windows_msvc = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-pc-windows-msvc
+  CFLAGS_aarch64-pc-windows-msvc = None
+  cargo:rerun-if-env-changed=AWS_LC_SYS_TARGET_CC_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_TARGET_CC
+  cargo:warning=Environment Variable found 'AWS_LC_SYS_TARGET_CC': 'D:\Relintor-tooling\LLVM\bin\clang-cl.exe'
+  cargo:rerun-if-env-changed=TARGET_CC_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=TARGET_CC
+  cargo:warning=Environment Variable found 'TARGET_CC': 'D:\Relintor-tooling\LLVM\bin\clang-cl.exe'
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CC_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CC
+  cargo:rerun-if-env-changed=CC_aarch64_pc_windows_msvc
+  cargo:warning=Environment Variable found 'CC_aarch64_pc_windows_msvc': 'D:\Relintor-tooling\LLVM\bin\clang-cl.exe'
+  cargo:rerun-if-env-changed=CC
+  cargo:warning=Setting CC_aarch64_pc_windows_msvc: D:\Relintor-tooling\LLVM\bin\clang-cl.exe
+  cargo:rerun-if-env-changed=AWS_LC_SYS_TARGET_CXX_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_TARGET_CXX
+  cargo:warning=Environment Variable found 'AWS_LC_SYS_TARGET_CXX': 'D:\Relintor-tooling\LLVM\bin\clang-cl.exe'
+  cargo:rerun-if-env-changed=TARGET_CXX_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=TARGET_CXX
+  cargo:warning=Environment Variable found 'TARGET_CXX': 'D:\Relintor-tooling\LLVM\bin\clang-cl.exe'
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CXX_aarch64_pc_windows_msvc
+  cargo:rerun-if-env-changed=AWS_LC_SYS_CXX
+  cargo:rerun-if-env-changed=CXX_aarch64_pc_windows_msvc
+  cargo:warning=Environment Variable found 'CXX_aarch64_pc_windows_msvc': 'D:\Relintor-tooling\LLVM\bin\clang-cl.exe'
+  cargo:rerun-if-env-changed=CXX
+  cargo:warning=Setting CXX_aarch64_pc_windows_msvc: D:\Relintor-tooling\LLVM\bin\clang-cl.exe
+  cargo:rerun-if-env-changed=CMAKE_GENERATOR
+  cargo:warning=Environment Variable found 'CMAKE_GENERATOR': 'Ninja'
+  CMAKE_TOOLCHAIN_FILE_aarch64-pc-windows-msvc = None
+  CMAKE_TOOLCHAIN_FILE_aarch64_pc_windows_msvc = None
+  TARGET_CMAKE_TOOLCHAIN_FILE = None
+  CMAKE_TOOLCHAIN_FILE = None
+  CMAKE_GENERATOR_aarch64-pc-windows-msvc = None
+  CMAKE_GENERATOR_aarch64_pc_windows_msvc = None
+  TARGET_CMAKE_GENERATOR = None
+  CMAKE_GENERATOR = Some("Ninja")
+  CMAKE_PREFIX_PATH_aarch64-pc-windows-msvc = None
+  CMAKE_PREFIX_PATH_aarch64_pc_windows_msvc = None
+  TARGET_CMAKE_PREFIX_PATH = None
+  CMAKE_PREFIX_PATH = None
+  CMAKE_aarch64-pc-windows-msvc = None
+  CMAKE_aarch64_pc_windows_msvc = None
+  TARGET_CMAKE = None
+  CMAKE = Some("cmake")
+  Not searching for unused variables given on the command line.
+  -- The C compiler identification is Clang 22.1.8 with MSVC-like command-line
+  -- Detecting C compiler ABI info
+  -- Detecting C compiler ABI info - done
+  -- Check for working C compiler: D:/Relintor-tooling/LLVM/bin/clang-cl.exe - skipped
+  -- Detecting C compile features
+  -- Detecting C compile features - done
+  -- Versioning name:awslc version:5.5.0 abi:1
+  -- Libraries crypto:crypto
+  -- SET_LIB_SONAME: 0
+  -- COHABITANT_HEADERS: 0
+  -- COHABITANT_BINARIES: 0
+  -- INSTALL_OPENSSL_SHIM: 1
+  -- Entropy source configured: Dynamic (default: CPU Jitter)
+  -- Go not found. Disabling some code generation and using pre-generated code in generated-src/
+  -- Perl not found. Disabling some code generation and using pre-generated code in generated-src/
+  -- Prefix build configured: performing build using prefix "aws_lc_0_44_0_" and headers path "D:\Relintor-cargo-home\registry\src\index.crates.io-1949cf8c6b5b557f\aws-lc-sys-0.44.0\generated-include"
+  -- Setting CMAKE_C_STANDARD=11
+  -- Performing Test HAVE_C_FLAG__Wno_cast_function_type
+  -- Performing Test HAVE_C_FLAG__Wno_cast_function_type - Success
+  -- Compiler supports '-Wno-cast-function-type', adding to CMAKE_C_FLAGS
+  -- Performing Test HAVE_C_FLAG__Wstring_concatenation
+  -- Performing Test HAVE_C_FLAG__Wstring_concatenation - Success
+  -- Compiler supports '-Wstring-concatenation', adding to C_CXX_FLAGS
+  -- Performing Test HAVE_C_FLAG__Wimplicit_fallthrough
+  -- Performing Test HAVE_C_FLAG__Wimplicit_fallthrough - Success
+  -- Compiler supports '-Wimplicit-fallthrough', adding to C_CXX_FLAGS
+  -- linux_random_h.c probe is negative, NOT enabling HAVE_LINUX_RANDOM_H:
+  -- Use -DFEATURE_PROBE_VERBOSE=ON to view feature probe error output.
+  -- linux_random_h.c probe is negative, NOT enabling AWS_LC_URANDOM_NEEDS_U32:
+  -- Use -DFEATURE_PROBE_VERBOSE=ON to view feature probe error output.
+  -- stdalign_check.c probe is positive, enabling AWS_LC_STDALIGN_AVAILABLE
+  -- builtin_swap_check.c probe is positive, enabling AWS_LC_BUILTIN_SWAP_SUPPORTED
+  -- Performing Test HAVE_C_FLAG__Wshadow
+  -- Performing Test HAVE_C_FLAG__Wshadow - Success
+  -- Compiler supports '-Wshadow', adding to C_CXX_FLAGS
+  -- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+  -- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+  -- Looking for pthread_create in pthreads
+  -- Looking for pthread_create in pthreads - not found
+  -- Looking for pthread_create in pthread
+  -- Looking for pthread_create in pthread - not found
+  -- Found Threads: TRUE
+  -- The ASM compiler identification is Clang with MSVC-like command-line
+  -- Found assembler: D:/Relintor-tooling/LLVM/bin/clang-cl.exe
+  -- Configuring done (10.6s)
+  -- Generating done (0.3s)
+  -- Build files have been written to: D:/Relintor/target/aarch64-pc-windows-msvc/release/build/aws-lc-sys-351617cf2d0d89da/out/build
+  [1/278] Building C object aws-lc\third_party\jitterentropy\CMakeFiles\jitterentropy.dir\jitterentropy-library\src\jitterentropy-base.c.obj
+  [2/278] Building C object aws-lc\third_party\jitterentropy\CMakeFiles\jitterentropy.dir\jitterentropy-library\src\jitterentropy-gcd.c.obj
+  [3/278] Building C object aws-lc\third_party\jitterentropy\CMakeFiles\jitterentropy.dir\jitterentropy-library\src\jitterentropy-health.c.obj
+  [4/278] Building C object aws-lc\third_party\jitterentropy\CMakeFiles\jitterentropy.dir\jitterentropy-library\src\jitterentropy-noise.c.obj
+  [5/278] Building C object aws-lc\third_party\jitterentropy\CMakeFiles\jitterentropy.dir\jitterentropy-library\src\jitterentropy-sha3.c.obj
+  [6/278] Building C object aws-lc\third_party\jitterentropy\CMakeFiles\jitterentropy.dir\jitterentropy-library\src\jitterentropy-timer.c.obj
+  [7/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\a_bitstr.c.obj
+  [8/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\a_bool.c.obj
+  [9/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\a_d2i_fp.c.obj
+  [10/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\a_dup.c.obj
+  [11/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\a_gentm.c.obj
+  [12/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\a_i2d_fp.c.obj
+  [13/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\a_int.c.obj
+  [14/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\a_mbstr.c.obj
+  [15/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\a_object.c.obj
+  [16/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\a_octet.c.obj
+  [17/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\a_strex.c.obj
+  [18/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\a_strnid.c.obj
+  [19/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\a_time.c.obj
+  [20/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\a_type.c.obj
+  [21/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\a_utctm.c.obj
+  [22/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\a_utf8.c.obj
+  [23/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\asn1_lib.c.obj
+  [24/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\asn1_par.c.obj
+  [25/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\asn_pack.c.obj
+  [26/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\f_int.c.obj
+  [27/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\f_string.c.obj
+  [28/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\tasn_dec.c.obj
+  [29/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\tasn_enc.c.obj
+  [30/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\tasn_fre.c.obj
+  [31/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\tasn_new.c.obj
+  [32/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\tasn_typ.c.obj
+  [33/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\tasn_utl.c.obj
+  [34/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\asn1\posix_time.c.obj
+  [35/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\base64\base64.c.obj
+  [36/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\bio\bio.c.obj
+  [37/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\bio\bio_addr.c.obj
+  [38/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\bio\bio_mem.c.obj
+  [39/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\bio\connect.c.obj
+  [40/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\bio\dgram.c.obj
+  [41/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\bio\errno.c.obj
+  [42/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\bio\fd.c.obj
+  [43/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\bio\file.c.obj
+  [44/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\bio\hexdump.c.obj
+  [45/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\bio\md.c.obj
+  [46/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\bio\pair.c.obj
+  [47/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\bio\printf.c.obj
+  [48/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\bio\socket.c.obj
+  [49/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\bio\socket_helper.c.obj
+  [50/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\blake2\blake2.c.obj
+  [51/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\bn_extra\bn_asn1.c.obj
+  [52/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\bn_extra\convert.c.obj
+  [53/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\buf\buf.c.obj
+  [54/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\bytestring\asn1_compat.c.obj
+  [55/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\bytestring\ber.c.obj
+  [56/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\bytestring\cbb.c.obj
+  [57/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\bytestring\cbs.c.obj
+  [58/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\bytestring\unicode.c.obj
+  [59/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\chacha\chacha.c.obj
+  [60/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\cipher_extra\cipher_extra.c.obj
+  [61/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\cipher_extra\cts.c.obj
+  [62/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\cipher_extra\derive_key.c.obj
+  [63/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\cipher_extra\e_aesctrhmac.c.obj
+  [64/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\cipher_extra\e_aesgcmsiv.c.obj
+  [65/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\cipher_extra\e_chacha20poly1305.c.obj
+  [66/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\cipher_extra\e_aes_cbc_hmac_sha1.c.obj
+  [67/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\cipher_extra\e_aes_cbc_hmac_sha256.c.obj
+  [68/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\cipher_extra\e_des.c.obj
+  [69/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\cipher_extra\e_null.c.obj
+  [70/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\cipher_extra\e_rc2.c.obj
+  [71/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\cipher_extra\e_rc4.c.obj
+  [72/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\cipher_extra\e_tls.c.obj
+  [73/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\cipher_extra\tls_cbc.c.obj
+  [74/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\conf\conf.c.obj
+  [75/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\console\console.c.obj
+  [76/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\crypto.c.obj
+  [77/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\des\des.c.obj
+  [78/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\dh_extra\params.c.obj
+  [79/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\dh_extra\dh_asn1.c.obj
+  [80/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\digest_extra\digest_extra.c.obj
+  [81/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\dsa\dsa.c.obj
+  [82/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\dsa\dsa_asn1.c.obj
+  [83/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\ecdh_extra\ecdh_extra.c.obj
+  [84/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\ecdsa_extra\ecdsa_asn1.c.obj
+  [85/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\ec_extra\ec_asn1.c.obj
+  [86/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\ec_extra\ec_derive.c.obj
+  [87/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\ec_extra\hash_to_curve.c.obj
+  [88/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\err\err.c.obj
+  [89/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\err_data.c.obj
+  [90/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\engine\engine.c.obj
+  [91/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\evp_extra\evp_asn1.c.obj
+  [92/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\evp_extra\p_dh.c.obj
+  [93/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\evp_extra\p_dh_asn1.c.obj
+  [94/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\evp_extra\p_dsa.c.obj
+  [95/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\evp_extra\p_dsa_asn1.c.obj
+  [96/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\evp_extra\p_ec_asn1.c.obj
+  [97/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\evp_extra\p_ed25519_asn1.c.obj
+  [98/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\evp_extra\p_hmac_asn1.c.obj
+  [99/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\evp_extra\p_kem_asn1.c.obj
+  [100/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\evp_extra\p_pqdsa_asn1.c.obj
+  [101/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\evp_extra\p_rsa_asn1.c.obj
+  [102/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\evp_extra\p_x25519.c.obj
+  [103/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\evp_extra\p_x25519_asn1.c.obj
+  [104/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\evp_extra\p_methods.c.obj
+  [105/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\evp_extra\print.c.obj
+  [106/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\evp_extra\scrypt.c.obj
+  [107/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\evp_extra\sign.c.obj
+  [108/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\ex_data.c.obj
+  [109/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\hpke\hpke.c.obj
+  [110/278] Building C object aws-lc\crypto\CMakeFiles\crypto_objects.dir\hrss\hrss.c.obj
+  FAILED: aws-lc/crypto/CMakeFiles/crypto_objects.dir/hrss/hrss.c.obj 
+  D:\Relintor-tooling\LLVM\bin\clang-cl.exe  /nologo -DBORINGSSL_IMPLEMENTATION -DBORINGSSL_RELEASE_BUILD -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_CRT_SECURE_NO_WARNINGS -D_HAS_EXCEPTIONS=0 -ID:\Relintor\target\aarch64-pc-windows-msvc\release\build\aws-lc-sys-351617cf2d0d89da\out\build\aws-lc\symbol_prefix_include -ID:\Relintor-cargo-home\registry\src\index.crates.io-1949cf8c6b5b557f\aws-lc-sys-0.44.0\aws-lc\include -nologo -MD -Brepro --target=aarch64-pc-windows-msvc -W0 -Wunused -Wcomment -Wchar-subscripts -Wuninitialized -Wshadow -Wwrite-strings -Wformat-security -Wunused-result -Wno-overlength-strings -Wno-cast-function-type  -W3 -fmsc-version=1900 -Wno-deprecated-declarations -Wvla -Wtype-limits -Wno-unused-parameter -Wno-c11-extensions -Werror -Wformat=2 -Wsign-compare -Wmissing-field-initializers -Wwrite-strings -Wnewline-eof -fcolor-diagnostics -Wstring-concatenation -Wimplicit-fallthrough -Wmissing-prototypes -Wold-style-definition -Wstrict-prototypes -DAWS_LC_STDALIGN_AVAILABLE -DAWS_LC_BUILTIN_SWAP_SUPPORTED /O2 /Ob2 /DNDEBUG /std:c11 -MD /showIncludes /Foaws-lc\crypto\CMakeFiles\crypto_objects.dir\hrss\hrss.c.obj /Fdaws-lc\crypto\CMakeFiles\crypto_objects.dir\ -c -- D:\Relintor-cargo-home\registry\src\index.crates.io-1949cf8c6b5b557f\aws-lc-sys-0.44.0\aws-lc\crypto\hrss\hrss.c
+  D:\Relintor-cargo-home\registry\src\index.crates.io-1949cf8c6b5b557f\aws-lc-sys-0.44.0\aws-lc\crypto\hrss\hrss.c(192,58): error: invalid operands to binary expression ('vec_t' (aka 'union __n128') and 'vec_t')
+    192 | static inline vec_t vec_add(vec_t a, vec_t b) { return a + b; }
+        |                                                        ~ ^ ~
+  D:\Relintor-cargo-home\registry\src\index.crates.io-1949cf8c6b5b557f\aws-lc-sys-0.44.0\aws-lc\crypto\hrss\hrss.c(194,58): error: invalid operands to binary expression ('vec_t' (aka 'union __n128') and 'vec_t')
+    194 | static inline vec_t vec_sub(vec_t a, vec_t b) { return a - b; }
+        |                                                        ~ ^ ~
+  D:\Relintor-cargo-home\registry\src\index.crates.io-1949cf8c6b5b557f\aws-lc-sys-0.44.0\aws-lc\crypto\hrss\hrss.c(222,11): error: subscripted value is not an array, pointer, or vector
+    222 |   return v[i];
+        |          ~^~
+  3 errors generated.
+  ninja: build stopped: subcommand failed.
+
+  --- stderr
+  running: "cmake" "D:\\Relintor-cargo-home\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\aws-lc-sys-0.44.0" "-B" "D:\\Relintor\\target\\aarch64-pc-windows-msvc\\release\\build\\aws-lc-sys-351617cf2d0d89da\\out\\build" "-G" "Ninja" "-DBUILD_SHARED_LIBS=0" "-DBORINGSSL_PREFIX=aws_lc_0_44_0_" "-DBORINGSSL_PREFIX_HEADERS=D:\\Relintor-cargo-home\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\aws-lc-sys-0.44.0\\generated-include" "-DBUILD_TESTING=OFF" "-DBUILD_TOOL=OFF" "-DENABLE_SOURCE_MODIFICATION=OFF" "-DBUILD_LIBSSL=OFF" "-DDISABLE_PERL=ON" "-DDISABLE_GO=ON" "-DOPENSSL_SMALL=OFF" "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL" "-DCMAKE_SYSTEM_NAME=Windows" "-DCMAKE_SYSTEM_PROCESSOR=ARM64" "-DCMAKE_INSTALL_PREFIX=D:\\Relintor\\target\\aarch64-pc-windows-msvc\\release\\build\\aws-lc-sys-351617cf2d0d89da\\out" "-DCMAKE_C_FLAGS= -nologo -MD -Brepro --target=aarch64-pc-windows-msvc -W0" "-DCMAKE_C_COMPILER=D:/Relintor-tooling/LLVM/bin/clang-cl.exe" "-DCMAKE_CXX_FLAGS= -nologo -MD -Brepro --target=aarch64-pc-windows-msvc -W0" "-DCMAKE_CXX_COMPILER=D:/Relintor-tooling/LLVM/bin/clang-cl.exe" "-DCMAKE_ASM_FLAGS= -nologo -MD -Brepro --target=aarch64-pc-windows-msvc -W0" "-DCMAKE_ASM_COMPILER=D:/Relintor-tooling/LLVM/bin/clang-cl.exe" "-DCMAKE_BUILD_TYPE=Release" "--no-warn-unused-cli"
+  CMake Deprecation Warning at aws-lc/CMakeLists.txt:1 (cmake_minimum_required):
+    Compatibility with CMake < 3.10 will be removed from a future version of
+    CMake.
+
+    Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+    to tell CMake that the project requires at least <min> but has been updated
+    to work with policies introduced by <max> or earlier.
+
+
+  Copying platform assembly files from D:/Relintor-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/aws-lc-sys-0.44.0/aws-lc/generated-src/win-aarch64/crypto/ to D:/Relintor/target/aarch64-pc-windows-msvc/release/build/aws-lc-sys-351617cf2d0d89da/out/build/aws-lc/crypto
+  running: "cmake" "--build" "D:\\Relintor\\target\\aarch64-pc-windows-msvc\\release\\build\\aws-lc-sys-351617cf2d0d89da\\out\\build" "--target" "install" "--config" "Release" "--parallel" "1"
+
+  thread 'main' (6016) panicked at D:\Relintor-cargo-home\registry\src\index.crates.io-1949cf8c6b5b557f\cmake-0.1.58\src\lib.rs:1132:5:
+
+  command did not execute successfully, got: exit code: 1
+
+  build script failed, must exit now
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+failed to build app: failed to build app
+       Error failed to build app: failed to build app
+[ELIFECYCLE] Command failed with exit code 1.

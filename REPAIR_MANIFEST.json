@@ -1,0 +1,62 @@
+[
+  {
+    "path": "APPLY_AND_VERIFY.md",
+    "bytes": 2244,
+    "sha256": "da68742a59d20e4d5a37cfe5530ddc4a667c50c11206c506898abc7b792f9833"
+  },
+  {
+    "path": "apps/desktop/src/App.tsx",
+    "bytes": 12151,
+    "sha256": "692dd308df73903ea78961cf5718a37faf0666a0154c33f6cfb6744868b56ec6"
+  },
+  {
+    "path": "crates/relintor-contracts/Cargo.toml",
+    "bytes": 229,
+    "sha256": "00b7dff9d3f5e52ae4426afebcee5174d03c29846d41a4f4c4fc7b80d7bb6123"
+  },
+  {
+    "path": "crates/relintor-contracts/src/lib.rs",
+    "bytes": 10960,
+    "sha256": "99521e59eb6b79fa832fd0043b7ce55570aea2c3ba196cc81afdce5c8016b1ed"
+  },
+  {
+    "path": "db/migrations/003_milestone2_reconciliation.sql",
+    "bytes": 2945,
+    "sha256": "804719e4a58bc9629f8f75b44d8c21a3edb02446b936f5111585e1c76b0b2837"
+  },
+  {
+    "path": "db/migrations/README.md",
+    "bytes": 697,
+    "sha256": "a78d9f8fefcec2d052de8edf80b41e5d0ad1595b0c3c3f35123a45fdcc6bb483"
+  },
+  {
+    "path": "services/ai-gateway/Cargo.toml",
+    "bytes": 321,
+    "sha256": "9c7077675ed21beb4ce5ce669c85d2b686af5a74aafa0a021b8b10234fd32a7f"
+  },
+  {
+    "path": "services/ai-gateway/src/lib.rs",
+    "bytes": 27774,
+    "sha256": "f1621df74e7f146b10c1dc103d488e9c0dcaf5622f8ff3608fd0b259884c2e6e"
+  },
+  {
+    "path": "services/cloud-api/Cargo.toml",
+    "bytes": 449,
+    "sha256": "cfbdffcc7b859d0631cacf02de160fc6ee75eda53c95db800bd00e442dfbac9a"
+  },
+  {
+    "path": "services/cloud-api/src/lib.rs",
+    "bytes": 46830,
+    "sha256": "8fc34cbb6230121ad6fa05c45bfae59ea728527f94721c4c3116b01f6ac5e09b"
+  },
+  {
+    "path": "tooling/acceptance/implementation-traceability.json",
+    "bytes": 69249,
+    "sha256": "44487cbcc6bdbdee69f80ccb1d4dbf09efa181e033094967dd5b41a582d64e38"
+  },
+  {
+    "path": "tooling/evidence/milestone-2-independent-audit.md",
+    "bytes": 4869,
+    "sha256": "276af7d611f163ba9093d27464080a0098d34076b649f6ba8b8882ea9ab85a69"
+  }
+]

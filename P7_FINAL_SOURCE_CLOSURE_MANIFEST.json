@@ -1,0 +1,10 @@
+{
+  "verdict": "MILESTONE_7_FINAL_SOURCE_REPAIR_REQUIRED",
+  "p8_must_not_start": true,
+  "findings": [
+    "P7-FC-01 caller-created successful ActionResult can unlock finish_task",
+    "P7-FC-02 adapter orchestration dispatches before authorization and uses stale start time",
+    "P7-FC-03 external-modification matching still uses lexical starts_with",
+    "P7-FC-04 public registry-unbound P7 constructor remains callable"
+  ]
+}

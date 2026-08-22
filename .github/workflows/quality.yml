@@ -1,0 +1,97 @@
+name: Relintor quality
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  quality:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.96.0
+          components: rustfmt, clippy
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.17.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Tauri Linux prerequisites
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Require reproducibility locks
+        shell: python
+        run: |
+          from pathlib import Path
+          assert Path("pnpm-lock.yaml").is_file(), "pnpm-lock.yaml is required"
+          assert Path("Cargo.lock").is_file(), "Cargo.lock is required before native certification"
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify locked product authority
+        run: python tooling/spec/verify_spec.py
+
+      - name: Run locked-spec tamper acceptance fixtures
+        run: python tooling/acceptance/test_spec_verifier.py
+
+      - name: Verify 144-record implementation traceability
+        run: python tooling/acceptance/verify_traceability.py
+
+      - name: Run dependency-free secret baseline
+        run: python tooling/acceptance/secret_scan.py
+
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Rust clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --workspace --locked
+
+      - name: Desktop TypeScript typecheck
+        run: pnpm --dir apps/desktop typecheck
+
+      - name: Desktop ESLint
+        run: pnpm --dir apps/desktop lint
+
+      - name: Desktop unit tests
+        run: pnpm --dir apps/desktop test
+
+      - name: Desktop frontend build
+        run: pnpm --dir apps/desktop build
+
+      - name: Native Tauri compile
+        run: pnpm --dir apps/desktop tauri build --no-bundle

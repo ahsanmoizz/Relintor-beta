@@ -1,0 +1,10 @@
+{
+  "verdict": "MILESTONE_8_LAST_AUTHORITY_REPAIR_REQUIRED",
+  "p9_must_not_start": true,
+  "findings": [
+    "P8-LC-01 test-support is enabled by default",
+    "P8-LC-02 verification orchestrator is Cargo-hard-coded and does not route configured non-Cargo collectors",
+    "P8-LC-03 one collector binding grants all acceptance criteria",
+    "P8-LC-04 AI verifier is not integrated and non-empty gateway text becomes SUPPORTED"
+  ]
+}

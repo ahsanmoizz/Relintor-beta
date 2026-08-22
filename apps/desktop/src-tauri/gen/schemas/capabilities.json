@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Minimal core capability set for the Relintor main window","local":true,"windows":["main"],"permissions":["core:app:default","dialog:default","notification:default"],"platforms":["linux","macOS","windows"]}}

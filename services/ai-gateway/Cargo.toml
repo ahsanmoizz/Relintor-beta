@@ -1,0 +1,25 @@
+﻿[package]
+name = "relintor-ai-gateway"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+relintor-contracts = { path = "../../crates/relintor-contracts" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+uuid = { version = "1.24", features = ["v4"] }
+
+# Relintor Windows ARM64:
+# reqwest's "rustls" feature selects AWS-LC.
+# ARM64 uses Rustls + ring instead to avoid aws-lc-sys native build.
+[target.'cfg(all(target_os = "windows", target_arch = "aarch64"))'.dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+
+# Existing behavior for every other target.
+[target.'cfg(not(all(target_os = "windows", target_arch = "aarch64")))'.dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
+

@@ -1,0 +1,14 @@
+{
+  "verdict": "MILESTONE_6_REPAIR_REQUIRED",
+  "scope": "final repaired-source re-audit",
+  "new_findings": [
+    "P6-FR-01 mixed known+unknown applicability can seal",
+    "P6-FR-02 reviewed authority context differs from sealed authority context",
+    "P6-FR-03 Seal & Build button remains permanently blocked",
+    "P6-FR-04 mission revision lookup uses project_id instead of mission_id",
+    "P6-FR-05 takeover authority is global/unbound and takeover-only mode cannot seal",
+    "P6-FR-06 explicit false SEO relevance becomes applicable",
+    "P6-FR-07 immutable P6 seal state is not validated",
+    "P6-FR-08 imported implementation requirements default to human-only proof"
+  ]
+}

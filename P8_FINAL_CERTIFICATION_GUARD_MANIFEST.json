@@ -1,0 +1,8 @@
+{
+  "verdict": "MILESTONE_8_FINAL_CERTIFICATION_REPAIR_REQUIRED",
+  "findings": [
+    "P8-CC-01 one same-class collector can still claim multiple distinct acceptance criteria",
+    "P8-CC-02 production engine accepts raw caller-created AI judgements"
+  ],
+  "p9_must_not_start": true
+}

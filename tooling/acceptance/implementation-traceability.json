@@ -1,0 +1,2333 @@
+{
+  "records": [
+    {
+      "feature_id": "A-01",
+      "feature_name": "One-click signed installer per supported OS",
+      "primary_subsystem": "Desktop install, identity, and licensing",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "cross-platform-install"
+      ],
+      "required_evidence_families": [
+        "installer-log",
+        "health-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "A-02",
+      "feature_name": "First-run environment health check",
+      "primary_subsystem": "Desktop install, identity, and licensing",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "cross-platform-install"
+      ],
+      "required_evidence_families": [
+        "installer-log",
+        "health-report"
+      ],
+      "implementation_status": "foundation_only",
+      "verification_status": "not_started"
+    },
+    {
+      "feature_id": "A-03",
+      "feature_name": "Account sign-in without API keys",
+      "primary_subsystem": "Desktop install, identity, and licensing",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "cross-platform-install"
+      ],
+      "required_evidence_families": [
+        "installer-log",
+        "health-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "feature_id": "A-04",
+      "feature_name": "Device registration",
+      "primary_subsystem": "Desktop install, identity, and licensing",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "cross-platform-install"
+      ],
+      "required_evidence_families": [
+        "installer-log",
+        "health-report"
+      ],
+      "implementation_status": "foundation_only",
+      "verification_status": "not_run"
+    },
+    {
+      "feature_id": "A-05",
+      "feature_name": "Secure token storage in OS keychain",
+      "primary_subsystem": "Desktop install, identity, and licensing",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "cross-platform-install"
+      ],
+      "required_evidence_families": [
+        "installer-log",
+        "health-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "A-06",
+      "feature_name": "Signed entitlement lease",
+      "primary_subsystem": "Desktop install, identity, and licensing",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "cross-platform-install"
+      ],
+      "required_evidence_families": [
+        "installer-log",
+        "health-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "feature_id": "A-07",
+      "feature_name": "Offline grace handling",
+      "primary_subsystem": "Desktop install, identity, and licensing",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "cross-platform-install"
+      ],
+      "required_evidence_families": [
+        "installer-log",
+        "health-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "feature_id": "A-08",
+      "feature_name": "Automatic signed updates",
+      "primary_subsystem": "Desktop install, identity, and licensing",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "cross-platform-install"
+      ],
+      "required_evidence_families": [
+        "installer-log",
+        "health-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "A-09",
+      "feature_name": "Antigravity installation detection",
+      "primary_subsystem": "Desktop install, identity, and licensing",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "cross-platform-install"
+      ],
+      "required_evidence_families": [
+        "installer-log",
+        "health-report"
+      ],
+      "implementation_status": "foundation_only",
+      "verification_status": "not_started"
+    },
+    {
+      "feature_id": "A-10",
+      "feature_name": "Antigravity version compatibility check",
+      "primary_subsystem": "Desktop install, identity, and licensing",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "cross-platform-install"
+      ],
+      "required_evidence_families": [
+        "installer-log",
+        "health-report"
+      ],
+      "implementation_status": "foundation_only",
+      "verification_status": "not_started"
+    },
+    {
+      "feature_id": "A-11",
+      "feature_name": "Founder complimentary entitlement support",
+      "primary_subsystem": "Desktop install, identity, and licensing",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "cross-platform-install"
+      ],
+      "required_evidence_families": [
+        "installer-log",
+        "health-report"
+      ],
+      "implementation_status": "foundation_only",
+      "verification_status": "not_run"
+    },
+    {
+      "feature_id": "A-12",
+      "feature_name": "Uninstall preserving/exporting user evidence choice",
+      "primary_subsystem": "Desktop install, identity, and licensing",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "cross-platform-install"
+      ],
+      "required_evidence_families": [
+        "installer-log",
+        "health-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "B-01",
+      "feature_name": "New Project creation",
+      "primary_subsystem": "Project intake and takeover discovery",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "intake-corpus"
+      ],
+      "required_evidence_families": [
+        "inventory-manifest",
+        "discovery-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "B-02",
+      "feature_name": "Existing Project Takeover",
+      "primary_subsystem": "Project intake and takeover discovery",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "intake-corpus"
+      ],
+      "required_evidence_families": [
+        "inventory-manifest",
+        "discovery-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "B-03",
+      "feature_name": "Folder/repository picker",
+      "primary_subsystem": "Project intake and takeover discovery",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "intake-corpus"
+      ],
+      "required_evidence_families": [
+        "inventory-manifest",
+        "discovery-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "B-04",
+      "feature_name": "Multi-document intake",
+      "primary_subsystem": "Project intake and takeover discovery",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "intake-corpus"
+      ],
+      "required_evidence_families": [
+        "inventory-manifest",
+        "discovery-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "B-05",
+      "feature_name": "Repository inventory",
+      "primary_subsystem": "Project intake and takeover discovery",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "intake-corpus"
+      ],
+      "required_evidence_families": [
+        "inventory-manifest",
+        "discovery-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "B-06",
+      "feature_name": "Build-system detection",
+      "primary_subsystem": "Project intake and takeover discovery",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "intake-corpus"
+      ],
+      "required_evidence_families": [
+        "inventory-manifest",
+        "discovery-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "B-07",
+      "feature_name": "Dependency graph discovery",
+      "primary_subsystem": "Project intake and takeover discovery",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "intake-corpus"
+      ],
+      "required_evidence_families": [
+        "inventory-manifest",
+        "discovery-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "B-08",
+      "feature_name": "Route/API discovery",
+      "primary_subsystem": "Project intake and takeover discovery",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "intake-corpus"
+      ],
+      "required_evidence_families": [
+        "inventory-manifest",
+        "discovery-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "B-09",
+      "feature_name": "Database/schema discovery",
+      "primary_subsystem": "Project intake and takeover discovery",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "intake-corpus"
+      ],
+      "required_evidence_families": [
+        "inventory-manifest",
+        "discovery-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "B-10",
+      "feature_name": "Test/CI discovery",
+      "primary_subsystem": "Project intake and takeover discovery",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "intake-corpus"
+      ],
+      "required_evidence_families": [
+        "inventory-manifest",
+        "discovery-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "B-11",
+      "feature_name": "Deployment/config discovery",
+      "primary_subsystem": "Project intake and takeover discovery",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "intake-corpus"
+      ],
+      "required_evidence_families": [
+        "inventory-manifest",
+        "discovery-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "B-12",
+      "feature_name": "Capability reality classification",
+      "primary_subsystem": "Project intake and takeover discovery",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "intake-corpus"
+      ],
+      "required_evidence_families": [
+        "inventory-manifest",
+        "discovery-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "C-01",
+      "feature_name": "Intent extraction",
+      "primary_subsystem": "Investigator and decision model",
+      "primary_phase": "P4",
+      "dependencies": [],
+      "planned_test_families": [
+        "investigator-corpus"
+      ],
+      "required_evidence_families": [
+        "decision-record",
+        "blueprint-hash"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "C-02",
+      "feature_name": "Persona/user-journey extraction",
+      "primary_subsystem": "Investigator and decision model",
+      "primary_phase": "P4",
+      "dependencies": [],
+      "planned_test_families": [
+        "investigator-corpus"
+      ],
+      "required_evidence_families": [
+        "decision-record",
+        "blueprint-hash"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "C-03",
+      "feature_name": "Structured investigator questions",
+      "primary_subsystem": "Investigator and decision model",
+      "primary_phase": "P4",
+      "dependencies": [],
+      "planned_test_families": [
+        "investigator-corpus"
+      ],
+      "required_evidence_families": [
+        "decision-record",
+        "blueprint-hash"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "C-04",
+      "feature_name": "Why-this-matters explanations",
+      "primary_subsystem": "Investigator and decision model",
+      "primary_phase": "P4",
+      "dependencies": [],
+      "planned_test_families": [
+        "investigator-corpus"
+      ],
+      "required_evidence_families": [
+        "decision-record",
+        "blueprint-hash"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "C-05",
+      "feature_name": "Recommended defaults",
+      "primary_subsystem": "Investigator and decision model",
+      "primary_phase": "P4",
+      "dependencies": [],
+      "planned_test_families": [
+        "investigator-corpus"
+      ],
+      "required_evidence_families": [
+        "decision-record",
+        "blueprint-hash"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "C-06",
+      "feature_name": "Not-sure decision support",
+      "primary_subsystem": "Investigator and decision model",
+      "primary_phase": "P4",
+      "dependencies": [],
+      "planned_test_families": [
+        "investigator-corpus"
+      ],
+      "required_evidence_families": [
+        "decision-record",
+        "blueprint-hash"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "C-07",
+      "feature_name": "Architecture decision records",
+      "primary_subsystem": "Investigator and decision model",
+      "primary_phase": "P4",
+      "dependencies": [],
+      "planned_test_families": [
+        "investigator-corpus"
+      ],
+      "required_evidence_families": [
+        "decision-record",
+        "blueprint-hash"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "C-08",
+      "feature_name": "Risk register",
+      "primary_subsystem": "Investigator and decision model",
+      "primary_phase": "P4",
+      "dependencies": [],
+      "planned_test_families": [
+        "investigator-corpus"
+      ],
+      "required_evidence_families": [
+        "decision-record",
+        "blueprint-hash"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "C-09",
+      "feature_name": "Non-functional requirement extraction",
+      "primary_subsystem": "Investigator and decision model",
+      "primary_phase": "P4",
+      "dependencies": [],
+      "planned_test_families": [
+        "investigator-corpus"
+      ],
+      "required_evidence_families": [
+        "decision-record",
+        "blueprint-hash"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "C-10",
+      "feature_name": "Assumption tracking",
+      "primary_subsystem": "Investigator and decision model",
+      "primary_phase": "P4",
+      "dependencies": [],
+      "planned_test_families": [
+        "investigator-corpus"
+      ],
+      "required_evidence_families": [
+        "decision-record",
+        "blueprint-hash"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "C-11",
+      "feature_name": "Conflict detection across docs/answers",
+      "primary_subsystem": "Investigator and decision model",
+      "primary_phase": "P4",
+      "dependencies": [],
+      "planned_test_families": [
+        "investigator-corpus"
+      ],
+      "required_evidence_families": [
+        "decision-record",
+        "blueprint-hash"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "C-12",
+      "feature_name": "Blueprint review and founder approval",
+      "primary_subsystem": "Investigator and decision model",
+      "primary_phase": "P4",
+      "dependencies": [],
+      "planned_test_families": [
+        "investigator-corpus"
+      ],
+      "required_evidence_families": [
+        "decision-record",
+        "blueprint-hash"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "feature_id": "D-01",
+      "feature_name": "Versioned standards registry",
+      "primary_subsystem": "Standards registry and applicability engine",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "standards-applicability"
+      ],
+      "required_evidence_families": [
+        "signed-registry",
+        "applicability-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "D-02",
+      "feature_name": "Signed standards-pack updates",
+      "primary_subsystem": "Standards registry and applicability engine",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "standards-applicability"
+      ],
+      "required_evidence_families": [
+        "signed-registry",
+        "applicability-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "D-03",
+      "feature_name": "Applicability predicates",
+      "primary_subsystem": "Standards registry and applicability engine",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "standards-applicability"
+      ],
+      "required_evidence_families": [
+        "signed-registry",
+        "applicability-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "D-04",
+      "feature_name": "Web frontend pack",
+      "primary_subsystem": "Standards registry and applicability engine",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "standards-applicability"
+      ],
+      "required_evidence_families": [
+        "signed-registry",
+        "applicability-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "D-05",
+      "feature_name": "Backend/API pack",
+      "primary_subsystem": "Standards registry and applicability engine",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "standards-applicability"
+      ],
+      "required_evidence_families": [
+        "signed-registry",
+        "applicability-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "D-06",
+      "feature_name": "Database/data pack",
+      "primary_subsystem": "Standards registry and applicability engine",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "standards-applicability"
+      ],
+      "required_evidence_families": [
+        "signed-registry",
+        "applicability-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "D-07",
+      "feature_name": "Auth/security pack",
+      "primary_subsystem": "Standards registry and applicability engine",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "standards-applicability"
+      ],
+      "required_evidence_families": [
+        "signed-registry",
+        "applicability-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "D-08",
+      "feature_name": "Accessibility/SEO/performance packs",
+      "primary_subsystem": "Standards registry and applicability engine",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "standards-applicability"
+      ],
+      "required_evidence_families": [
+        "signed-registry",
+        "applicability-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "D-09",
+      "feature_name": "DevOps/observability pack",
+      "primary_subsystem": "Standards registry and applicability engine",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "standards-applicability"
+      ],
+      "required_evidence_families": [
+        "signed-registry",
+        "applicability-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "D-10",
+      "feature_name": "AI/ML and data-engineering packs",
+      "primary_subsystem": "Standards registry and applicability engine",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "standards-applicability"
+      ],
+      "required_evidence_families": [
+        "signed-registry",
+        "applicability-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "D-11",
+      "feature_name": "Blockchain/mobile/desktop packs",
+      "primary_subsystem": "Standards registry and applicability engine",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "standards-applicability"
+      ],
+      "required_evidence_families": [
+        "signed-registry",
+        "applicability-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "D-12",
+      "feature_name": "Payments/privacy/integration packs",
+      "primary_subsystem": "Standards registry and applicability engine",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "standards-applicability"
+      ],
+      "required_evidence_families": [
+        "signed-registry",
+        "applicability-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "E-01",
+      "feature_name": "Stable requirement IDs",
+      "primary_subsystem": "Requirement/task graph and sealing",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "contract-graph"
+      ],
+      "required_evidence_families": [
+        "contract-hash",
+        "graph-export"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "E-02",
+      "feature_name": "Requirement source provenance",
+      "primary_subsystem": "Requirement/task graph and sealing",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "contract-graph"
+      ],
+      "required_evidence_families": [
+        "contract-hash",
+        "graph-export"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "E-03",
+      "feature_name": "Acceptance criteria",
+      "primary_subsystem": "Requirement/task graph and sealing",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "contract-graph"
+      ],
+      "required_evidence_families": [
+        "contract-hash",
+        "graph-export"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "E-04",
+      "feature_name": "Evidence obligation per requirement",
+      "primary_subsystem": "Requirement/task graph and sealing",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "contract-graph"
+      ],
+      "required_evidence_families": [
+        "contract-hash",
+        "graph-export"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "E-05",
+      "feature_name": "Requirement dependency graph",
+      "primary_subsystem": "Requirement/task graph and sealing",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "contract-graph"
+      ],
+      "required_evidence_families": [
+        "contract-hash",
+        "graph-export"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "E-06",
+      "feature_name": "Task decomposition",
+      "primary_subsystem": "Requirement/task graph and sealing",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "contract-graph"
+      ],
+      "required_evidence_families": [
+        "contract-hash",
+        "graph-export"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "E-07",
+      "feature_name": "Task dependency graph",
+      "primary_subsystem": "Requirement/task graph and sealing",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "contract-graph"
+      ],
+      "required_evidence_families": [
+        "contract-hash",
+        "graph-export"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "E-08",
+      "feature_name": "Task-to-requirement traceability",
+      "primary_subsystem": "Requirement/task graph and sealing",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "contract-graph"
+      ],
+      "required_evidence_families": [
+        "contract-hash",
+        "graph-export"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "E-09",
+      "feature_name": "Mission contract hash",
+      "primary_subsystem": "Requirement/task graph and sealing",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "contract-graph"
+      ],
+      "required_evidence_families": [
+        "contract-hash",
+        "graph-export"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "E-10",
+      "feature_name": "Seal & Build action",
+      "primary_subsystem": "Requirement/task graph and sealing",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "contract-graph"
+      ],
+      "required_evidence_families": [
+        "contract-hash",
+        "graph-export"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "E-11",
+      "feature_name": "Scope-change detection",
+      "primary_subsystem": "Requirement/task graph and sealing",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "contract-graph"
+      ],
+      "required_evidence_families": [
+        "contract-hash",
+        "graph-export"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "E-12",
+      "feature_name": "Explicit defer/N-A decision records",
+      "primary_subsystem": "Requirement/task graph and sealing",
+      "primary_phase": "P6",
+      "dependencies": [],
+      "planned_test_families": [
+        "contract-graph"
+      ],
+      "required_evidence_families": [
+        "contract-hash",
+        "graph-export"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "F-01",
+      "feature_name": "Antigravity plugin installation",
+      "primary_subsystem": "Antigravity adapter boundary",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "antigravity-compatibility"
+      ],
+      "required_evidence_families": [
+        "adapter-transcript",
+        "compatibility-matrix"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "F-02",
+      "feature_name": "Pre-tool interception",
+      "primary_subsystem": "Antigravity adapter boundary",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "antigravity-compatibility"
+      ],
+      "required_evidence_families": [
+        "adapter-transcript",
+        "compatibility-matrix"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "F-03",
+      "feature_name": "Post-tool evidence capture",
+      "primary_subsystem": "Antigravity adapter boundary",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "antigravity-compatibility"
+      ],
+      "required_evidence_families": [
+        "adapter-transcript",
+        "compatibility-matrix"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "F-04",
+      "feature_name": "Stop-hook integration",
+      "primary_subsystem": "Antigravity adapter boundary",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "antigravity-compatibility"
+      ],
+      "required_evidence_families": [
+        "adapter-transcript",
+        "compatibility-matrix"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "F-05",
+      "feature_name": "Headless execution runner",
+      "primary_subsystem": "Antigravity adapter boundary",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "antigravity-compatibility"
+      ],
+      "required_evidence_families": [
+        "adapter-transcript",
+        "compatibility-matrix"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "F-06",
+      "feature_name": "Structured task packets",
+      "primary_subsystem": "Antigravity adapter boundary",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "antigravity-compatibility"
+      ],
+      "required_evidence_families": [
+        "adapter-transcript",
+        "compatibility-matrix"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "F-07",
+      "feature_name": "Exact action binding",
+      "primary_subsystem": "Antigravity adapter boundary",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "antigravity-compatibility"
+      ],
+      "required_evidence_families": [
+        "adapter-transcript",
+        "compatibility-matrix"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "F-08",
+      "feature_name": "Automatic low-risk permission decisions",
+      "primary_subsystem": "Antigravity adapter boundary",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "antigravity-compatibility"
+      ],
+      "required_evidence_families": [
+        "adapter-transcript",
+        "compatibility-matrix"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "F-09",
+      "feature_name": "Authority lease enforcement",
+      "primary_subsystem": "Antigravity adapter boundary",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "antigravity-compatibility"
+      ],
+      "required_evidence_families": [
+        "adapter-transcript",
+        "compatibility-matrix"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "F-10",
+      "feature_name": "Transcript/artifact collection",
+      "primary_subsystem": "Antigravity adapter boundary",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "antigravity-compatibility"
+      ],
+      "required_evidence_families": [
+        "adapter-transcript",
+        "compatibility-matrix"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "F-11",
+      "feature_name": "Subagent/worktree awareness",
+      "primary_subsystem": "Antigravity adapter boundary",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "antigravity-compatibility"
+      ],
+      "required_evidence_families": [
+        "adapter-transcript",
+        "compatibility-matrix"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "F-12",
+      "feature_name": "Adapter compatibility certification",
+      "primary_subsystem": "Antigravity adapter boundary",
+      "primary_phase": "P3",
+      "dependencies": [],
+      "planned_test_families": [
+        "antigravity-compatibility"
+      ],
+      "required_evidence_families": [
+        "adapter-transcript",
+        "compatibility-matrix"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "G-01",
+      "feature_name": "Dependency-aware scheduler",
+      "primary_subsystem": "Scheduler and watchdog boundary",
+      "primary_phase": "P7",
+      "dependencies": [],
+      "planned_test_families": [
+        "watchdog-adversarial"
+      ],
+      "required_evidence_families": [
+        "task-packet",
+        "watchdog-telemetry"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "G-02",
+      "feature_name": "Safe parallel execution",
+      "primary_subsystem": "Scheduler and watchdog boundary",
+      "primary_phase": "P7",
+      "dependencies": [],
+      "planned_test_families": [
+        "watchdog-adversarial"
+      ],
+      "required_evidence_families": [
+        "task-packet",
+        "watchdog-telemetry"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "G-03",
+      "feature_name": "Per-task budgets",
+      "primary_subsystem": "Scheduler and watchdog boundary",
+      "primary_phase": "P7",
+      "dependencies": [],
+      "planned_test_families": [
+        "watchdog-adversarial"
+      ],
+      "required_evidence_families": [
+        "task-packet",
+        "watchdog-telemetry"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "G-04",
+      "feature_name": "Retry strategy",
+      "primary_subsystem": "Scheduler and watchdog boundary",
+      "primary_phase": "P7",
+      "dependencies": [],
+      "planned_test_families": [
+        "watchdog-adversarial"
+      ],
+      "required_evidence_families": [
+        "task-packet",
+        "watchdog-telemetry"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "G-05",
+      "feature_name": "Clean-context turn restart",
+      "primary_subsystem": "Scheduler and watchdog boundary",
+      "primary_phase": "P7",
+      "dependencies": [],
+      "planned_test_families": [
+        "watchdog-adversarial"
+      ],
+      "required_evidence_families": [
+        "task-packet",
+        "watchdog-telemetry"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "G-06",
+      "feature_name": "No-progress detection",
+      "primary_subsystem": "Scheduler and watchdog boundary",
+      "primary_phase": "P7",
+      "dependencies": [],
+      "planned_test_families": [
+        "watchdog-adversarial"
+      ],
+      "required_evidence_families": [
+        "task-packet",
+        "watchdog-telemetry"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "G-07",
+      "feature_name": "Repeated-command loop detection",
+      "primary_subsystem": "Scheduler and watchdog boundary",
+      "primary_phase": "P7",
+      "dependencies": [],
+      "planned_test_families": [
+        "watchdog-adversarial"
+      ],
+      "required_evidence_families": [
+        "task-packet",
+        "watchdog-telemetry"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "G-08",
+      "feature_name": "Edit/revert oscillation detection",
+      "primary_subsystem": "Scheduler and watchdog boundary",
+      "primary_phase": "P7",
+      "dependencies": [],
+      "planned_test_families": [
+        "watchdog-adversarial"
+      ],
+      "required_evidence_families": [
+        "task-packet",
+        "watchdog-telemetry"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "G-09",
+      "feature_name": "Usage/cost telemetry",
+      "primary_subsystem": "Scheduler and watchdog boundary",
+      "primary_phase": "P7",
+      "dependencies": [],
+      "planned_test_families": [
+        "watchdog-adversarial"
+      ],
+      "required_evidence_families": [
+        "task-packet",
+        "watchdog-telemetry"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "G-10",
+      "feature_name": "Diagnostic task injection",
+      "primary_subsystem": "Scheduler and watchdog boundary",
+      "primary_phase": "P7",
+      "dependencies": [],
+      "planned_test_families": [
+        "watchdog-adversarial"
+      ],
+      "required_evidence_families": [
+        "task-packet",
+        "watchdog-telemetry"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "G-11",
+      "feature_name": "Execution termination at safe boundary",
+      "primary_subsystem": "Scheduler and watchdog boundary",
+      "primary_phase": "P7",
+      "dependencies": [],
+      "planned_test_families": [
+        "watchdog-adversarial"
+      ],
+      "required_evidence_families": [
+        "task-packet",
+        "watchdog-telemetry"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "G-12",
+      "feature_name": "Next-turn continuation when mission remains incomplete",
+      "primary_subsystem": "Scheduler and watchdog boundary",
+      "primary_phase": "P7",
+      "dependencies": [],
+      "planned_test_families": [
+        "watchdog-adversarial"
+      ],
+      "required_evidence_families": [
+        "task-packet",
+        "watchdog-telemetry"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "H-01",
+      "feature_name": "Content-addressed evidence store",
+      "primary_subsystem": "Evidence collection boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "evidence-integrity"
+      ],
+      "required_evidence_families": [
+        "content-addressed-evidence",
+        "verification-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "H-02",
+      "feature_name": "Build evidence",
+      "primary_subsystem": "Evidence collection boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "evidence-integrity"
+      ],
+      "required_evidence_families": [
+        "content-addressed-evidence",
+        "verification-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "H-03",
+      "feature_name": "Unit/integration/e2e test evidence",
+      "primary_subsystem": "Evidence collection boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "evidence-integrity"
+      ],
+      "required_evidence_families": [
+        "content-addressed-evidence",
+        "verification-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "H-04",
+      "feature_name": "Static-analysis evidence",
+      "primary_subsystem": "Evidence collection boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "evidence-integrity"
+      ],
+      "required_evidence_families": [
+        "content-addressed-evidence",
+        "verification-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "H-05",
+      "feature_name": "API/database evidence",
+      "primary_subsystem": "Evidence collection boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "evidence-integrity"
+      ],
+      "required_evidence_families": [
+        "content-addressed-evidence",
+        "verification-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "H-06",
+      "feature_name": "Browser runtime evidence",
+      "primary_subsystem": "Evidence collection boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "evidence-integrity"
+      ],
+      "required_evidence_families": [
+        "content-addressed-evidence",
+        "verification-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "H-07",
+      "feature_name": "Screenshot/video artifact evidence",
+      "primary_subsystem": "Evidence collection boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "evidence-integrity"
+      ],
+      "required_evidence_families": [
+        "content-addressed-evidence",
+        "verification-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "H-08",
+      "feature_name": "Accessibility/performance evidence",
+      "primary_subsystem": "Evidence collection boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "evidence-integrity"
+      ],
+      "required_evidence_families": [
+        "content-addressed-evidence",
+        "verification-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "H-09",
+      "feature_name": "Security-scan evidence",
+      "primary_subsystem": "Evidence collection boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "evidence-integrity"
+      ],
+      "required_evidence_families": [
+        "content-addressed-evidence",
+        "verification-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "H-10",
+      "feature_name": "Environment fingerprinting",
+      "primary_subsystem": "Evidence collection boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "evidence-integrity"
+      ],
+      "required_evidence_families": [
+        "content-addressed-evidence",
+        "verification-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "H-11",
+      "feature_name": "Independent AI verifier",
+      "primary_subsystem": "Evidence collection boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "evidence-integrity"
+      ],
+      "required_evidence_families": [
+        "content-addressed-evidence",
+        "verification-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "H-12",
+      "feature_name": "Evidence confidence grading",
+      "primary_subsystem": "Evidence collection boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "evidence-integrity"
+      ],
+      "required_evidence_families": [
+        "content-addressed-evidence",
+        "verification-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "I-01",
+      "feature_name": "Implemented-but-unverified state",
+      "primary_subsystem": "Completion authority boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "completion-fraud"
+      ],
+      "required_evidence_families": [
+        "completion-gate",
+        "certificate"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "I-02",
+      "feature_name": "Evidence freshness validation",
+      "primary_subsystem": "Completion authority boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "completion-fraud"
+      ],
+      "required_evidence_families": [
+        "completion-gate",
+        "certificate"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "I-03",
+      "feature_name": "Impact-based evidence invalidation",
+      "primary_subsystem": "Completion authority boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "completion-fraud"
+      ],
+      "required_evidence_families": [
+        "completion-gate",
+        "certificate"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "I-04",
+      "feature_name": "Requirement coverage gate",
+      "primary_subsystem": "Completion authority boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "completion-fraud"
+      ],
+      "required_evidence_families": [
+        "completion-gate",
+        "certificate"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "I-05",
+      "feature_name": "Failed-test visibility",
+      "primary_subsystem": "Completion authority boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "completion-fraud"
+      ],
+      "required_evidence_families": [
+        "completion-gate",
+        "certificate"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "I-06",
+      "feature_name": "Skipped-test accounting",
+      "primary_subsystem": "Completion authority boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "completion-fraud"
+      ],
+      "required_evidence_families": [
+        "completion-gate",
+        "certificate"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "I-07",
+      "feature_name": "Unknown-state accounting",
+      "primary_subsystem": "Completion authority boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "completion-fraud"
+      ],
+      "required_evidence_families": [
+        "completion-gate",
+        "certificate"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "I-08",
+      "feature_name": "Accepted-risk state",
+      "primary_subsystem": "Completion authority boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "completion-fraud"
+      ],
+      "required_evidence_families": [
+        "completion-gate",
+        "certificate"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "I-09",
+      "feature_name": "Blocked-external state",
+      "primary_subsystem": "Completion authority boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "completion-fraud"
+      ],
+      "required_evidence_families": [
+        "completion-gate",
+        "certificate"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "I-10",
+      "feature_name": "False-DONE prevention rules",
+      "primary_subsystem": "Completion authority boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "completion-fraud"
+      ],
+      "required_evidence_families": [
+        "completion-gate",
+        "certificate"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "I-11",
+      "feature_name": "Verified completion certificate",
+      "primary_subsystem": "Completion authority boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "completion-fraud"
+      ],
+      "required_evidence_families": [
+        "completion-gate",
+        "certificate"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "I-12",
+      "feature_name": "Evidence manifest export",
+      "primary_subsystem": "Completion authority boundary",
+      "primary_phase": "P8",
+      "dependencies": [],
+      "planned_test_families": [
+        "completion-fraud"
+      ],
+      "required_evidence_families": [
+        "completion-gate",
+        "certificate"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "J-01",
+      "feature_name": "Periodic checkpoints",
+      "primary_subsystem": "Recovery and integrity boundary",
+      "primary_phase": "P9",
+      "dependencies": [],
+      "planned_test_families": [
+        "recovery-failure-injection"
+      ],
+      "required_evidence_families": [
+        "checkpoint-record",
+        "revalidation-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "J-02",
+      "feature_name": "Git/worktree snapshot support",
+      "primary_subsystem": "Recovery and integrity boundary",
+      "primary_phase": "P9",
+      "dependencies": [],
+      "planned_test_families": [
+        "recovery-failure-injection"
+      ],
+      "required_evidence_families": [
+        "checkpoint-record",
+        "revalidation-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "J-03",
+      "feature_name": "Untracked-file snapshot support",
+      "primary_subsystem": "Recovery and integrity boundary",
+      "primary_phase": "P9",
+      "dependencies": [],
+      "planned_test_families": [
+        "recovery-failure-injection"
+      ],
+      "required_evidence_families": [
+        "checkpoint-record",
+        "revalidation-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "J-04",
+      "feature_name": "Local test database checkpoint hooks",
+      "primary_subsystem": "Recovery and integrity boundary",
+      "primary_phase": "P9",
+      "dependencies": [],
+      "planned_test_families": [
+        "recovery-failure-injection"
+      ],
+      "required_evidence_families": [
+        "checkpoint-record",
+        "revalidation-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "J-05",
+      "feature_name": "Emergency stop",
+      "primary_subsystem": "Recovery and integrity boundary",
+      "primary_phase": "P9",
+      "dependencies": [],
+      "planned_test_families": [
+        "recovery-failure-injection"
+      ],
+      "required_evidence_families": [
+        "checkpoint-record",
+        "revalidation-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "J-06",
+      "feature_name": "Stopped-incomplete state",
+      "primary_subsystem": "Recovery and integrity boundary",
+      "primary_phase": "P9",
+      "dependencies": [],
+      "planned_test_families": [
+        "recovery-failure-injection"
+      ],
+      "required_evidence_families": [
+        "checkpoint-record",
+        "revalidation-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "J-07",
+      "feature_name": "Crash detection",
+      "primary_subsystem": "Recovery and integrity boundary",
+      "primary_phase": "P9",
+      "dependencies": [],
+      "planned_test_families": [
+        "recovery-failure-injection"
+      ],
+      "required_evidence_families": [
+        "checkpoint-record",
+        "revalidation-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "J-08",
+      "feature_name": "Orphan process reconciliation",
+      "primary_subsystem": "Recovery and integrity boundary",
+      "primary_phase": "P9",
+      "dependencies": [],
+      "planned_test_families": [
+        "recovery-failure-injection"
+      ],
+      "required_evidence_families": [
+        "checkpoint-record",
+        "revalidation-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "J-09",
+      "feature_name": "External edit detection",
+      "primary_subsystem": "Recovery and integrity boundary",
+      "primary_phase": "P9",
+      "dependencies": [],
+      "planned_test_families": [
+        "recovery-failure-injection"
+      ],
+      "required_evidence_families": [
+        "checkpoint-record",
+        "revalidation-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "J-10",
+      "feature_name": "Resume integrity check",
+      "primary_subsystem": "Recovery and integrity boundary",
+      "primary_phase": "P9",
+      "dependencies": [],
+      "planned_test_families": [
+        "recovery-failure-injection"
+      ],
+      "required_evidence_families": [
+        "checkpoint-record",
+        "revalidation-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "J-11",
+      "feature_name": "Revalidation workflow",
+      "primary_subsystem": "Recovery and integrity boundary",
+      "primary_phase": "P9",
+      "dependencies": [],
+      "planned_test_families": [
+        "recovery-failure-injection"
+      ],
+      "required_evidence_families": [
+        "checkpoint-record",
+        "revalidation-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "J-12",
+      "feature_name": "Action-specific rollback/compensation registry",
+      "primary_subsystem": "Recovery and integrity boundary",
+      "primary_phase": "P9",
+      "dependencies": [],
+      "planned_test_families": [
+        "recovery-failure-injection"
+      ],
+      "required_evidence_families": [
+        "checkpoint-record",
+        "revalidation-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "K-01",
+      "feature_name": "Four-item primary navigation",
+      "primary_subsystem": "Desktop UI, activity, and teams",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "ui-accessibility",
+        "usability"
+      ],
+      "required_evidence_families": [
+        "ui-test-report",
+        "accessibility-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "K-02",
+      "feature_name": "Home project launcher",
+      "primary_subsystem": "Desktop UI, activity, and teams",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "ui-accessibility",
+        "usability"
+      ],
+      "required_evidence_families": [
+        "ui-test-report",
+        "accessibility-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "K-03",
+      "feature_name": "Guided investigator UI",
+      "primary_subsystem": "Desktop UI, activity, and teams",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "ui-accessibility",
+        "usability"
+      ],
+      "required_evidence_families": [
+        "ui-test-report",
+        "accessibility-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "K-04",
+      "feature_name": "Blueprint review UI",
+      "primary_subsystem": "Desktop UI, activity, and teams",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "ui-accessibility",
+        "usability"
+      ],
+      "required_evidence_families": [
+        "ui-test-report",
+        "accessibility-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "K-05",
+      "feature_name": "Mission cockpit",
+      "primary_subsystem": "Desktop UI, activity, and teams",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "ui-accessibility",
+        "usability"
+      ],
+      "required_evidence_families": [
+        "ui-test-report",
+        "accessibility-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "K-06",
+      "feature_name": "Requirement/evidence drilldown",
+      "primary_subsystem": "Desktop UI, activity, and teams",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "ui-accessibility",
+        "usability"
+      ],
+      "required_evidence_families": [
+        "ui-test-report",
+        "accessibility-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "K-07",
+      "feature_name": "Plain-language failure UI",
+      "primary_subsystem": "Desktop UI, activity, and teams",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "ui-accessibility",
+        "usability"
+      ],
+      "required_evidence_families": [
+        "ui-test-report",
+        "accessibility-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "K-08",
+      "feature_name": "Activity timeline",
+      "primary_subsystem": "Desktop UI, activity, and teams",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "ui-accessibility",
+        "usability"
+      ],
+      "required_evidence_families": [
+        "ui-test-report",
+        "accessibility-report"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "K-09",
+      "feature_name": "Team memberships/roles",
+      "primary_subsystem": "Desktop UI, activity, and teams",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "ui-accessibility",
+        "usability"
+      ],
+      "required_evidence_families": [
+        "ui-test-report",
+        "accessibility-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "K-10",
+      "feature_name": "Shared project policy",
+      "primary_subsystem": "Desktop UI, activity, and teams",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "ui-accessibility",
+        "usability"
+      ],
+      "required_evidence_families": [
+        "ui-test-report",
+        "accessibility-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "K-11",
+      "feature_name": "Team evidence/audit view",
+      "primary_subsystem": "Desktop UI, activity, and teams",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "ui-accessibility",
+        "usability"
+      ],
+      "required_evidence_families": [
+        "ui-test-report",
+        "accessibility-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "K-12",
+      "feature_name": "Account/privacy/billing UI",
+      "primary_subsystem": "Desktop UI, activity, and teams",
+      "primary_phase": "P1",
+      "dependencies": [],
+      "planned_test_families": [
+        "ui-accessibility",
+        "usability"
+      ],
+      "required_evidence_families": [
+        "ui-test-report",
+        "accessibility-report"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "L-01",
+      "feature_name": "Account/organization service",
+      "primary_subsystem": "Cloud account, billing, AI gateway, and admin",
+      "primary_phase": "P2",
+      "dependencies": [],
+      "planned_test_families": [
+        "entitlement-security",
+        "admin-rbac"
+      ],
+      "required_evidence_families": [
+        "audit-log",
+        "entitlement-ledger"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "L-02",
+      "feature_name": "Subscription entitlement engine",
+      "primary_subsystem": "Cloud account, billing, AI gateway, and admin",
+      "primary_phase": "P2",
+      "dependencies": [],
+      "planned_test_families": [
+        "entitlement-security",
+        "admin-rbac"
+      ],
+      "required_evidence_families": [
+        "audit-log",
+        "entitlement-ledger"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "L-03",
+      "feature_name": "Monthly/annual billing adapter",
+      "primary_subsystem": "Cloud account, billing, AI gateway, and admin",
+      "primary_phase": "P2",
+      "dependencies": [],
+      "planned_test_families": [
+        "entitlement-security",
+        "admin-rbac"
+      ],
+      "required_evidence_families": [
+        "audit-log",
+        "entitlement-ledger"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "blocked_environment"
+    },
+    {
+      "feature_id": "L-04",
+      "feature_name": "Server-side AI gateway",
+      "primary_subsystem": "Cloud account, billing, AI gateway, and admin",
+      "primary_phase": "P2",
+      "dependencies": [],
+      "planned_test_families": [
+        "entitlement-security",
+        "admin-rbac"
+      ],
+      "required_evidence_families": [
+        "audit-log",
+        "entitlement-ledger"
+      ],
+      "implementation_status": "foundation_only",
+      "verification_status": "not_run"
+    },
+    {
+      "feature_id": "L-05",
+      "feature_name": "AI provider abstraction",
+      "primary_subsystem": "Cloud account, billing, AI gateway, and admin",
+      "primary_phase": "P2",
+      "dependencies": [],
+      "planned_test_families": [
+        "entitlement-security",
+        "admin-rbac"
+      ],
+      "required_evidence_families": [
+        "audit-log",
+        "entitlement-ledger"
+      ],
+      "implementation_status": "foundation_only",
+      "verification_status": "not_run"
+    },
+    {
+      "feature_id": "L-06",
+      "feature_name": "Per-plan AI budgets",
+      "primary_subsystem": "Cloud account, billing, AI gateway, and admin",
+      "primary_phase": "P2",
+      "dependencies": [],
+      "planned_test_families": [
+        "entitlement-security",
+        "admin-rbac"
+      ],
+      "required_evidence_families": [
+        "audit-log",
+        "entitlement-ledger"
+      ],
+      "implementation_status": "foundation_only",
+      "verification_status": "not_run"
+    },
+    {
+      "feature_id": "L-07",
+      "feature_name": "Minimal-context broker protocol",
+      "primary_subsystem": "Cloud account, billing, AI gateway, and admin",
+      "primary_phase": "P2",
+      "dependencies": [],
+      "planned_test_families": [
+        "entitlement-security",
+        "admin-rbac"
+      ],
+      "required_evidence_families": [
+        "audit-log",
+        "entitlement-ledger"
+      ],
+      "implementation_status": "foundation_only",
+      "verification_status": "not_run"
+    },
+    {
+      "feature_id": "L-08",
+      "feature_name": "Founder admin console",
+      "primary_subsystem": "Cloud account, billing, AI gateway, and admin",
+      "primary_phase": "P2",
+      "dependencies": [],
+      "planned_test_families": [
+        "entitlement-security",
+        "admin-rbac"
+      ],
+      "required_evidence_families": [
+        "audit-log",
+        "entitlement-ledger"
+      ],
+      "implementation_status": "partially_implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "L-09",
+      "feature_name": "Complimentary user/company grants",
+      "primary_subsystem": "Cloud account, billing, AI gateway, and admin",
+      "primary_phase": "P2",
+      "dependencies": [],
+      "planned_test_families": [
+        "entitlement-security",
+        "admin-rbac"
+      ],
+      "required_evidence_families": [
+        "audit-log",
+        "entitlement-ledger"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "L-10",
+      "feature_name": "Admin audit trail",
+      "primary_subsystem": "Cloud account, billing, AI gateway, and admin",
+      "primary_phase": "P2",
+      "dependencies": [],
+      "planned_test_families": [
+        "entitlement-security",
+        "admin-rbac"
+      ],
+      "required_evidence_families": [
+        "audit-log",
+        "entitlement-ledger"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "L-11",
+      "feature_name": "Signed standards/update distribution",
+      "primary_subsystem": "Cloud account, billing, AI gateway, and admin",
+      "primary_phase": "P2",
+      "dependencies": [],
+      "planned_test_families": [
+        "entitlement-security",
+        "admin-rbac"
+      ],
+      "required_evidence_families": [
+        "audit-log",
+        "entitlement-ledger"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    },
+    {
+      "feature_id": "L-12",
+      "feature_name": "Service health/version rollout controls",
+      "primary_subsystem": "Cloud account, billing, AI gateway, and admin",
+      "primary_phase": "P2",
+      "dependencies": [],
+      "planned_test_families": [
+        "entitlement-security",
+        "admin-rbac"
+      ],
+      "required_evidence_families": [
+        "audit-log",
+        "entitlement-ledger"
+      ],
+      "implementation_status": "implemented",
+      "verification_status": "passed"
+    }
+  ],
+  "schema_version": 1
+}
