@@ -1824,7 +1824,8 @@ impl ExecutionRun {
             .any(|requirement_id| !known_requirements.contains(requirement_id))
         {
             return Err(ExecutionError::RevalidationRequired(
-                "verification failure references a requirement outside the sealed task graph".into(),
+                "verification failure references a requirement outside the sealed task graph"
+                    .into(),
             ));
         }
 
@@ -1941,7 +1942,11 @@ impl ExecutionRun {
         self.state = ExecutionRunState::Ready;
         self.last_error = Some(format!(
             "deterministic verification failed for {}; bounded correction authorized",
-            failed_requirement_ids.iter().cloned().collect::<Vec<_>>().join(",")
+            failed_requirement_ids
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(",")
         ));
         Ok(affected.into_iter().collect())
     }
@@ -1985,10 +1990,10 @@ impl ExecutionRun {
         // Locked spec 06 defines progress as requirement/evidence/test/diagnostic
         // advancement. Arbitrary source edits are intentionally not authority:
         // edit churn must never buy another execution lease on its own.
-        let tests_advanced = snapshot.passing_tests_observed
-            && snapshot.passing_tests > prior_passing_tests;
-        let evidence_advanced = snapshot.artifacts_observed
-            && snapshot.useful_artifacts > prior_artifacts;
+        let tests_advanced =
+            snapshot.passing_tests_observed && snapshot.passing_tests > prior_passing_tests;
+        let evidence_advanced =
+            snapshot.artifacts_observed && snapshot.useful_artifacts > prior_artifacts;
         let blocker_advanced = snapshot.resolved_blockers > prior_resolved_blockers;
         let requirement_advanced = snapshot.dependency_completions > prior_dependency_completions;
         let diagnostic_advanced = snapshot.diagnostic_information != 0
@@ -2044,8 +2049,7 @@ impl ExecutionRun {
             .get_mut(task_id)
             .ok_or_else(|| ExecutionError::UnknownTask(task_id.into()))?;
         task.usage_budget.wall_clock_ms = used.wall_time_ms.saturating_add(fresh_wall);
-        task.usage_budget.execution_steps =
-            used.execution_steps.saturating_add(default_steps);
+        task.usage_budget.execution_steps = used.execution_steps.saturating_add(default_steps);
         task.usage_budget.tool_calls = used.tool_calls.saturating_add(default_tools);
         task.usage_budget.retry_attempts = task.attempt_number.saturating_add(1);
         task.state = ExecutionTaskState::WaitingRetry;
@@ -3139,10 +3143,7 @@ impl ExecutionRun {
             passing_tests_observed: passing_test_count.is_some(),
             useful_artifacts: action_result.useful_artifacts,
             artifacts_observed: true,
-            diagnostic_information: observed_diagnostic_information(
-                &result.stdout,
-                &result.stderr,
-            ),
+            diagnostic_information: observed_diagnostic_information(&result.stdout, &result.stderr),
             ..ProgressSnapshot::default()
         };
         // A process that crossed the authoritative deadline is not eligible
@@ -4383,7 +4384,8 @@ mod recovery_boundary_tests {
     }
 
     fn prepare_persisted_completion(run: &mut ExecutionRun, root: &Path) {
-        fs::write(root.join("completed.txt"), b"trusted-completion").expect("write completed workspace");
+        fs::write(root.join("completed.txt"), b"trusted-completion")
+            .expect("write completed workspace");
         let after = workspace_inventory(root).expect("inventory completed workspace");
         let scope = run.tasks["task-recovery"].scope.clone();
         let budget = UsageBudget {
@@ -4404,10 +4406,7 @@ mod recovery_boundary_tests {
         let lease_id = lease.lease_id.clone();
         run.leases = vec![lease];
         run.state = ExecutionRunState::Running;
-        run.tasks
-            .get_mut("task-recovery")
-            .expect("task")
-            .state = ExecutionTaskState::Running;
+        run.tasks.get_mut("task-recovery").expect("task").state = ExecutionTaskState::Running;
         let attempt = run.attempts.get_mut(0).expect("attempt");
         attempt.state = TaskAttemptState::Running;
         attempt.packet_digest = "packet-complete".into();
@@ -4433,8 +4432,10 @@ mod recovery_boundary_tests {
 
     #[test]
     fn persisted_trusted_completion_recovers_only_when_workspace_still_matches() {
-        let (root, mut run, _, _) =
-            fixture("trusted-completion-recovery", AttemptExecutionBoundary::ExternalProcessStarted);
+        let (root, mut run, _, _) = fixture(
+            "trusted-completion-recovery",
+            AttemptExecutionBoundary::ExternalProcessStarted,
+        );
         prepare_persisted_completion(&mut run, &root);
         assert!(run
             .recover_trusted_completion_after_restart(250)
@@ -4450,8 +4451,10 @@ mod recovery_boundary_tests {
 
     #[test]
     fn persisted_trusted_completion_fails_closed_after_external_workspace_change() {
-        let (root, mut run, _, _) =
-            fixture("trusted-completion-mutation", AttemptExecutionBoundary::ExternalProcessStarted);
+        let (root, mut run, _, _) = fixture(
+            "trusted-completion-mutation",
+            AttemptExecutionBoundary::ExternalProcessStarted,
+        );
         prepare_persisted_completion(&mut run, &root);
         fs::write(root.join("completed.txt"), b"changed-after-receipt")
             .expect("mutate completed workspace");
@@ -4468,8 +4471,10 @@ mod recovery_boundary_tests {
 
     #[test]
     fn trusted_completion_workspace_record_is_idempotent_but_conflicting_replay_is_rejected() {
-        let (root, mut run, _, _) =
-            fixture("trusted-workspace-replay", AttemptExecutionBoundary::ExternalProcessStarted);
+        let (root, mut run, _, _) = fixture(
+            "trusted-workspace-replay",
+            AttemptExecutionBoundary::ExternalProcessStarted,
+        );
         prepare_persisted_completion(&mut run, &root);
         let exact = run.attempts[0]
             .workspace_after
@@ -4479,7 +4484,10 @@ mod recovery_boundary_tests {
             .expect("exact replay is idempotent");
 
         let mut conflicting = exact;
-        conflicting.insert("conflict.txt".into(), "not-the-authenticated-workspace".into());
+        conflicting.insert(
+            "conflict.txt".into(),
+            "not-the-authenticated-workspace".into(),
+        );
         assert!(matches!(
             run.record_completion_workspace("task-recovery", conflicting),
             Err(ExecutionError::RevalidationRequired(_))
@@ -4489,8 +4497,10 @@ mod recovery_boundary_tests {
 
     #[test]
     fn exact_trusted_completion_promotion_replay_is_idempotent_but_conflicting_time_is_rejected() {
-        let (root, mut run, _, _) =
-            fixture("trusted-promotion-replay", AttemptExecutionBoundary::ExternalProcessStarted);
+        let (root, mut run, _, _) = fixture(
+            "trusted-promotion-replay",
+            AttemptExecutionBoundary::ExternalProcessStarted,
+        );
         prepare_persisted_completion(&mut run, &root);
         run.promote_task_from_trusted_completion("task-recovery", 200, true)
             .expect("first promotion");
@@ -4539,22 +4549,17 @@ mod recovery_boundary_tests {
             BETA_COMPLEX_TASK_EXECUTION_BUDGET_MS
         );
         assert_eq!(
-            beta_task_wall_clock_budget_ms(
-                RequirementPriority::P0,
-                4,
-                3,
-                3,
-                300,
-                5 * 60 * 1_000,
-            ),
+            beta_task_wall_clock_budget_ms(RequirementPriority::P0, 4, 3, 3, 300, 5 * 60 * 1_000,),
             5 * 60 * 1_000
         );
     }
 
     #[test]
     fn measurable_progress_can_authorize_only_one_fresh_lease_cycle() {
-        let (root, mut run, _, _) =
-            fixture("progress-renewal", AttemptExecutionBoundary::ExternalProcessStarted);
+        let (root, mut run, _, _) = fixture(
+            "progress-renewal",
+            AttemptExecutionBoundary::ExternalProcessStarted,
+        );
         run.workspace_fingerprint = "before".into();
         let snapshot = ProgressSnapshot {
             workspace_fingerprint: "after".into(),
@@ -4605,8 +4610,10 @@ mod recovery_boundary_tests {
 
     #[test]
     fn arbitrary_workspace_edits_do_not_renew_execution_authority() {
-        let (root, mut run, _, _) =
-            fixture("edit-churn-no-renewal", AttemptExecutionBoundary::ExternalProcessStarted);
+        let (root, mut run, _, _) = fixture(
+            "edit-churn-no-renewal",
+            AttemptExecutionBoundary::ExternalProcessStarted,
+        );
         run.workspace_fingerprint = "before".into();
         let snapshot = ProgressSnapshot {
             workspace_fingerprint: "after".into(),
@@ -4622,8 +4629,10 @@ mod recovery_boundary_tests {
 
     #[test]
     fn verification_correction_is_separate_bounded_authority_and_not_an_endless_loop() {
-        let (root, mut run, _, _) =
-            fixture("verification-correction", AttemptExecutionBoundary::ExternalProcessStarted);
+        let (root, mut run, _, _) = fixture(
+            "verification-correction",
+            AttemptExecutionBoundary::ExternalProcessStarted,
+        );
         run.state = ExecutionRunState::ExecutionTasksFinishedAwaitingVerification;
         {
             let task = run.tasks.get_mut("task-recovery").expect("task");
@@ -4647,10 +4656,8 @@ mod recovery_boundary_tests {
         );
 
         run.state = ExecutionRunState::ExecutionTasksFinishedAwaitingVerification;
-        run.tasks
-            .get_mut("task-recovery")
-            .expect("task")
-            .state = ExecutionTaskState::FinishedAwaitingVerification;
+        run.tasks.get_mut("task-recovery").expect("task").state =
+            ExecutionTaskState::FinishedAwaitingVerification;
         assert!(matches!(
             run.authorize_verification_correction(&failed, 101),
             Err(ExecutionError::PolicyDenied(_))

@@ -2409,19 +2409,23 @@ impl VerificationCollectorOrchestrator {
                     }) {
                         Ok(binding) => binding,
                         Err(error) => {
-                            result.blocked_external.push(format!("{operation}: {error}"));
+                            result
+                                .blocked_external
+                                .push(format!("{operation}: {error}"));
                             continue;
                         }
                     };
                     match HumanDecisionCollector.collect(&binding, authority, requirement) {
                         Ok(collected) => {
                             store.put(collected.receipt, &collected.artifact_bytes)?;
-                            result.executed.push(format!(
-                                "{operation} via sealed mission authority"
-                            ));
+                            result
+                                .executed
+                                .push(format!("{operation} via sealed mission authority"));
                         }
                         Err(error) => {
-                            result.blocked_external.push(format!("{operation}: {error}"));
+                            result
+                                .blocked_external
+                                .push(format!("{operation}: {error}"));
                         }
                     }
                     continue;
@@ -3541,7 +3545,10 @@ impl HumanDecisionCollector {
         requirement: &Requirement,
     ) -> Result<CollectedEvidence<HumanDecisionObservation>, EvidenceError> {
         authority.validate()?;
-        if !binding.requirement_ids.contains(&requirement.requirement_id) {
+        if !binding
+            .requirement_ids
+            .contains(&requirement.requirement_id)
+        {
             return Err(EvidenceError::InvalidAuthority(
                 "sealed human decision binding does not match its requirement".into(),
             ));

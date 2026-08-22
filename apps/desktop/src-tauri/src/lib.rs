@@ -5170,8 +5170,7 @@ fn authorize_and_launch_verification_correction(
     let project_id = canonical_project_id(project_id)?;
     with_execution_mutation_lock(|| {
         require_execution_not_active(&project_id)?;
-        let (mut run, ledger_path, revision, _handoff) =
-            load_execution_run(app, &project_id)?;
+        let (mut run, ledger_path, revision, _handoff) = load_execution_run(app, &project_id)?;
         let affected = run
             .authorize_verification_correction(&failed, execution_now_ms())
             .map_err(|error| error.to_string())?;
@@ -5192,10 +5191,7 @@ fn authorize_and_launch_verification_correction(
 
         let readiness = health_antigravity_for_app(Some(app));
         if !readiness.adapter_ready {
-            return Err(format!(
-                "ANTIGRAVITY_SETUP_REQUIRED: {}",
-                readiness.detail
-            ));
+            return Err(format!("ANTIGRAVITY_SETUP_REQUIRED: {}", readiness.detail));
         }
         let cli_path = configured_antigravity_cli(app).ok_or_else(|| {
             "ANTIGRAVITY_SETUP_REQUIRED: the verified Antigravity CLI path is unavailable"
