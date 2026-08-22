@@ -11,8 +11,8 @@ use relintor_execution::{
 };
 use relintor_standards::{
     AuthorityEngine, DecisionActor, DecisionKind, EvidenceClass, EvidenceConfidence,
-    ExecutionHandoff, ExplicitDecision, MissionRevision, Requirement, RequirementStatus,
-    StandardsRegistry, TrustedSignerSet,
+    ExecutionHandoff, ExplicitDecision, MissionRevision, Requirement, RequirementSource,
+    RequirementStatus, StandardsRegistry, TrustedSignerSet,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1691,6 +1691,9 @@ impl VerificationCollectorPlan {
                 ("lint", EvidenceClass::LintStaticAnalysis),
                 ("security-scan", EvidenceClass::SecurityScan),
                 ("accessibility-audit", EvidenceClass::AccessibilityResult),
+                ("performance-result", EvidenceClass::PerformanceResult),
+                ("performance-scan", EvidenceClass::PerformanceResult),
+                ("performance-budget", EvidenceClass::PerformanceResult),
             ] {
                 if scripts.is_some_and(|items| items.contains_key(script)) {
                     add_discovered_command(
@@ -2296,9 +2299,12 @@ impl VerificationCollectorOrchestrator {
                 store.put(collected.receipt, &collected.artifact_bytes)?;
             }
             EvidenceClass::PerformanceResult => {
-                return Err(EvidenceError::CollectorUnavailable(
-                    "performance collector requires a measured value and sealed threshold".into(),
-                ));
+                let collected = PerformanceCollector::default().collect_process(
+                    binding,
+                    command,
+                    spec.route.as_deref().unwrap_or("workspace"),
+                )?;
+                store.put(collected.receipt, &collected.artifact_bytes)?;
             }
             _ => {
                 return Err(EvidenceError::CollectorUnavailable(
@@ -2364,6 +2370,62 @@ impl VerificationCollectorOrchestrator {
                 .filter(|item| item.required)
             {
                 let operation = format!("{}:{:?}", requirement.requirement_id, obligation.class);
+                if obligation.class == EvidenceClass::HumanDecision {
+                    let fresh = existing.iter().any(|artifact| {
+                        artifact.metadata.requirement_ids
+                            == vec![requirement.requirement_id.clone()]
+                            && artifact.metadata.class == EvidenceClass::HumanDecision
+                            && artifact.metadata.result == EvidenceResult::Pass
+                            && confidence_meets(
+                                artifact.metadata.confidence,
+                                obligation.minimum_confidence,
+                            )
+                            && p7_execution.is_none_or(|p7| {
+                                p7.validates_evidence_metadata(authority, &artifact.metadata)
+                                    .is_ok_and(|valid| valid)
+                            })
+                            && store
+                                .freshness(&artifact.metadata.evidence_id, current)
+                                .is_ok_and(|value| value == EvidenceFreshness::Fresh)
+                    });
+                    if fresh {
+                        result.reused_fresh.push(operation);
+                        continue;
+                    }
+                    let binding = match CollectorBinding::for_sealed_human_decision(
+                        authority,
+                        current,
+                        format!("p8-human-decision-{}", requirement.requirement_id),
+                        &requirement.requirement_id,
+                    )
+                    .and_then(|binding| match p7_execution {
+                        Some(p7) => binding.bind_successful_execution(
+                            p7,
+                            authority,
+                            &requirement.requirement_id,
+                        ),
+                        None => binding
+                            .bind_test_successful_execution(authority, &requirement.requirement_id),
+                    }) {
+                        Ok(binding) => binding,
+                        Err(error) => {
+                            result.blocked_external.push(format!("{operation}: {error}"));
+                            continue;
+                        }
+                    };
+                    match HumanDecisionCollector.collect(&binding, authority, requirement) {
+                        Ok(collected) => {
+                            store.put(collected.receipt, &collected.artifact_bytes)?;
+                            result.executed.push(format!(
+                                "{operation} via sealed mission authority"
+                            ));
+                        }
+                        Err(error) => {
+                            result.blocked_external.push(format!("{operation}: {error}"));
+                        }
+                    }
+                    continue;
+                }
                 let Some(spec) = plan.for_class(obligation.class) else {
                     result.blocked_external.push(format!(
                         "{operation}: no trusted collector was discovered for {:?}",
@@ -2649,6 +2711,23 @@ pub struct PerformanceObservation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PerformanceProcessObservation {
+    pub probe_definition: String,
+    pub process: ProcessEvidence,
+    pub result: EvidenceResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HumanDecisionObservation {
+    pub requirement_id: String,
+    pub source_reference: String,
+    pub sealed_requirement_digest: String,
+    pub accepted_criteria: BTreeSet<String>,
+    pub seal_hash: String,
+    pub result: EvidenceResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecurityObservation {
     pub tool: CollectorIdentity,
     pub scope: String,
@@ -2723,6 +2802,65 @@ impl CollectorBinding {
         {
             binding = binding.bind_test_successful_execution(authority, requirement_id)?;
         }
+        Ok(binding)
+    }
+
+    fn for_sealed_human_decision(
+        authority: &VerificationAuthority,
+        current: &FreshnessContext,
+        evidence_id: impl Into<String>,
+        requirement_id: &str,
+    ) -> Result<Self, EvidenceError> {
+        let requirement = authority
+            .revision
+            .contract
+            .requirement_graph
+            .requirements
+            .iter()
+            .find(|item| item.requirement_id == requirement_id)
+            .ok_or_else(|| {
+                EvidenceError::InvalidAuthority(format!(
+                    "collector requirement is not present in the sealed plan: {requirement_id}"
+                ))
+            })?;
+        let obligation = requirement
+            .verification_policy
+            .obligations
+            .iter()
+            .find(|item| item.required && item.class == EvidenceClass::HumanDecision)
+            .ok_or_else(|| {
+                EvidenceError::InvalidAuthority(format!(
+                    "sealed requirement {requirement_id} does not require a human decision"
+                ))
+            })?;
+        sealed_user_decision_source(requirement).map_err(|error| {
+            EvidenceError::InvalidAuthority(format!(
+                "sealed human-decision requirement {requirement_id} is not eligible: {error}"
+            ))
+        })?;
+        let accepted_criteria = requirement
+            .acceptance_criteria
+            .iter()
+            .filter(|criterion| !criterion.machine_checkable)
+            .map(|criterion| criterion.criterion_id.clone())
+            .collect::<BTreeSet<_>>();
+        if accepted_criteria.is_empty() {
+            return Err(EvidenceError::InvalidAuthority(format!(
+                "sealed human-decision requirement {requirement_id} has no human acceptance criterion"
+            )));
+        }
+        let mut binding = Self::from_authority_internal(
+            authority,
+            current,
+            evidence_id,
+            vec![requirement.requirement_id.clone()],
+            obligation.required,
+            accepted_criteria,
+            BTreeSet::new(),
+        )?;
+        // Human assertions are already part of the signed/sealed mission authority.
+        // They do not use machine-probe criterion provenance.
+        binding.criterion_provenance.clear();
         Ok(binding)
     }
 
@@ -3292,9 +3430,41 @@ impl AccessibilityCollector {
     }
 }
 
-pub struct PerformanceCollector;
+#[derive(Default)]
+pub struct PerformanceCollector {
+    process: ProcessCollector,
+}
 
 impl PerformanceCollector {
+    pub fn collect_process(
+        &self,
+        binding: &CollectorBinding,
+        command: &CommandSpec,
+        probe_definition: &str,
+    ) -> Result<CollectedEvidence<PerformanceProcessObservation>, EvidenceError> {
+        let process = self.process.run(command)?;
+        let bytes = process_output_bytes(&process)?;
+        let observation = PerformanceProcessObservation {
+            probe_definition: probe_definition.into(),
+            process: process.clone(),
+            result: process.result,
+        };
+        let receipt = binding.receipt(
+            CollectorIdentity::new("performance-collector", "p8-v1"),
+            "CONFIGURED_PERFORMANCE_PROCESS",
+            command.digest()?,
+            process.result,
+            EvidenceClass::PerformanceResult,
+            EvidenceConfidence::StrongRuntime,
+            &bytes,
+        )?;
+        Ok(CollectedEvidence {
+            receipt,
+            observation,
+            artifact_bytes: bytes,
+        })
+    }
+
     pub fn measure(
         &self,
         binding: &CollectorBinding,
@@ -3325,6 +3495,96 @@ impl PerformanceCollector {
             result,
             EvidenceClass::PerformanceResult,
             EvidenceConfidence::StrongRuntime,
+            &bytes,
+        )?;
+        Ok(CollectedEvidence {
+            receipt,
+            observation,
+            artifact_bytes: bytes,
+        })
+    }
+}
+
+fn sealed_user_decision_source(requirement: &Requirement) -> Result<String, EvidenceError> {
+    if requirement.requirement_type != "decision" {
+        return Err(EvidenceError::InvalidAuthority(
+            "human decision evidence requires a sealed decision requirement".into(),
+        ));
+    }
+    if requirement
+        .sealed_hash
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        return Err(EvidenceError::InvalidAuthority(
+            "human decision evidence requires the requirement to be sealed".into(),
+        ));
+    }
+    match &requirement.source {
+        RequirementSource::User { reference } if !reference.trim().is_empty() => {
+            Ok(reference.clone())
+        }
+        _ => Err(EvidenceError::InvalidAuthority(
+            "human decision evidence may only attest a directly user-authored sealed decision"
+                .into(),
+        )),
+    }
+}
+
+pub struct HumanDecisionCollector;
+
+impl HumanDecisionCollector {
+    pub fn collect(
+        &self,
+        binding: &CollectorBinding,
+        authority: &VerificationAuthority,
+        requirement: &Requirement,
+    ) -> Result<CollectedEvidence<HumanDecisionObservation>, EvidenceError> {
+        authority.validate()?;
+        if !binding.requirement_ids.contains(&requirement.requirement_id) {
+            return Err(EvidenceError::InvalidAuthority(
+                "sealed human decision binding does not match its requirement".into(),
+            ));
+        }
+        let source_reference = sealed_user_decision_source(requirement)?;
+        let accepted_criteria = requirement
+            .acceptance_criteria
+            .iter()
+            .filter(|criterion| !criterion.machine_checkable)
+            .map(|criterion| criterion.criterion_id.clone())
+            .collect::<BTreeSet<_>>();
+        if accepted_criteria.is_empty() || accepted_criteria != binding.accepted_criteria {
+            return Err(EvidenceError::InvalidAuthority(
+                "sealed human decision criteria do not match the collector binding".into(),
+            ));
+        }
+        let sealed_requirement_digest = sha256(&canonical(requirement)?);
+        let observation = HumanDecisionObservation {
+            requirement_id: requirement.requirement_id.clone(),
+            source_reference: source_reference.clone(),
+            sealed_requirement_digest: sealed_requirement_digest.clone(),
+            accepted_criteria: accepted_criteria.clone(),
+            seal_hash: authority.revision.seal.contract_hash.clone(),
+            result: EvidenceResult::Pass,
+        };
+        let bytes = canonical(&observation)?;
+        let command_digest = sha256(&canonical(&(
+            "SEALED_HUMAN_DECISION",
+            &authority.revision.seal.mission_id,
+            authority.revision.revision,
+            &authority.revision.seal.contract_hash,
+            &requirement.requirement_id,
+            &source_reference,
+            &sealed_requirement_digest,
+            &accepted_criteria,
+        ))?);
+        let receipt = binding.receipt(
+            CollectorIdentity::new("sealed-human-decision-collector", "p8-v1"),
+            "SEALED_HUMAN_DECISION",
+            command_digest,
+            EvidenceResult::Pass,
+            EvidenceClass::HumanDecision,
+            EvidenceConfidence::HumanAsserted,
             &bytes,
         )?;
         Ok(CollectedEvidence {
@@ -5103,6 +5363,99 @@ mod tests {
             dependency_lock_hashes: BTreeMap::new(),
             scope_fingerprint: None,
         }
+    }
+
+    fn sealed_user_decision_requirement() -> Requirement {
+        Requirement {
+            requirement_id: "requirement-human".into(),
+            title: "User product purpose".into(),
+            intent: "Build the user-requested product".into(),
+            source: RequirementSource::User {
+                reference: "project://example/idea".into(),
+            },
+            priority: relintor_standards::RequirementPriority::P1,
+            applicability: relintor_standards::ApplicabilityOutcome::Applicable,
+            acceptance_criteria: vec![AcceptanceCriterion {
+                criterion_id: "criterion-human".into(),
+                statement: "A reviewable evidence record demonstrates the user decision".into(),
+                criterion_type: "project-authority-obligation".into(),
+                machine_checkable: false,
+            }],
+            verification_policy: VerificationPolicy {
+                obligations: vec![EvidenceObligation {
+                    class: EvidenceClass::HumanDecision,
+                    minimum_confidence: EvidenceConfidence::HumanAsserted,
+                    rationale: "A genuine project decision requires explicit human review.".into(),
+                    required: true,
+                }],
+                p8_collector_required: true,
+            },
+            dependencies: Vec::new(),
+            risk: RequirementRisk::High,
+            status: RequirementStatus::Unstarted,
+            implementation_links: Vec::new(),
+            evidence_links: Vec::new(),
+            explicit_exceptions: Vec::new(),
+            sealed_hash: Some("a".repeat(64)),
+            requirement_type: "decision".into(),
+            origin_rule_id: None,
+            revision: 1,
+            schema_version: 1,
+        }
+    }
+
+    #[test]
+    fn human_decision_evidence_accepts_only_sealed_user_decision_requirements() {
+        let requirement = sealed_user_decision_requirement();
+        assert_eq!(
+            sealed_user_decision_source(&requirement).expect("sealed user decision"),
+            "project://example/idea"
+        );
+
+        let mut functional = requirement.clone();
+        functional.requirement_type = "functional".into();
+        assert!(matches!(
+            sealed_user_decision_source(&functional),
+            Err(EvidenceError::InvalidAuthority(_))
+        ));
+
+        let mut unsealed = requirement.clone();
+        unsealed.sealed_hash = None;
+        assert!(matches!(
+            sealed_user_decision_source(&unsealed),
+            Err(EvidenceError::InvalidAuthority(_))
+        ));
+
+        let mut inferred = requirement;
+        inferred.source = RequirementSource::Inference {
+            reference: "inferred".into(),
+        };
+        assert!(matches!(
+            sealed_user_decision_source(&inferred),
+            Err(EvidenceError::InvalidAuthority(_))
+        ));
+    }
+
+    #[test]
+    fn package_json_performance_scripts_are_discovered_as_runtime_evidence() {
+        let root = tempfile::tempdir().expect("temp workspace");
+        fs::write(
+            root.path().join("package.json"),
+            br#"{"scripts":{"performance-result":"node perf.js"}}"#,
+        )
+        .expect("write package json");
+        let plan = VerificationCollectorPlan::discover(root.path()).expect("discover collectors");
+        let spec = plan
+            .collectors
+            .iter()
+            .find(|item| item.evidence_class == EvidenceClass::PerformanceResult)
+            .expect("performance collector");
+        let command = spec.command.as_ref().expect("performance command");
+        assert_eq!(command.program, "npm");
+        assert_eq!(
+            command.args,
+            vec!["run".to_string(), "performance-result".to_string()]
+        );
     }
 
     #[test]

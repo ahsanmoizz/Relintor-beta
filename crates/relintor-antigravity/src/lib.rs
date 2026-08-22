@@ -31,8 +31,11 @@ pub const WINDOWS_CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(not(windows))]
 pub const WINDOWS_CREATE_NO_WINDOW: u32 = 0;
 
-pub const PRODUCTION_PROCESS_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-pub const PRODUCTION_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+pub const PRODUCTION_PROCESS_TIMEOUT: Duration = Duration::from_secs(45 * 60);
+/// A healthy long-running executor may be quiet for a while (for example while
+/// compiling or reasoning). Five minutes remains a finite no-output safety
+/// boundary while avoiding the old 90-second false-stop behavior.
+pub const PRODUCTION_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
     let mut command = Command::new(program);

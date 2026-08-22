@@ -36,12 +36,14 @@ pub const EXECUTION_STATUS: &str = "implemented_unverified";
 pub const EXECUTION_PACKET_VERSION: &str = "p7-task-packet-v1";
 pub const EXECUTION_LEDGER_VERSION: &str = "p7-execution-ledger-v1";
 pub const EXECUTION_LEDGER_RECORD_VERSION: &str = "p7-ledger-record-v6";
-/// Closed-Beta authority window for one Antigravity task. The locked spec
-/// requires a finite per-task budget but does not prescribe five minutes;
-/// ten minutes accommodates the measured ~320 second supported task while
-/// remaining below the independent fifteen-minute adapter safety ceiling.
-pub const BETA_TASK_EXECUTION_BUDGET_MS: u64 = 10 * 60 * 1_000;
-pub const ADAPTER_PROCESS_SAFETY_TIMEOUT_MS: u64 = 15 * 60 * 1_000;
+/// Closed-Beta default authority for one Antigravity task. Individual tasks
+/// receive a finite budget derived from sealed task complexity; this value is
+/// the normal baseline, not an unconditional kill timer for every task.
+pub const BETA_TASK_EXECUTION_BUDGET_MS: u64 = 25 * 60 * 1_000;
+pub const BETA_MIN_TASK_EXECUTION_BUDGET_MS: u64 = 15 * 60 * 1_000;
+pub const BETA_COMPLEX_TASK_EXECUTION_BUDGET_MS: u64 = 35 * 60 * 1_000;
+pub const BETA_MAX_PROGRESS_RENEWALS_PER_TASK: u32 = 1;
+pub const ADAPTER_PROCESS_SAFETY_TIMEOUT_MS: u64 = 45 * 60 * 1_000;
 const LEGACY_EXECUTION_LEDGER_INTEGRITY_VERSION: &str = "p7-ledger-integrity-v1";
 const EXECUTION_LEDGER_INTEGRITY_VERSION: &str = "p7-ledger-integrity-v2";
 
@@ -783,6 +785,8 @@ pub enum ExecutionEventKind {
     TaskDriftDenied,
     RecoveryRevalidated,
     RetryAuthorized,
+    VerificationCorrectionAuthorized,
+    ProgressRenewalAuthorized,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -983,6 +987,15 @@ impl ExecutionRun {
                 external_authority: BTreeSet::new(),
                 scope_known: true,
             };
+            let mut task_budget = policy.default_budget.clone();
+            task_budget.wall_clock_ms = beta_task_wall_clock_budget_ms(
+                priority,
+                task.requirement_ids.len(),
+                task.dependency_ids.len(),
+                task.evidence_obligations.len(),
+                task.objective.len(),
+                policy.execution_time_policy.adapter_safety_timeout_ms,
+            );
             tasks.insert(
                 task_id.clone(),
                 ExecutionTask {
@@ -993,7 +1006,7 @@ impl ExecutionRun {
                     priority,
                     state: ExecutionTaskState::Pending,
                     scope,
-                    usage_budget: policy.default_budget.clone(),
+                    usage_budget: task_budget,
                     retry_policy: policy.default_retry_policy.clone(),
                     evidence_obligations: task.evidence_obligations.clone(),
                     attempt_number: 0,
@@ -1144,15 +1157,20 @@ impl ExecutionRun {
             .get(task_id)
             .cloned()
             .ok_or_else(|| ExecutionError::UnknownTask(task_id.into()))?;
-        if task_snapshot.usage_budget.wall_clock_ms
-            != self.policy.execution_time_policy.task_wall_clock_ms
-        {
+        if task_snapshot.usage_budget.wall_clock_ms == 0 {
             return Err(ExecutionError::PolicyDenied(
-                "sealed task wall-clock budget does not match the run execution policy".into(),
+                "task wall-clock authority must be finite and non-zero".into(),
             ));
         }
         let workspace_before = workspace_inventory(&self.workspace)?;
         let remaining_budget = self.remaining_budget(task_id)?;
+        if remaining_budget.wall_clock_ms
+            > self.policy.execution_time_policy.adapter_safety_timeout_ms
+        {
+            return Err(ExecutionError::PolicyDenied(
+                "remaining task wall-clock authority exceeds the per-attempt safety ceiling".into(),
+            ));
+        }
         if budget_exhausted(&remaining_budget) {
             self.watchdog_state = WatchdogState::BudgetExhausted;
             return Err(ExecutionError::BudgetExhausted);
@@ -1498,6 +1516,7 @@ impl ExecutionRun {
                     .get_mut(task_id)
                     .ok_or_else(|| ExecutionError::UnknownTask(task_id.into()))?
                     .state = ExecutionTaskState::WaitingRetry;
+                self.state = ExecutionRunState::Ready;
                 self.emit(
                     now_ms,
                     Some(task_id.into()),
@@ -1533,11 +1552,115 @@ impl ExecutionRun {
 
     pub fn finish_task(&mut self, task_id: &str, now_ms: u64) -> Result<(), ExecutionError> {
         let workspace_after = workspace_inventory(&self.workspace)?;
+        self.record_completion_workspace(task_id, workspace_after)?;
+        self.promote_task_from_trusted_completion(task_id, now_ms, false)
+    }
+
+    fn record_completion_workspace(
+        &mut self,
+        task_id: &str,
+        workspace_after: BTreeMap<String, String>,
+    ) -> Result<(), ExecutionError> {
+        let attempt = self
+            .attempts
+            .iter_mut()
+            .rev()
+            .find(|attempt| {
+                attempt.task_id == task_id && attempt.state == TaskAttemptState::Running
+            })
+            .ok_or_else(|| ExecutionError::AttemptMissing(task_id.into()))?;
+        if attempt.completion_authority.is_none() {
+            return Err(ExecutionError::PolicyDenied(
+                "task has no trusted adapter completion authority".into(),
+            ));
+        }
+        if let Some(existing) = attempt.workspace_after.as_ref() {
+            if existing == &workspace_after {
+                return Ok(());
+            }
+            return Err(ExecutionError::RevalidationRequired(
+                "conflicting post-execution workspace replay for an already authenticated completion"
+                    .into(),
+            ));
+        }
+        attempt.workspace_after = Some(workspace_after);
+        Ok(())
+    }
+
+    fn promote_task_from_trusted_completion(
+        &mut self,
+        task_id: &str,
+        completion_time_ms: u64,
+        require_current_workspace_match: bool,
+    ) -> Result<(), ExecutionError> {
         let task_snapshot = self
             .tasks
             .get(task_id)
             .cloned()
             .ok_or_else(|| ExecutionError::UnknownTask(task_id.into()))?;
+
+        // Replaying the exact already-promoted trusted completion is harmless
+        // and must be idempotent. Any disagreement in receipt, lease, time, or
+        // post-workspace is a new authority claim and therefore fails closed.
+        if task_snapshot.state == ExecutionTaskState::FinishedAwaitingVerification {
+            let attempt = self
+                .attempts
+                .iter()
+                .rev()
+                .find(|attempt| {
+                    attempt.task_id == task_id && attempt.state == TaskAttemptState::Succeeded
+                })
+                .ok_or_else(|| {
+                    ExecutionError::RevalidationRequired(
+                        "finished task has no successful attempt for completion replay".into(),
+                    )
+                })?;
+            let completion = attempt.completion_authority.as_ref().ok_or_else(|| {
+                ExecutionError::RevalidationRequired(
+                    "finished task has no trusted completion receipt for replay".into(),
+                )
+            })?;
+            let workspace_after = attempt.workspace_after.as_ref().ok_or_else(|| {
+                ExecutionError::RevalidationRequired(
+                    "finished task has no authenticated post-execution workspace for replay".into(),
+                )
+            })?;
+            let lease = self
+                .leases
+                .iter()
+                .find(|lease| lease.lease_id == attempt.lease_id)
+                .ok_or_else(|| {
+                    ExecutionError::RevalidationRequired(
+                        "finished task completion lease is unavailable for replay".into(),
+                    )
+                })?;
+            let exact = lease.status == LeaseStatus::Consumed
+                && lease.task_id == task_id
+                && lease.task_packet_digest == attempt.packet_digest
+                && lease.compute_digest()? == lease.lease_digest
+                && completion.task_id == task_id
+                && completion.attempt_id == attempt.attempt_id
+                && completion.packet_digest == attempt.packet_digest
+                && completion.lease_id == attempt.lease_id
+                && completion.ended_at_ms == completion_time_ms
+                && attempt.ended_at_ms == Some(completion_time_ms)
+                && inventory_fingerprint(workspace_after)? == self.workspace_fingerprint;
+            if !exact {
+                return Err(ExecutionError::RevalidationRequired(
+                    "conflicting replay of an already promoted trusted completion".into(),
+                ));
+            }
+            if require_current_workspace_match {
+                let current_workspace = workspace_inventory(&self.workspace)?;
+                if &current_workspace != workspace_after {
+                    return Err(ExecutionError::RevalidationRequired(
+                        "the workspace changed after the trusted completion was promoted".into(),
+                    ));
+                }
+            }
+            return Ok(());
+        }
+
         if task_snapshot.state != ExecutionTaskState::Running
             || task_snapshot.dependency_ids.iter().any(|dependency| {
                 self.tasks.get(dependency).is_none_or(|task| {
@@ -1561,6 +1684,11 @@ impl ExecutionRun {
         let completion = attempt.completion_authority.clone().ok_or_else(|| {
             ExecutionError::PolicyDenied("task has no trusted adapter completion authority".into())
         })?;
+        let workspace_after = attempt.workspace_after.clone().ok_or_else(|| {
+            ExecutionError::PolicyDenied(
+                "task completion has no authenticated post-execution workspace inventory".into(),
+            )
+        })?;
         let lease = self
             .leases
             .iter()
@@ -1569,8 +1697,7 @@ impl ExecutionRun {
         if lease.status != LeaseStatus::Active {
             return Err(ExecutionError::LeaseInactive);
         }
-        if now_ms >= lease.expires_at_ms
-            || lease.task_id != task_id
+        if lease.task_id != task_id
             || lease.task_packet_digest != attempt.packet_digest
             || lease.compute_digest()? != lease.lease_digest
             || completion.task_id != task_id
@@ -1578,10 +1705,20 @@ impl ExecutionRun {
             || completion.packet_digest != attempt.packet_digest
             || completion.lease_id != attempt.lease_id
             || completion.ended_at_ms >= lease.expires_at_ms
-            || completion.ended_at_ms != now_ms
+            || completion.ended_at_ms != completion_time_ms
         {
             return Err(ExecutionError::LeaseExpired);
         }
+        if require_current_workspace_match {
+            let current_workspace = workspace_inventory(&self.workspace)?;
+            if current_workspace != workspace_after {
+                return Err(ExecutionError::RevalidationRequired(
+                    "the workspace changed after the trusted executor completion receipt was persisted"
+                        .into(),
+                ));
+            }
+        }
+        let workspace_fingerprint = inventory_fingerprint(&workspace_after)?;
         let task = self
             .tasks
             .get_mut(task_id)
@@ -1589,24 +1726,348 @@ impl ExecutionRun {
         task.state = ExecutionTaskState::FinishedAwaitingVerification;
         let current = self.current_attempt_mut(task_id)?;
         current.state = TaskAttemptState::Succeeded;
-        current.ended_at_ms = Some(now_ms);
-        current.workspace_after = Some(workspace_after);
+        current.ended_at_ms = Some(completion_time_ms);
         if let Some(lease) = self
             .leases
             .iter_mut()
-            .find(|lease| lease.task_id == task_id && lease.status == LeaseStatus::Active)
+            .find(|lease| lease.lease_id == attempt.lease_id && lease.status == LeaseStatus::Active)
         {
             lease.status = LeaseStatus::Consumed;
             lease.lease_digest = lease.compute_digest()?;
         }
+        self.workspace_fingerprint = workspace_fingerprint;
         self.emit(
-            now_ms,
+            completion_time_ms,
             Some(task_id.into()),
             ExecutionEventKind::TaskImplementationFinished,
             "implementation-finished-awaiting-verification",
         )?;
         self.update_run_state();
         Ok(())
+    }
+
+    /// Recover only a completion that was already durably authenticated before
+    /// the desktop stopped. Exit code or workspace files alone are never enough.
+    pub fn recover_trusted_completion_after_restart(
+        &mut self,
+        now_ms: u64,
+    ) -> Result<bool, ExecutionError> {
+        if self.state != ExecutionRunState::Running {
+            return Ok(false);
+        }
+        let candidates = self
+            .attempts
+            .iter()
+            .filter(|attempt| {
+                attempt.state == TaskAttemptState::Running
+                    && attempt.completion_authority.is_some()
+                    && attempt.workspace_after.is_some()
+            })
+            .map(|attempt| {
+                (
+                    attempt.task_id.clone(),
+                    attempt
+                        .completion_authority
+                        .as_ref()
+                        .map(|completion| completion.ended_at_ms)
+                        .unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Ok(false);
+        }
+        if candidates.len() != 1 {
+            return Err(ExecutionError::RevalidationRequired(
+                "restart found more than one unpromoted trusted completion receipt".into(),
+            ));
+        }
+        let (task_id, ended_at_ms) = &candidates[0];
+        self.promote_task_from_trusted_completion(task_id, *ended_at_ms, true)?;
+        self.emit(
+            now_ms,
+            Some(task_id.clone()),
+            ExecutionEventKind::RecoveryRevalidated,
+            "trusted executor completion receipt and exact post-workspace recovered after restart",
+        )?;
+        Ok(true)
+    }
+
+    /// Reopen only the exact task(s) whose sealed requirements failed
+    /// deterministic verification, plus downstream dependents that can no
+    /// longer be trusted. Historical successful attempts remain immutable.
+    /// Each reopened task receives one fresh bounded correction allowance and
+    /// may not exceed its sealed retry-attempt policy.
+    pub fn authorize_verification_correction(
+        &mut self,
+        failed_requirement_ids: &BTreeSet<String>,
+        now_ms: u64,
+    ) -> Result<Vec<String>, ExecutionError> {
+        if self.state != ExecutionRunState::ExecutionTasksFinishedAwaitingVerification {
+            return Err(ExecutionError::PolicyDenied(
+                "verification correction requires a finished implementation run".into(),
+            ));
+        }
+        if failed_requirement_ids.is_empty() {
+            return Err(ExecutionError::PolicyDenied(
+                "verification correction requires an exact failed requirement".into(),
+            ));
+        }
+
+        let known_requirements = self
+            .tasks
+            .values()
+            .flat_map(|task| task.requirement_ids.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        if failed_requirement_ids
+            .iter()
+            .any(|requirement_id| !known_requirements.contains(requirement_id))
+        {
+            return Err(ExecutionError::RevalidationRequired(
+                "verification failure references a requirement outside the sealed task graph".into(),
+            ));
+        }
+
+        let mut affected = self
+            .tasks
+            .values()
+            .filter(|task| {
+                task.requirement_ids
+                    .iter()
+                    .any(|id| failed_requirement_ids.contains(id))
+            })
+            .map(|task| task.task_id.clone())
+            .collect::<BTreeSet<_>>();
+        if affected.is_empty() {
+            return Err(ExecutionError::RevalidationRequired(
+                "failed verification requirement has no executable sealed task".into(),
+            ));
+        }
+
+        loop {
+            let mut changed = false;
+            for task in self.tasks.values() {
+                if !affected.contains(&task.task_id)
+                    && task
+                        .dependency_ids
+                        .iter()
+                        .any(|dependency| affected.contains(dependency))
+                {
+                    affected.insert(task.task_id.clone());
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        for task_id in &affected {
+            let task = self
+                .tasks
+                .get(task_id)
+                .ok_or_else(|| ExecutionError::UnknownTask(task_id.clone()))?;
+            if self.events.iter().any(|event| {
+                event.task_id.as_deref() == Some(task_id.as_str())
+                    && event.kind == ExecutionEventKind::VerificationCorrectionAuthorized
+            }) {
+                return Err(ExecutionError::PolicyDenied(format!(
+                    "the single bounded verification correction was already used for {task_id}"
+                )));
+            }
+            if task.state != ExecutionTaskState::FinishedAwaitingVerification {
+                return Err(ExecutionError::RevalidationRequired(format!(
+                    "verification correction target {task_id} is not at a finished task boundary"
+                )));
+            }
+        }
+
+        // A correction is new bounded authority under the current Beta policy.
+        // Prior usage is preserved and the new allowance is added on top, so
+        // historical work is never erased to manufacture budget.
+        self.policy.execution_time_policy = ExecutionTimePolicy::default();
+        self.policy.default_budget = UsageBudget::default();
+        let mut budgets = BTreeMap::new();
+        for task_id in &affected {
+            let task = self
+                .tasks
+                .get(task_id)
+                .ok_or_else(|| ExecutionError::UnknownTask(task_id.clone()))?;
+            let used = self.task_usage(task_id)?;
+            let fresh_wall = beta_task_wall_clock_budget_ms(
+                task.priority,
+                task.requirement_ids.len(),
+                task.dependency_ids.len(),
+                task.evidence_obligations.len(),
+                task.objective.len(),
+                self.policy.execution_time_policy.adapter_safety_timeout_ms,
+            );
+            budgets.insert(
+                task_id.clone(),
+                UsageBudget {
+                    wall_clock_ms: used.wall_time_ms.saturating_add(fresh_wall),
+                    execution_steps: used
+                        .execution_steps
+                        .saturating_add(self.policy.default_budget.execution_steps),
+                    tool_calls: used
+                        .tool_calls
+                        .saturating_add(self.policy.default_budget.tool_calls),
+                    // A verification correction is separate bounded authority.
+                    // Preserve historical attempts while allowing exactly one
+                    // fresh correction attempt even if an interrupted attempt
+                    // already consumed the normal retry count.
+                    retry_attempts: task.attempt_number.saturating_add(1),
+                    cost_micros: self.policy.default_budget.cost_micros,
+                },
+            );
+        }
+
+        for task_id in &affected {
+            let task = self
+                .tasks
+                .get_mut(task_id)
+                .ok_or_else(|| ExecutionError::UnknownTask(task_id.clone()))?;
+            task.state = ExecutionTaskState::Pending;
+            task.usage_budget = budgets
+                .remove(task_id)
+                .ok_or_else(|| ExecutionError::PolicyDenied("correction budget missing".into()))?;
+            self.emit(
+                now_ms,
+                Some(task_id.clone()),
+                ExecutionEventKind::VerificationCorrectionAuthorized,
+                "deterministic verification failure reopened the exact task/dependent boundary",
+            )?;
+        }
+        self.state = ExecutionRunState::Ready;
+        self.last_error = Some(format!(
+            "deterministic verification failed for {}; bounded correction authorized",
+            failed_requirement_ids.iter().cloned().collect::<Vec<_>>().join(",")
+        ));
+        Ok(affected.into_iter().collect())
+    }
+
+    pub fn has_pending_retry(&self) -> bool {
+        self.state == ExecutionRunState::Ready
+            && self
+                .tasks
+                .values()
+                .any(|task| task.state == ExecutionTaskState::WaitingRetry)
+    }
+
+    fn progress_renewal_count(&self, task_id: &str) -> u32 {
+        self.events
+            .iter()
+            .filter(|event| {
+                event.task_id.as_deref() == Some(task_id)
+                    && event.kind == ExecutionEventKind::ProgressRenewalAuthorized
+            })
+            .count() as u32
+    }
+
+    fn progress_supports_renewal(&self, snapshot: &ProgressSnapshot) -> bool {
+        let prior = self.progress.last();
+        let prior_passing_tests = prior
+            .filter(|item| item.passing_tests_observed)
+            .map(|item| item.passing_tests)
+            .unwrap_or_default();
+        let prior_artifacts = prior
+            .filter(|item| item.artifacts_observed)
+            .map(|item| item.useful_artifacts)
+            .unwrap_or_default();
+        let prior_resolved_blockers = prior.map(|item| item.resolved_blockers).unwrap_or_default();
+        let prior_dependency_completions = prior
+            .map(|item| item.dependency_completions)
+            .unwrap_or_default();
+        let prior_diagnostics = prior
+            .map(|item| item.diagnostic_information)
+            .unwrap_or_default();
+
+        // Locked spec 06 defines progress as requirement/evidence/test/diagnostic
+        // advancement. Arbitrary source edits are intentionally not authority:
+        // edit churn must never buy another execution lease on its own.
+        let tests_advanced = snapshot.passing_tests_observed
+            && snapshot.passing_tests > prior_passing_tests;
+        let evidence_advanced = snapshot.artifacts_observed
+            && snapshot.useful_artifacts > prior_artifacts;
+        let blocker_advanced = snapshot.resolved_blockers > prior_resolved_blockers;
+        let requirement_advanced = snapshot.dependency_completions > prior_dependency_completions;
+        let diagnostic_advanced = snapshot.diagnostic_information != 0
+            && snapshot.diagnostic_information != prior_diagnostics;
+
+        tests_advanced
+            || evidence_advanced
+            || blocker_advanced
+            || requirement_advanced
+            || diagnostic_advanced
+    }
+
+    fn authorize_progress_renewal(
+        &mut self,
+        task_id: &str,
+        snapshot: &ProgressSnapshot,
+        now_ms: u64,
+    ) -> Result<bool, ExecutionError> {
+        if self.progress_renewal_count(task_id) >= BETA_MAX_PROGRESS_RENEWALS_PER_TASK {
+            return Ok(false);
+        }
+        if matches!(
+            self.watchdog_state,
+            WatchdogState::RepeatedCommand
+                | WatchdogState::OscillationDetected
+                | WatchdogState::NoProgress
+                | WatchdogState::DriftDetected
+                | WatchdogState::ExternalModification
+                | WatchdogState::SafeBoundary
+        ) || !self.progress_supports_renewal(snapshot)
+        {
+            return Ok(false);
+        }
+
+        let used = self.task_usage(task_id)?;
+        let task_snapshot = self
+            .tasks
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| ExecutionError::UnknownTask(task_id.into()))?;
+        let fresh_wall = beta_task_wall_clock_budget_ms(
+            task_snapshot.priority,
+            task_snapshot.requirement_ids.len(),
+            task_snapshot.dependency_ids.len(),
+            task_snapshot.evidence_obligations.len(),
+            task_snapshot.objective.len(),
+            self.policy.execution_time_policy.adapter_safety_timeout_ms,
+        );
+        let default_steps = self.policy.default_budget.execution_steps;
+        let default_tools = self.policy.default_budget.tool_calls;
+        let task = self
+            .tasks
+            .get_mut(task_id)
+            .ok_or_else(|| ExecutionError::UnknownTask(task_id.into()))?;
+        task.usage_budget.wall_clock_ms = used.wall_time_ms.saturating_add(fresh_wall);
+        task.usage_budget.execution_steps =
+            used.execution_steps.saturating_add(default_steps);
+        task.usage_budget.tool_calls = used.tool_calls.saturating_add(default_tools);
+        task.usage_budget.retry_attempts = task.attempt_number.saturating_add(1);
+        task.state = ExecutionTaskState::WaitingRetry;
+
+        for lease in &mut self.leases {
+            if lease.task_id == task_id && lease.status == LeaseStatus::Active {
+                lease.revoke()?;
+            }
+        }
+        self.state = ExecutionRunState::Ready;
+        self.watchdog_state = WatchdogState::Healthy;
+        self.last_error = Some(
+            "bounded task authority expired after measurable progress; one fresh lease was authorized"
+                .into(),
+        );
+        self.emit(
+            now_ms,
+            Some(task_id.into()),
+            ExecutionEventKind::ProgressRenewalAuthorized,
+            "measurable progress justified one bounded fresh execution lease",
+        )?;
+        Ok(true)
     }
 
     /// Return the only identities that P8 may use to attribute evidence.
@@ -2509,13 +2970,13 @@ impl ExecutionRun {
         root: &Path,
         now_ms: u64,
     ) -> Result<RetryDecision, ExecutionError> {
-        self.execute_next_with_adapter_with_started_callback(
+        self.execute_next_with_adapter_with_callbacks(
             adapter,
             revision,
             handoff,
             root,
             now_ms,
-            |_, _| Ok(()),
+            (|_, _| Ok(()), |_| Ok(())),
         )
     }
 
@@ -2529,8 +2990,32 @@ impl ExecutionRun {
         handoff: &ExecutionHandoff,
         root: &Path,
         now_ms: u64,
-        mut on_attempt_started: F,
+        on_attempt_started: F,
     ) -> Result<RetryDecision, ExecutionError> {
+        self.execute_next_with_adapter_with_callbacks(
+            adapter,
+            revision,
+            handoff,
+            root,
+            now_ms,
+            (on_attempt_started, |_| Ok(())),
+        )
+    }
+
+    pub fn execute_next_with_adapter_with_callbacks<
+        A: AntigravityAdapter,
+        F: FnMut(&ExecutionRun, &ProcessIdentity) -> Result<(), ExecutionError>,
+        G: FnMut(&ExecutionRun) -> Result<(), ExecutionError>,
+    >(
+        &mut self,
+        adapter: &mut A,
+        revision: &MissionRevision,
+        handoff: &ExecutionHandoff,
+        root: &Path,
+        now_ms: u64,
+        callbacks: (F, G),
+    ) -> Result<RetryDecision, ExecutionError> {
+        let (mut on_attempt_started, mut on_completion_recorded) = callbacks;
         self.validate_authority_identity(revision, handoff, now_ms)?;
         let task_id = self
             .runnable_tasks()
@@ -2654,6 +3139,10 @@ impl ExecutionRun {
             passing_tests_observed: passing_test_count.is_some(),
             useful_artifacts: action_result.useful_artifacts,
             artifacts_observed: true,
+            diagnostic_information: observed_diagnostic_information(
+                &result.stdout,
+                &result.stderr,
+            ),
             ..ProgressSnapshot::default()
         };
         // A process that crossed the authoritative deadline is not eligible
@@ -2668,7 +3157,12 @@ impl ExecutionRun {
         )?;
         if success {
             self.record_adapter_completion(&task_id, &packet, &result)?;
-            self.finish_task(&task_id, ended_at_ms)?;
+            self.record_completion_workspace(&task_id, workspace_after.clone())?;
+            // This callback is the crash-consistency boundary: the exact clean
+            // process receipt and post-workspace inventory exist before the task
+            // is promoted to finished. Desktop persistence occurs here.
+            on_completion_recorded(self)?;
+            self.promote_task_from_trusted_completion(&task_id, ended_at_ms, false)?;
             progress_snapshot.task_state_fingerprint = self.task_state_fingerprint()?;
             progress_snapshot.dependency_completions = self
                 .tasks
@@ -2680,24 +3174,32 @@ impl ExecutionRun {
                 })
                 .count() as u64;
         } else if timeout_or_budget {
-            self.watchdog_state = WatchdogState::BudgetExhausted;
-            self.state = ExecutionRunState::RevalidationRequired;
-            if let Some(task) = self.tasks.get_mut(&task_id) {
-                task.state = ExecutionTaskState::BlockedExternal;
-            }
-            self.last_error = Some("adapter execution exceeded lease or wall-clock budget".into());
-            self.emit(
-                ended_at_ms,
-                Some(task_id.clone()),
-                ExecutionEventKind::BudgetWarning,
-                "adapter completion rejected after lease or wall-clock budget boundary",
-            )?;
-            if let Some(lease) = self
-                .leases
-                .iter_mut()
-                .find(|lease| lease.task_id == task_id && lease.status == LeaseStatus::Active)
-            {
-                lease.revoke()?;
+            if self.authorize_progress_renewal(&task_id, &progress_snapshot, ended_at_ms)? {
+                // The expired attempt remains terminal history. The task may
+                // continue only under a newly issued bounded lease.
+            } else {
+                self.watchdog_state = WatchdogState::BudgetExhausted;
+                self.state = ExecutionRunState::RevalidationRequired;
+                if let Some(task) = self.tasks.get_mut(&task_id) {
+                    task.state = ExecutionTaskState::BlockedExternal;
+                }
+                self.last_error = Some(
+                    "adapter execution exceeded lease or wall-clock budget without safe renewable progress"
+                        .into(),
+                );
+                self.emit(
+                    ended_at_ms,
+                    Some(task_id.clone()),
+                    ExecutionEventKind::BudgetWarning,
+                    "adapter completion rejected after lease or wall-clock budget boundary",
+                )?;
+                if let Some(lease) = self
+                    .leases
+                    .iter_mut()
+                    .find(|lease| lease.task_id == task_id && lease.status == LeaseStatus::Active)
+                {
+                    lease.revoke()?;
+                }
             }
         } else if let Some(lease) = self
             .leases
@@ -2763,16 +3265,25 @@ impl ExecutionRun {
             return Err(ExecutionError::LeaseBindingMismatch);
         }
         let process_digest = canonical_hash(result)?;
-        self.current_attempt_mut(task_id)?.completion_authority =
-            Some(ExecutionCompletionAuthority {
-                task_id: task_id.into(),
-                attempt_id: attempt.attempt_id,
-                packet_digest: packet.task_packet_digest.clone(),
-                lease_id: lease.lease_id.clone(),
-                process_digest,
-                started_at_ms,
-                ended_at_ms,
-            });
+        let proposed = ExecutionCompletionAuthority {
+            task_id: task_id.into(),
+            attempt_id: attempt.attempt_id,
+            packet_digest: packet.task_packet_digest.clone(),
+            lease_id: lease.lease_id.clone(),
+            process_digest,
+            started_at_ms,
+            ended_at_ms,
+        };
+        let current = self.current_attempt_mut(task_id)?;
+        if let Some(existing) = current.completion_authority.as_ref() {
+            if existing == &proposed {
+                return Ok(());
+            }
+            return Err(ExecutionError::RevalidationRequired(
+                "conflicting trusted executor completion receipt replay".into(),
+            ));
+        }
+        current.completion_authority = Some(proposed);
         Ok(())
     }
 
@@ -2982,6 +3493,29 @@ impl ExecutionRun {
         now_ms: u64,
         on_attempt_started: F,
     ) -> Result<(), ExecutionError> {
+        self.dispatch_next_with_adapter_with_callbacks(
+            adapter,
+            revision,
+            handoff,
+            now_ms,
+            on_attempt_started,
+            |_| Ok(()),
+        )
+    }
+
+    pub fn dispatch_next_with_adapter_with_callbacks<
+        A: AntigravityAdapter,
+        F: FnMut(&ExecutionRun, &ProcessIdentity) -> Result<(), ExecutionError>,
+        G: FnMut(&ExecutionRun) -> Result<(), ExecutionError>,
+    >(
+        &mut self,
+        adapter: &mut A,
+        revision: &MissionRevision,
+        handoff: &ExecutionHandoff,
+        now_ms: u64,
+        on_attempt_started: F,
+        on_completion_recorded: G,
+    ) -> Result<(), ExecutionError> {
         self.validate_authority_identity(revision, handoff, now_ms)?;
         if self.runnable_tasks().is_empty() {
             return Err(ExecutionError::DependencyNotReady(
@@ -2989,13 +3523,13 @@ impl ExecutionRun {
             ));
         }
         let root = self.workspace.clone();
-        match self.execute_next_with_adapter_with_started_callback(
+        match self.execute_next_with_adapter_with_callbacks(
             adapter,
             revision,
             handoff,
             &root,
             now_ms,
-            on_attempt_started,
+            (on_attempt_started, on_completion_recorded),
         ) {
             Ok(_) => {}
             Err(_error)
@@ -3408,6 +3942,40 @@ fn overlap(left: &[String], right: &[String]) -> bool {
     })
 }
 
+fn beta_task_wall_clock_budget_ms(
+    priority: RequirementPriority,
+    requirement_count: usize,
+    dependency_count: usize,
+    evidence_count: usize,
+    objective_len: usize,
+    safety_cap_ms: u64,
+) -> u64 {
+    let mut complexity = match priority {
+        RequirementPriority::P0 => 4_u32,
+        RequirementPriority::P1 => 4,
+        RequirementPriority::P2 => 2,
+        RequirementPriority::P3 => 1,
+    };
+    complexity = complexity
+        .saturating_add(requirement_count.saturating_sub(1).min(4) as u32)
+        .saturating_add(dependency_count.min(3) as u32)
+        .saturating_add(evidence_count.saturating_sub(1).min(3) as u32);
+    if objective_len >= 240 {
+        complexity = complexity.saturating_add(2);
+    } else if objective_len >= 120 {
+        complexity = complexity.saturating_add(1);
+    }
+
+    let selected = if complexity >= 8 {
+        BETA_COMPLEX_TASK_EXECUTION_BUDGET_MS
+    } else if complexity >= 4 {
+        BETA_TASK_EXECUTION_BUDGET_MS
+    } else {
+        BETA_MIN_TASK_EXECUTION_BUDGET_MS
+    };
+    selected.min(safety_cap_ms)
+}
+
 fn budget_exhausted(budget: &UsageBudget) -> bool {
     budget.wall_clock_ms == 0
         && budget.execution_steps == 0
@@ -3503,6 +4071,54 @@ fn observed_passing_test_count(stdout: &[u8], stderr: &[u8]) -> Option<u64> {
         }
     }
     observed.then_some(total)
+}
+
+/// Fingerprint only structured compiler/test/runtime diagnostics. Free-form
+/// executor narration is not progress authority and therefore hashes to zero.
+fn observed_diagnostic_information(stdout: &[u8], stderr: &[u8]) -> u64 {
+    let mut diagnostics = String::from_utf8_lossy(stdout)
+        .lines()
+        .chain(String::from_utf8_lossy(stderr).lines())
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            let lower = trimmed.to_ascii_lowercase();
+            let structured = lower.starts_with("error:")
+                || lower.starts_with("error[")
+                || lower.contains(": error:")
+                || lower.contains(": error ts")
+                || lower.starts_with("warning:")
+                || lower.contains(": warning:")
+                || lower.contains("test result: failed")
+                || lower.starts_with("fail ")
+                || lower.starts_with("failed ")
+                || lower.contains("panicked at")
+                || lower.starts_with("thread '") && lower.contains("panicked")
+                || lower.starts_with("traceback (")
+                || lower.contains("exception:")
+                || lower.contains("assertionerror")
+                || lower.starts_with("npm error")
+                || lower.starts_with("npm err!")
+                || lower.starts_with("caused by:");
+            structured.then(|| trimmed.to_string())
+        })
+        .collect::<Vec<_>>();
+    diagnostics.sort();
+    diagnostics.dedup();
+    if diagnostics.is_empty() {
+        return 0;
+    }
+
+    let mut hasher = Sha256::new();
+    for line in diagnostics {
+        hasher.update(line.as_bytes());
+        hasher.update(b"\n");
+    }
+    let digest = hasher.finalize();
+    digest
+        .iter()
+        .take(8)
+        .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte))
+        .max(1)
 }
 
 fn parse_count_before(line: &str, marker: &str) -> u64 {
@@ -3764,6 +4380,282 @@ mod recovery_boundary_tests {
         let store =
             RecoveryStore::new(recovery_root, vec![9; 32]).expect("open recovery fixture store");
         (root, run, authority, store)
+    }
+
+    fn prepare_persisted_completion(run: &mut ExecutionRun, root: &Path) {
+        fs::write(root.join("completed.txt"), b"trusted-completion").expect("write completed workspace");
+        let after = workspace_inventory(root).expect("inventory completed workspace");
+        let scope = run.tasks["task-recovery"].scope.clone();
+        let budget = UsageBudget {
+            wall_clock_ms: 1_000,
+            ..UsageBudget::default()
+        };
+        let lease = ExecutionLease::issue(
+            &run.mission_id,
+            run.mission_revision,
+            "task-recovery",
+            "packet-complete",
+            scope,
+            budget,
+            1,
+            100,
+        )
+        .expect("issue completion lease");
+        let lease_id = lease.lease_id.clone();
+        run.leases = vec![lease];
+        run.state = ExecutionRunState::Running;
+        run.tasks
+            .get_mut("task-recovery")
+            .expect("task")
+            .state = ExecutionTaskState::Running;
+        let attempt = run.attempts.get_mut(0).expect("attempt");
+        attempt.state = TaskAttemptState::Running;
+        attempt.packet_digest = "packet-complete".into();
+        attempt.lease_id = lease_id.clone();
+        attempt.started_at_ms = 100;
+        attempt.ended_at_ms = None;
+        attempt.failure_class = None;
+        attempt.failure_fingerprint = None;
+        attempt.termination_reason = None;
+        attempt.execution_boundary = AttemptExecutionBoundary::ExternalProcessStarted;
+        attempt.workspace_before = Some(BTreeMap::new());
+        attempt.workspace_after = Some(after);
+        attempt.completion_authority = Some(ExecutionCompletionAuthority {
+            task_id: "task-recovery".into(),
+            attempt_id: attempt.attempt_id.clone(),
+            packet_digest: "packet-complete".into(),
+            lease_id,
+            process_digest: "trusted-process-digest".into(),
+            started_at_ms: 100,
+            ended_at_ms: 200,
+        });
+    }
+
+    #[test]
+    fn persisted_trusted_completion_recovers_only_when_workspace_still_matches() {
+        let (root, mut run, _, _) =
+            fixture("trusted-completion-recovery", AttemptExecutionBoundary::ExternalProcessStarted);
+        prepare_persisted_completion(&mut run, &root);
+        assert!(run
+            .recover_trusted_completion_after_restart(250)
+            .expect("recover trusted completion"));
+        assert_eq!(
+            run.tasks["task-recovery"].state,
+            ExecutionTaskState::FinishedAwaitingVerification
+        );
+        assert_eq!(run.attempts[0].state, TaskAttemptState::Succeeded);
+        assert_eq!(run.leases[0].status, LeaseStatus::Consumed);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn persisted_trusted_completion_fails_closed_after_external_workspace_change() {
+        let (root, mut run, _, _) =
+            fixture("trusted-completion-mutation", AttemptExecutionBoundary::ExternalProcessStarted);
+        prepare_persisted_completion(&mut run, &root);
+        fs::write(root.join("completed.txt"), b"changed-after-receipt")
+            .expect("mutate completed workspace");
+        assert!(matches!(
+            run.recover_trusted_completion_after_restart(250),
+            Err(ExecutionError::RevalidationRequired(_))
+        ));
+        assert_eq!(
+            run.tasks["task-recovery"].state,
+            ExecutionTaskState::Running
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn trusted_completion_workspace_record_is_idempotent_but_conflicting_replay_is_rejected() {
+        let (root, mut run, _, _) =
+            fixture("trusted-workspace-replay", AttemptExecutionBoundary::ExternalProcessStarted);
+        prepare_persisted_completion(&mut run, &root);
+        let exact = run.attempts[0]
+            .workspace_after
+            .clone()
+            .expect("persisted post workspace");
+        run.record_completion_workspace("task-recovery", exact.clone())
+            .expect("exact replay is idempotent");
+
+        let mut conflicting = exact;
+        conflicting.insert("conflict.txt".into(), "not-the-authenticated-workspace".into());
+        assert!(matches!(
+            run.record_completion_workspace("task-recovery", conflicting),
+            Err(ExecutionError::RevalidationRequired(_))
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn exact_trusted_completion_promotion_replay_is_idempotent_but_conflicting_time_is_rejected() {
+        let (root, mut run, _, _) =
+            fixture("trusted-promotion-replay", AttemptExecutionBoundary::ExternalProcessStarted);
+        prepare_persisted_completion(&mut run, &root);
+        run.promote_task_from_trusted_completion("task-recovery", 200, true)
+            .expect("first promotion");
+        run.promote_task_from_trusted_completion("task-recovery", 200, true)
+            .expect("exact replay is idempotent");
+        assert!(matches!(
+            run.promote_task_from_trusted_completion("task-recovery", 201, true),
+            Err(ExecutionError::RevalidationRequired(_))
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn beta_task_budget_is_complexity_sized_and_bounded_by_safety_cap() {
+        assert_eq!(
+            beta_task_wall_clock_budget_ms(
+                RequirementPriority::P3,
+                1,
+                0,
+                1,
+                20,
+                ADAPTER_PROCESS_SAFETY_TIMEOUT_MS,
+            ),
+            BETA_MIN_TASK_EXECUTION_BUDGET_MS
+        );
+        assert_eq!(
+            beta_task_wall_clock_budget_ms(
+                RequirementPriority::P1,
+                1,
+                0,
+                1,
+                20,
+                ADAPTER_PROCESS_SAFETY_TIMEOUT_MS,
+            ),
+            BETA_TASK_EXECUTION_BUDGET_MS
+        );
+        assert_eq!(
+            beta_task_wall_clock_budget_ms(
+                RequirementPriority::P0,
+                4,
+                3,
+                3,
+                300,
+                ADAPTER_PROCESS_SAFETY_TIMEOUT_MS,
+            ),
+            BETA_COMPLEX_TASK_EXECUTION_BUDGET_MS
+        );
+        assert_eq!(
+            beta_task_wall_clock_budget_ms(
+                RequirementPriority::P0,
+                4,
+                3,
+                3,
+                300,
+                5 * 60 * 1_000,
+            ),
+            5 * 60 * 1_000
+        );
+    }
+
+    #[test]
+    fn measurable_progress_can_authorize_only_one_fresh_lease_cycle() {
+        let (root, mut run, _, _) =
+            fixture("progress-renewal", AttemptExecutionBoundary::ExternalProcessStarted);
+        run.workspace_fingerprint = "before".into();
+        let snapshot = ProgressSnapshot {
+            workspace_fingerprint: "after".into(),
+            changed_paths: vec!["src/main.rs".into()],
+            diagnostic_information: 1,
+            ..ProgressSnapshot::default()
+        };
+        assert!(run
+            .authorize_progress_renewal("task-recovery", &snapshot, 100)
+            .expect("authorize progress renewal"));
+        assert!(run.has_pending_retry());
+        assert_eq!(
+            run.tasks["task-recovery"].state,
+            ExecutionTaskState::WaitingRetry
+        );
+        assert!(!run
+            .authorize_progress_renewal("task-recovery", &snapshot, 101)
+            .expect("deny second progress renewal"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn diagnostic_progress_requires_structured_new_information() {
+        assert_eq!(
+            observed_diagnostic_information(
+                b"still working; changed several files; everything looks good",
+                b"",
+            ),
+            0
+        );
+
+        let first = observed_diagnostic_information(
+            b"",
+            b"error[E0308]: mismatched types\n  --> src/lib.rs:10:5",
+        );
+        let same = observed_diagnostic_information(
+            b"",
+            b"error[E0308]: mismatched types\n  --> src/lib.rs:10:5",
+        );
+        let changed = observed_diagnostic_information(
+            b"",
+            b"error[E0425]: cannot find value `authority` in this scope",
+        );
+        assert_ne!(first, 0);
+        assert_eq!(first, same);
+        assert_ne!(first, changed);
+    }
+
+    #[test]
+    fn arbitrary_workspace_edits_do_not_renew_execution_authority() {
+        let (root, mut run, _, _) =
+            fixture("edit-churn-no-renewal", AttemptExecutionBoundary::ExternalProcessStarted);
+        run.workspace_fingerprint = "before".into();
+        let snapshot = ProgressSnapshot {
+            workspace_fingerprint: "after".into(),
+            changed_paths: vec!["src/main.rs".into()],
+            ..ProgressSnapshot::default()
+        };
+        assert!(!run
+            .authorize_progress_renewal("task-recovery", &snapshot, 100)
+            .expect("edit churn must not renew authority"));
+        assert!(!run.has_pending_retry());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn verification_correction_is_separate_bounded_authority_and_not_an_endless_loop() {
+        let (root, mut run, _, _) =
+            fixture("verification-correction", AttemptExecutionBoundary::ExternalProcessStarted);
+        run.state = ExecutionRunState::ExecutionTasksFinishedAwaitingVerification;
+        {
+            let task = run.tasks.get_mut("task-recovery").expect("task");
+            task.state = ExecutionTaskState::FinishedAwaitingVerification;
+            task.requirement_ids = vec!["req-a".into()];
+            task.attempt_number = task.retry_policy.max_attempts;
+        }
+        let failed = ["req-a".to_string()].into_iter().collect::<BTreeSet<_>>();
+        let affected = run
+            .authorize_verification_correction(&failed, 100)
+            .expect("authorize single correction");
+        assert_eq!(affected, vec!["task-recovery".to_string()]);
+        assert_eq!(run.state, ExecutionRunState::Ready);
+        assert_eq!(
+            run.tasks["task-recovery"].state,
+            ExecutionTaskState::Pending
+        );
+        assert!(
+            run.tasks["task-recovery"].usage_budget.retry_attempts
+                > run.tasks["task-recovery"].attempt_number
+        );
+
+        run.state = ExecutionRunState::ExecutionTasksFinishedAwaitingVerification;
+        run.tasks
+            .get_mut("task-recovery")
+            .expect("task")
+            .state = ExecutionTaskState::FinishedAwaitingVerification;
+        assert!(matches!(
+            run.authorize_verification_correction(&failed, 101),
+            Err(ExecutionError::PolicyDenied(_))
+        ));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -3743,7 +3743,7 @@ fn run_execution_step_worker(
             }
             control.process_started.store(false, Ordering::Release);
             control.process_exited.store(false, Ordering::Release);
-            let dispatch = run.dispatch_next_with_adapter_with_callback(
+            let dispatch = run.dispatch_next_with_adapter_with_callbacks(
                 &mut adapter,
                 &revision,
                 &handoff,
@@ -3768,6 +3768,22 @@ fn run_execution_step_worker(
                         "task attempt started and executor process ownership persisted",
                         CheckpointKind::AfterTaskPersistence,
                         vec![record],
+                    )
+                },
+                |snapshot| {
+                    let processes = owned_process_records(
+                        &control,
+                        ProcessObservation::ProcessCompletedResultAvailable,
+                    )
+                    .map_err(relintor_execution::ExecutionError::Ledger)?;
+                    persist_execution_boundary(
+                        snapshot,
+                        &ledger_path,
+                        &recovery,
+                        &revision,
+                        "trusted executor completion receipt and exact post-workspace persisted before task promotion",
+                        CheckpointKind::AfterAtomicAction,
+                        processes,
                     )
                 },
             );
@@ -3850,6 +3866,14 @@ fn run_execution_step_worker(
             if control.cancel.load(Ordering::Acquire) != 0 {
                 continue;
             }
+            // A failed/expired attempt may have already received explicit
+            // bounded retry or progress-renewal authority. That is a different
+            // boundary from moving to the next successful task, so do not
+            // require a TASK_IMPLEMENTATION_FINISHED event before the fresh
+            // lease is issued.
+            if run.has_pending_retry() {
+                continue;
+            }
             match run.authorize_next_task_continuation(&revision, &handoff, execution_now_ms()) {
                 Ok(Some(_next_task)) => {
                     persist_execution_boundary(
@@ -3888,6 +3912,24 @@ fn run_execution_step_worker(
     }
     if let Ok(mut active) = active_executions().lock() {
         active.remove(&project_id);
+    }
+    // Normal healthy execution closes itself through evidence, verification,
+    // bounded correction (when deterministic work is actually wrong), and a
+    // completion certificate. The user should not have to babysit task-to-P8
+    // transitions.
+    if let Ok((run, _, _, _)) = load_execution_run(&app, &project_id) {
+        if run.state
+            == relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
+        {
+            if let Err(error) = automatic_verification_closure(&app, &project_id) {
+                eprintln!("Relintor automatic verification closure stopped: {error}");
+                notify_user(
+                    &app,
+                    "Relintor needs your attention",
+                    "Implementation is preserved, but verification could not close automatically. Review verification before retrying.",
+                );
+            }
+        }
     }
 }
 
@@ -3987,6 +4029,46 @@ fn reconcile_persisted_running_execution(
     revision: &MissionRevision,
     recovery: &RecoveryStore,
 ) -> Result<(), String> {
+    // First recover the narrow crash window where Antigravity already exited
+    // cleanly and Relintor durably persisted the exact completion receipt +
+    // post-workspace inventory, but the desktop stopped before promoting the
+    // task. This is stronger than process/file inference: the P7 receipt,
+    // lease, packet, attempt, and current workspace must all still match.
+    match run.recover_trusted_completion_after_restart(execution_now_ms()) {
+        Ok(true) => {
+            persist_execution_boundary(
+                run,
+                ledger_path,
+                recovery,
+                revision,
+                "restart recovered a previously persisted trusted executor completion before task promotion",
+                CheckpointKind::AfterAtomicAction,
+                Vec::new(),
+            )
+            .map_err(|error| format!("persist recovered trusted completion: {error}"))?;
+            return Ok(());
+        }
+        Ok(false) => {}
+        Err(relintor_execution::ExecutionError::RevalidationRequired(reason)) => {
+            run.state = relintor_execution::ExecutionRunState::RevalidationRequired;
+            run.last_error = Some(reason.clone());
+            persist_execution_boundary(
+                run,
+                ledger_path,
+                recovery,
+                revision,
+                &format!("trusted completion recovery requires revalidation: {reason}"),
+                CheckpointKind::RestartRecovery,
+                Vec::new(),
+            )
+            .map_err(|error| format!("persist trusted completion revalidation: {error}"))?;
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(format!("recover persisted trusted completion: {error}"));
+        }
+    }
+
     let latest = recovery
         .load_latest()
         .map_err(|error| format!("load persisted executor identity: {error}"))?;
@@ -4654,13 +4736,26 @@ struct P8VerificationContext {
     local_key: Vec<u8>,
 }
 
+fn ensure_terminal_p7_workspace_matches(
+    current_workspace_fingerprint: &str,
+    terminal_p7_workspace_fingerprint: &str,
+) -> Result<(), String> {
+    if current_workspace_fingerprint != terminal_p7_workspace_fingerprint {
+        return Err(
+            "P8_REVALIDATION_REQUIRED: the workspace changed after the authenticated terminal P7 execution boundary; new evidence cannot be attributed to that completed run"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 fn load_p8_verification_context(
     app: &AppHandle,
     project_id: &str,
 ) -> Result<P8VerificationContext, String> {
     let path = database_path(app)?;
     migrate_database(&path)?;
-    let (revision, handoff, registry, trusted, workspace, workspace_fingerprint) =
+    let (revision, handoff, registry, trusted, workspace, _takeover_workspace_fingerprint) =
         latest_execution_context(&path, project_id)?;
     let ledger_path = execution_ledger_path(app, &revision.seal.mission_id, revision.revision)?;
     if !ledger_path.is_file() {
@@ -4672,6 +4767,10 @@ fn load_p8_verification_context(
     let p7_execution = AuthenticatedP7Execution::from_snapshot(&ledger_path)
         .map_err(|error| format!("authenticate P7 execution ledger: {error}"))?;
     let p7_run_id = p7_execution.run.run_id.clone();
+    // P8 verifies the exact terminal workspace produced by the authenticated P7 run.
+    // The takeover fingerprint describes the source state before execution and must
+    // never be substituted for the post-execution authority boundary.
+    let verification_workspace_fingerprint = p7_execution.run.workspace_fingerprint.clone();
     let p7_state = "EXECUTION_TASKS_FINISHED_AWAITING_VERIFICATION".into();
     let source_revision = Some(revision.contract.project_source_revision.clone());
     let environment = environment_fingerprint(
@@ -4695,7 +4794,7 @@ fn load_p8_verification_context(
         trusted_signers: trusted,
         p7_run_id,
         p7_state,
-        workspace_fingerprint: workspace_fingerprint.clone(),
+        workspace_fingerprint: verification_workspace_fingerprint,
         source_revision: source_revision.clone(),
         environment_fingerprint: environment_fingerprint.clone(),
     };
@@ -4724,6 +4823,10 @@ fn load_p8_verification_context(
     .map_err(|error| format!("open P8 evidence store: {error}"))?;
     let current_workspace_fingerprint = fingerprint_workspace(&workspace)
         .map_err(|error| format!("fingerprint current verification workspace: {error}"))?;
+    ensure_terminal_p7_workspace_matches(
+        &current_workspace_fingerprint,
+        &verification_workspace_fingerprint,
+    )?;
     let current = FreshnessContext {
         mission_id: authority.revision.seal.mission_id.clone(),
         mission_revision: authority.revision.revision,
@@ -5007,13 +5110,154 @@ fn persist_completion_certificate(
         .map_err(|error| format!("commit completion certificate: {error}"))
 }
 
+fn ensure_verified_completion_certificate(
+    app: &AppHandle,
+    context: &P8VerificationContext,
+    report: &relintor_evidence::VerificationReport,
+    manifest: &EvidenceManifest,
+) -> Result<Option<CompletionCertificate>, String> {
+    if report.decision.state != relintor_evidence::CompletionState::VerifiedComplete {
+        return Ok(None);
+    }
+    if let Some(existing) = load_persisted_certificate(app, context, manifest)? {
+        return Ok(Some(existing));
+    }
+    let authority = CompletionAuthority::new(&context.local_key)
+        .map_err(|error| format!("open P8 completion authority: {error}"))?;
+    let certificate = authority
+        .issue_with_p7_execution(report, &context.authority, &context.p7_execution)
+        .map_err(|error| format!("issue completion certificate: {error}"))?;
+    authority
+        .validate_with_store(
+            &certificate,
+            &context.authority,
+            &context.store,
+            manifest,
+            &context.current,
+        )
+        .map_err(|error| format!("validate completion certificate: {error}"))?;
+    persist_completion_certificate(app, context, &certificate)?;
+    notify_user(
+        app,
+        "Relintor verified complete",
+        "All sealed requirements are verified and the completion certificate is valid.",
+    );
+    Ok(Some(certificate))
+}
+
+fn deterministic_failed_requirement_ids(
+    report: &relintor_evidence::VerificationReport,
+) -> BTreeSet<String> {
+    report
+        .requirement_statuses
+        .iter()
+        .filter(|status| {
+            status.status == RequirementStatus::Failed && !status.failed_evidence.is_empty()
+        })
+        .map(|status| status.requirement_id.clone())
+        .collect()
+}
+
+fn authorize_and_launch_verification_correction(
+    app: &AppHandle,
+    project_id: &str,
+    report: &relintor_evidence::VerificationReport,
+) -> Result<bool, String> {
+    let failed = deterministic_failed_requirement_ids(report);
+    if failed.is_empty() {
+        return Ok(false);
+    }
+    let project_id = canonical_project_id(project_id)?;
+    with_execution_mutation_lock(|| {
+        require_execution_not_active(&project_id)?;
+        let (mut run, ledger_path, revision, _handoff) =
+            load_execution_run(app, &project_id)?;
+        let affected = run
+            .authorize_verification_correction(&failed, execution_now_ms())
+            .map_err(|error| error.to_string())?;
+        let recovery = recovery_store(app, &revision)?;
+        persist_execution_boundary(
+            &run,
+            &ledger_path,
+            &recovery,
+            &revision,
+            &format!(
+                "deterministic verification failed; bounded corrective execution authorized for {}",
+                affected.join(",")
+            ),
+            CheckpointKind::AfterTaskPersistence,
+            Vec::new(),
+        )
+        .map_err(|error| format!("persist verification correction authority: {error}"))?;
+
+        let readiness = health_antigravity_for_app(Some(app));
+        if !readiness.adapter_ready {
+            return Err(format!(
+                "ANTIGRAVITY_SETUP_REQUIRED: {}",
+                readiness.detail
+            ));
+        }
+        let cli_path = configured_antigravity_cli(app).ok_or_else(|| {
+            "ANTIGRAVITY_SETUP_REQUIRED: the verified Antigravity CLI path is unavailable"
+                .to_string()
+        })?;
+        launch_execution_worker(app.clone(), project_id.clone(), cli_path)
+            .map_err(|error| format!("launch bounded verification correction: {error}"))?;
+        Ok(true)
+    })
+}
+
+fn automatic_verification_closure(app: &AppHandle, project_id: &str) -> Result<(), String> {
+    let (context, report, manifest) = evaluate_p8(app, project_id)?;
+    match report.decision.state {
+        relintor_evidence::CompletionState::VerifiedComplete => {
+            ensure_verified_completion_certificate(app, &context, &report, &manifest)?;
+        }
+        relintor_evidence::CompletionState::FailedVerification => {
+            match authorize_and_launch_verification_correction(app, project_id, &report) {
+                Ok(true) => {}
+                Ok(false) => notify_user(
+                    app,
+                    "Relintor needs your attention",
+                    "Verification failed but no safe deterministic correction target was available.",
+                ),
+                Err(error) => {
+                    eprintln!("Relintor verification correction was not authorized: {error}");
+                    notify_user(
+                        app,
+                        "Relintor needs your attention",
+                        "Verification found a real failure, but bounded automatic correction could not be authorized safely.",
+                    );
+                }
+            }
+        }
+        relintor_evidence::CompletionState::BlockedExternal
+        | relintor_evidence::CompletionState::RevalidationRequired
+        | relintor_evidence::CompletionState::StoppedIncomplete
+        | relintor_evidence::CompletionState::CompleteWithAcceptedRisks => {
+            notify_user(
+                app,
+                "Relintor needs your attention",
+                "The mission is preserved, but completion still requires an explicit verification or external decision.",
+            );
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn verification_start(
     app: AppHandle,
     project_id: String,
 ) -> Result<VerificationStatusView, String> {
     let (context, report, manifest) = evaluate_p8(&app, &project_id)?;
-    let certificate = load_persisted_certificate(&app, &context, &manifest)?;
+    let certificate = ensure_verified_completion_certificate(&app, &context, &report, &manifest)?;
+    if report.decision.state == relintor_evidence::CompletionState::FailedVerification {
+        // A deterministic implementation failure is not handed back to the
+        // user as "done". Relintor authorizes one bounded correction path for
+        // the exact failed requirement/dependents when policy still permits it.
+        let _ = authorize_and_launch_verification_correction(&app, &project_id, &report);
+    }
     Ok(verification_view(
         &project_id,
         &context,
@@ -5705,6 +5949,38 @@ fn sha256_hex(value: &[u8]) -> String {
         .collect()
 }
 
+fn resume_pending_verification_on_startup(app: AppHandle) {
+    std::thread::spawn(move || {
+        // Let Tauri finish constructing its runtime before evidence collectors
+        // or notifications are used. This is not a timer-based completion
+        // decision; it only resumes already-finished P7 runs.
+        std::thread::sleep(Duration::from_millis(750));
+        let projects = match projects_list(app.clone()) {
+            Ok(projects) => projects,
+            Err(error) => {
+                eprintln!("Relintor startup verification scan skipped: {error}");
+                return;
+            }
+        };
+        for project in projects {
+            let Ok((run, _, _, _)) = load_execution_run(&app, &project.project_id) else {
+                continue;
+            };
+            if run.state
+                != relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
+            {
+                continue;
+            }
+            if let Err(error) = automatic_verification_closure(&app, &project.project_id) {
+                eprintln!(
+                    "Relintor startup verification closure stopped for {}: {error}",
+                    project.project_id
+                );
+            }
+        }
+    });
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -5716,6 +5992,8 @@ pub fn run() {
                 Ok(path) => {
                     if let Err(error) = migrate_database(&path) {
                         eprintln!("Relintor local database initialization failed: {error}");
+                    } else {
+                        resume_pending_verification_on_startup(handle.clone());
                     }
                 }
                 Err(error) => {
@@ -5801,6 +6079,15 @@ mod tests {
                 params![project_id, format!("Project {project_id}"), root],
             )
             .expect("project identity");
+    }
+
+    #[test]
+    fn p8_rejects_workspace_changed_after_authenticated_terminal_p7_boundary() {
+        ensure_terminal_p7_workspace_matches("terminal", "terminal")
+            .expect("exact terminal workspace is verification-eligible");
+        assert!(ensure_terminal_p7_workspace_matches("changed", "terminal")
+            .expect_err("post-P7 edit must require revalidation")
+            .contains("P8_REVALIDATION_REQUIRED"));
     }
 
     #[test]
