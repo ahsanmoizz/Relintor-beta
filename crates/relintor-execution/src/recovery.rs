@@ -9,6 +9,7 @@ use super::{
     AttemptExecutionBoundary, ExecutionError, ExecutionRun, ExecutionRunState,
     RecoveryAttemptTarget,
 };
+#[cfg(windows)]
 use relintor_antigravity::{observable_process_command_digest, process_creation_time_ms};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -26,6 +27,7 @@ pub const MAX_CHECKPOINT_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_SNAPSHOT_FILES: usize = 4096;
 pub const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_UNTRACKED_FILE_BYTES: u64 = 2 * 1024 * 1024;
+#[cfg(windows)]
 const REPARSE_POINT: u32 = 0x400;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1481,7 +1483,9 @@ fn process_image_name(pid: u32) -> Option<String> {
 }
 
 fn hidden_command(program: &str) -> Command {
-    let mut command = Command::new(program);
+    let command = Command::new(program);
+    #[cfg(windows)]
+    let mut command = command;
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
