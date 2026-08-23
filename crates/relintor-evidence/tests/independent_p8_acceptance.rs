@@ -207,12 +207,22 @@ fn mutable_workspace_plan_cannot_mint_criterion_authority() {
     let (authority, current, root) = authority_fixture();
     let config_dir = root.path().join(".relintor");
     fs::create_dir_all(&config_dir).expect("verification config directory");
+    let command = command_for_exit(root.path(), true);
+    let plan = serde_json::json!({
+        "collectors": [{
+            "class": "TEST_OUTPUT",
+            "program": &command.program,
+            "args": &command.args,
+            "criteria": [{
+                "requirement_id": "P8-TEST-01",
+                "criterion_id": "P8-TEST-01-criterion",
+                "probe_identity": "cmd-exit-probe"
+            }]
+        }]
+    });
     fs::write(
         config_dir.join("verification-plan.json"),
-        r#"{"collectors":[
-            {"class":"TEST_OUTPUT","program":"cmd","args":["/C","exit","0"],
-             "criteria":[{"requirement_id":"P8-TEST-01","criterion_id":"P8-TEST-01-criterion","probe_identity":"cmd-exit-probe"}]}
-        ]}"#,
+        serde_json::to_vec(&plan).expect("portable verification plan"),
     )
     .expect("verification plan");
     let store = store(root.path());
@@ -235,19 +245,19 @@ fn protected_criterion_mapping_mints_evidence_only_for_matching_candidate() {
     let (authority, current, root) = authority_fixture();
     let config_dir = root.path().join(".relintor");
     fs::create_dir_all(&config_dir).expect("verification config directory");
+    let command = command_for_exit(root.path(), true);
+    let plan = serde_json::json!({
+        "collectors": [{
+            "class": "TEST_OUTPUT",
+            "program": &command.program,
+            "args": &command.args
+        }]
+    });
     fs::write(
         config_dir.join("verification-plan.json"),
-        r#"{"collectors":[
-            {"class":"TEST_OUTPUT","program":"cmd","args":["/C","exit","0"]}
-        ]}"#,
+        serde_json::to_vec(&plan).expect("portable verification plan"),
     )
     .expect("verification plan");
-    let command = CommandSpec {
-        program: "cmd".into(),
-        args: vec!["/C".into(), "exit".into(), "0".into()],
-        working_directory: root.path().to_path_buf(),
-        environment: BTreeMap::new(),
-    };
     let protected = ProtectedCriterionVerificationPlan::from_test_support(
         &authority,
         vec![CriterionProbeAuthorizationInput {
