@@ -989,7 +989,7 @@ fn performance_threshold_failure_is_visible() {
         BTreeSet::new(),
     )
     .unwrap();
-    let collected = PerformanceCollector
+    let collected = PerformanceCollector::default()
         .measure(&binding, "p95", 400.0, 200.0, "ms", "real-runtime")
         .unwrap();
     assert_eq!(collected.observation.result, EvidenceResult::Fail);

@@ -4794,7 +4794,7 @@ fn load_p8_verification_context(
         trusted_signers: trusted,
         p7_run_id,
         p7_state,
-        workspace_fingerprint: verification_workspace_fingerprint,
+        workspace_fingerprint: verification_workspace_fingerprint.clone(),
         source_revision: source_revision.clone(),
         environment_fingerprint: environment_fingerprint.clone(),
     };
