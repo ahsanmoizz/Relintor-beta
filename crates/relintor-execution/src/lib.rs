@@ -4889,7 +4889,7 @@ mod recovery_boundary_tests {
                 CheckpointKind::RestartRecovery,
                 &root,
                 vec![ProcessOwnershipRecord {
-                    process_id: 42,
+                    process_id: u32::MAX,
                     process_start_time_ms: Some(10),
                     executable_path: "agy.exe".into(),
                     executable_digest: "executor-digest".into(),
