@@ -131,10 +131,17 @@ fn sealed_fixture() -> (
 }
 
 fn workspace() -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR")
+    let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("target"))
-        .join("p7-independent-source-audit")
+        .unwrap_or_else(|| PathBuf::from("target"));
+    let target = if target.is_absolute() {
+        target
+    } else {
+        std::env::current_dir()
+            .expect("resolve P7 source-audit working directory")
+            .join(target)
+    };
+    target.join("p7-independent-source-audit")
 }
 
 fn run() -> ExecutionRun {

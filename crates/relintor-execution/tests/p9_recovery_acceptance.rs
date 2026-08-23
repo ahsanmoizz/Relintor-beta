@@ -22,6 +22,13 @@ fn root(name: &str) -> PathBuf {
     let base = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("target"));
+    let base = if base.is_absolute() {
+        base
+    } else {
+        std::env::current_dir()
+            .expect("resolve P9 recovery working directory")
+            .join(base)
+    };
     let path = base.join(format!("p9-acceptance-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&path);
     fs::create_dir_all(&path).expect("create P9 fixture root");
