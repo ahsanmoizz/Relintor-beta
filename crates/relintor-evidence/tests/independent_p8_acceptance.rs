@@ -823,6 +823,52 @@ fn atomic_evidence_commit_reloads_and_partial_metadata_is_never_accepted() {
 }
 
 #[test]
+fn long_collector_evidence_ids_round_trip_without_using_path_length_as_failure_state() {
+    let (authority, current, root) = authority_fixture();
+    let evidence_store = store(root.path());
+    let evidence_id = format!(
+        "p8-collector-{}",
+        "requirement-criterion-project-blueprint-candidate-".repeat(8)
+    );
+    let artifact = evidence_store
+        .put_test_fixture(
+            metadata(
+                &authority,
+                &current,
+                &evidence_id,
+                EvidenceClass::TestOutput,
+                EvidenceResult::Pass,
+                EvidenceConfidence::StrongDeterministic,
+            ),
+            b"durable long-id proof",
+        )
+        .expect("long evidence metadata must commit");
+
+    let reopened = store(root.path());
+    assert_eq!(reopened.load(&evidence_id).unwrap().artifact, artifact);
+    assert!(reopened
+        .list()
+        .unwrap()
+        .iter()
+        .any(|item| item.metadata.evidence_id == evidence_id));
+    reopened
+        .invalidate(&evidence_id, "long-id invalidation regression")
+        .expect("long evidence invalidation must commit");
+    assert!(reopened
+        .invalidations()
+        .unwrap()
+        .iter()
+        .any(|item| item.evidence_id == evidence_id));
+    assert!(reopened.list().unwrap().is_empty());
+    #[cfg(windows)]
+    assert!(fs::read_dir(reopened.root().join("metadata"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+        .all(|entry| entry.file_name().to_string_lossy() != format!("{evidence_id}.json")));
+}
+
+#[test]
 fn unknown_evidence_store_version_is_rejected_before_use() {
     let (authority, current, root) = authority_fixture();
     let store = store(root.path());
@@ -1622,6 +1668,25 @@ fn process_collector_records_actual_exit_and_bounded_output() {
     assert_eq!(result.exit_code, Some(0));
     assert_eq!(result.result, EvidenceResult::Pass);
     assert!(!result.stdout.is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn process_collector_runs_batch_script_commands_from_native_desktop_context() {
+    let root = tempdir().unwrap();
+    let script = root.path().join("collector with spaces.cmd");
+    fs::write(&script, "@echo off\r\necho native-batch\r\nexit /b 0\r\n").unwrap();
+    let command = CommandSpec::new(script.to_string_lossy(), root.path());
+    let result = ProcessCollector::default().run(&command).unwrap();
+    assert_eq!(
+        result.exit_code,
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.result, EvidenceResult::Pass);
+    assert!(String::from_utf8_lossy(&result.stdout).contains("native-batch"));
 }
 
 #[test]

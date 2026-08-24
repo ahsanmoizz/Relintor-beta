@@ -615,25 +615,47 @@ impl EvidenceStore {
         evidence_id: &str,
         digest: &str,
     ) -> Result<(PathBuf, PathBuf, PathBuf), EvidenceError> {
-        if evidence_id.is_empty()
-            || evidence_id.contains(['/', '\\'])
-            || evidence_id.contains("..")
-            || digest.len() != 64
-            || !digest.chars().all(|c| c.is_ascii_hexdigit())
-        {
+        validate_evidence_id(evidence_id)?;
+        if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(EvidenceError::InvalidInput(
                 "unsafe evidence path component".into(),
             ));
         }
         Ok((
             self.root.join("blobs").join(digest),
-            self.root
-                .join("metadata")
-                .join(format!("{evidence_id}.json")),
-            self.root
-                .join("invalidations")
-                .join(format!("{evidence_id}.json")),
+            self.metadata_path(evidence_id)?,
+            self.invalidation_path(evidence_id)?,
         ))
+    }
+
+    fn metadata_path(&self, evidence_id: &str) -> Result<PathBuf, EvidenceError> {
+        validate_evidence_id(evidence_id)?;
+        let legacy = self
+            .root
+            .join("metadata")
+            .join(format!("{evidence_id}.json"));
+        if legacy.is_file() || !requires_safe_store_path(&legacy) {
+            return Ok(legacy);
+        }
+        Ok(self
+            .root
+            .join("metadata")
+            .join(format!("evidence-{}.json", sha256(evidence_id.as_bytes()))))
+    }
+
+    fn invalidation_path(&self, evidence_id: &str) -> Result<PathBuf, EvidenceError> {
+        validate_evidence_id(evidence_id)?;
+        let legacy = self
+            .root
+            .join("invalidations")
+            .join(format!("{evidence_id}.json"));
+        if legacy.is_file() || !requires_safe_store_path(&legacy) {
+            return Ok(legacy);
+        }
+        Ok(self.root.join("invalidations").join(format!(
+            "invalidation-{}.json",
+            sha256(evidence_id.as_bytes())
+        )))
     }
 
     pub fn put(
@@ -692,10 +714,7 @@ impl EvidenceStore {
     }
 
     pub fn load(&self, evidence_id: &str) -> Result<StoredEvidence, EvidenceError> {
-        let metadata_path = self
-            .root
-            .join("metadata")
-            .join(format!("{evidence_id}.json"));
+        let metadata_path = self.metadata_path(evidence_id)?;
         if !metadata_path.is_file() {
             return Err(EvidenceError::EvidenceNotFound(evidence_id.into()));
         }
@@ -760,12 +779,7 @@ impl EvidenceStore {
         evidence_id: &str,
         reason: impl Into<String>,
     ) -> Result<(), EvidenceError> {
-        if !self
-            .root
-            .join("metadata")
-            .join(format!("{evidence_id}.json"))
-            .is_file()
-        {
+        if !self.metadata_path(evidence_id)?.is_file() {
             return Err(EvidenceError::EvidenceNotFound(evidence_id.into()));
         }
         let index = self.load_invalidation_index()?;
@@ -783,10 +797,7 @@ impl EvidenceStore {
             integrity: String::new(),
         };
         record.integrity = hmac_hex(&self.key, &canonical(&record.signing_body())?)?;
-        let path = self
-            .root
-            .join("invalidations")
-            .join(format!("{evidence_id}.json"));
+        let path = self.invalidation_path(evidence_id)?;
         write_atomic_file(&path, &canonical(&record)?)?;
         let mut records = index.records;
         records.insert(evidence_id.into(), sha256(&canonical(&record)?));
@@ -800,12 +811,13 @@ impl EvidenceStore {
             if !entry.path().is_file() || entry.file_name().to_string_lossy().starts_with('.') {
                 continue;
             }
-            let evidence_id = entry
-                .path()
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .ok_or_else(|| EvidenceError::IntegrityFailure("invalid evidence filename".into()))?
-                .to_owned();
+            let envelope: EvidenceEnvelope =
+                serde_json::from_slice(&fs::read(entry.path()).map_err(io_error)?)
+                    .map_err(json_error)?;
+            let evidence_id = envelope.artifact.metadata.evidence_id;
+            if self.is_revoked(&evidence_id)? {
+                continue;
+            }
             artifacts.push(self.load(&evidence_id)?.artifact);
         }
         artifacts.sort_by(|left, right| left.metadata.evidence_id.cmp(&right.metadata.evidence_id));
@@ -923,10 +935,7 @@ impl EvidenceStore {
         let index = self.load_invalidation_index()?;
         let mut records = Vec::new();
         for evidence_id in index.records.keys() {
-            let path = self
-                .root
-                .join("invalidations")
-                .join(format!("{evidence_id}.json"));
+            let path = self.invalidation_path(evidence_id)?;
             if !path.is_file() {
                 return Err(EvidenceError::IntegrityFailure(
                     "invalidation record is missing from authenticated index".into(),
@@ -988,12 +997,11 @@ impl EvidenceStore {
                 && !entry.file_name().to_string_lossy().starts_with('.')
             {
                 let invalidation_path = entry.path();
-                let evidence_id = invalidation_path
-                    .file_stem()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or_default()
-                    .to_owned();
-                if !index.records.contains_key(&evidence_id) {
+                let record: EvidenceInvalidation =
+                    serde_json::from_slice(&fs::read(invalidation_path).map_err(io_error)?)
+                        .map_err(json_error)?;
+                self.validate_invalidation(&record)?;
+                if !index.records.contains_key(&record.evidence_id) {
                     return Err(EvidenceError::IntegrityFailure(
                         "unindexed invalidation record detected".into(),
                     ));
@@ -1038,6 +1046,30 @@ impl EvidenceStore {
             .load_invalidation_index()?
             .records
             .contains_key(evidence_id))
+    }
+}
+
+fn validate_evidence_id(evidence_id: &str) -> Result<(), EvidenceError> {
+    if evidence_id.is_empty() || evidence_id.contains(['/', '\\']) || evidence_id.contains("..") {
+        return Err(EvidenceError::InvalidInput(
+            "unsafe evidence path component".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn requires_safe_store_path(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        // Keep room for the atomic-write temporary suffix. The legacy
+        // evidence-id filename is retained when it already exists so old
+        // stores remain readable, while new long IDs use a stable hash.
+        path.to_string_lossy().len() >= 220
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
     }
 }
 
@@ -1899,9 +1931,8 @@ impl ProcessCollector {
             ));
         }
         let started_at_ms = now_ms();
-        let mut process = Command::new(&command.program);
+        let mut process = process_command(command);
         process
-            .args(&command.args)
             .current_dir(&command.working_directory)
             .envs(&command.environment)
             .stdout(Stdio::piped())
@@ -1963,6 +1994,67 @@ impl ProcessCollector {
                 EvidenceResult::Fail
             },
         })
+    }
+}
+
+fn process_command(command: &CommandSpec) -> Command {
+    #[cfg(windows)]
+    if let Some(script) = windows_script_program(&command.program) {
+        let command_line = std::iter::once(script)
+            .chain(command.args.iter().cloned())
+            .map(|argument| quote_cmd_argument(&argument))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut process = Command::new("cmd.exe");
+        process.args(["/D", "/S", "/C"]);
+        // `cmd.exe` parses its `/C` payload itself. A normal `Command::arg`
+        // escapes embedded quotes for CreateProcess, which makes cmd.exe see
+        // literal backslashes. Use a pre-quoted raw payload so `/S /C` can
+        // remove the outer pair and preserve the quoted script path.
+        use std::os::windows::process::CommandExt;
+        process.raw_arg(format!(" \"{command_line}\""));
+        return process;
+    }
+
+    let mut process = Command::new(&command.program);
+    process.args(&command.args);
+    process
+}
+
+#[cfg(windows)]
+fn windows_script_program(program: &str) -> Option<String> {
+    let path = Path::new(program);
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if extension == "cmd" || extension == "bat" {
+        return Some(program.to_owned());
+    }
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(name.as_str(), "npm" | "npx" | "pnpm" | "yarn") {
+        Some(format!("{program}.cmd"))
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn quote_cmd_argument(argument: &str) -> String {
+    if argument.is_empty() {
+        return "\"\"".into();
+    }
+    if argument.chars().any(|character| {
+        character.is_whitespace() || matches!(character, '"' | '&' | '|' | '<' | '>' | '^')
+    }) {
+        format!("\"{}\"", argument.replace('"', "\\\""))
+    } else {
+        argument.to_owned()
     }
 }
 

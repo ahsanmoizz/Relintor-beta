@@ -666,19 +666,19 @@ export function mergeVerificationRefresh(
     || next.revision !== previous.revision
     || next.execution_run_id !== previous.execution_run_id
     || ["VERIFIED_COMPLETE", "USER_DECISION_REJECTED"].includes(next.workflow_stage)
-    || next.human_decisions.length > 0
   ) {
     return next;
   }
 
-  const humanDecisionStillRequired = next.missing_evidence.some((item) => /human.?decision/i.test(item));
+  const humanDecisionStillRequired = next.human_decisions.length > 0
+    || next.missing_evidence.some((item) => /human.?decision/i.test(item));
   if (!humanDecisionStillRequired) return next;
 
   return {
     ...next,
-    workflow_stage: previous.workflow_stage,
-    summary: previous.summary,
-    human_decisions: previous.human_decisions,
+    workflow_stage: "WAITING_FOR_USER_DECISION",
+    summary: next.workflow_stage === "WAITING_FOR_USER_DECISION" ? next.summary : previous.summary,
+    human_decisions: next.human_decisions.length > 0 ? next.human_decisions : previous.human_decisions,
   };
 }
 
@@ -1041,7 +1041,8 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
           setVerification((previous) => mergeVerificationRefresh(previous, value));
         }
       } catch {
-        if (verificationRefreshGeneration.current === generation) setVerification(null);
+        // A transient authority read failure must not erase a pending explicit
+        // user decision or the user's unsaved notes.
       }
     } catch (reason) {
       setAuthorityReadFailure(true);
@@ -1095,7 +1096,8 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
                 setVerification((previous) => mergeVerificationRefresh(previous, value));
               }
             } catch {
-              if (active && verificationRefreshGeneration.current === generation) setVerification(null);
+              // Preserve the last authenticated verification projection until
+              // a newer successful authority read replaces it.
             }
           }
         }
@@ -1136,7 +1138,8 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
           setVerification((previous) => mergeVerificationRefresh(previous, value));
         }
       } catch {
-        if (verificationRefreshGeneration.current === generation) setVerification(null);
+        // Preserve the last authenticated verification projection on a
+        // transient refresh failure.
       }
     } catch (reason) {
       setError(userFacingAuthorityError(reason, "Relintor couldn't apply that action. No completion state was changed; refresh the status and try again."));

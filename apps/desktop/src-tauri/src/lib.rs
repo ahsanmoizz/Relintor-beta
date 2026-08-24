@@ -5033,6 +5033,31 @@ fn human_decision_prompts(
         .collect()
 }
 
+fn default_verification_workflow_stage(
+    certificate_present: bool,
+    human_decision_pending: bool,
+    evidence_present: bool,
+    completion_state: &relintor_evidence::CompletionState,
+    user_rejected: bool,
+    failed_count: usize,
+) -> &'static str {
+    if certificate_present {
+        "VERIFIED_COMPLETE"
+    } else if human_decision_pending {
+        "WAITING_FOR_USER_DECISION"
+    } else if !evidence_present {
+        "READY_TO_VERIFY"
+    } else if *completion_state == relintor_evidence::CompletionState::BlockedExternal {
+        "COLLECTION_BLOCKED"
+    } else if user_rejected {
+        "USER_DECISION_REJECTED"
+    } else if failed_count > 0 {
+        "VERIFICATION_NEEDS_ATTENTION"
+    } else {
+        "VERIFICATION_FINISHED"
+    }
+}
+
 fn verification_view(
     project_id: &str,
     context: &P8VerificationContext,
@@ -5091,21 +5116,14 @@ fn verification_view(
         .into_iter()
         .collect::<Vec<_>>();
     let stage = workflow_stage.unwrap_or_else(|| {
-        if certificate.is_some() {
-            "VERIFIED_COMPLETE"
-        } else if !human_decisions.is_empty() && !manifest.evidence.is_empty() {
-            "WAITING_FOR_USER_DECISION"
-        } else if manifest.evidence.is_empty() {
-            "READY_TO_VERIFY"
-        } else if report.decision.state == relintor_evidence::CompletionState::BlockedExternal {
-            "COLLECTION_BLOCKED"
-        } else if user_rejected {
-            "USER_DECISION_REJECTED"
-        } else if failed_count > 0 {
-            "VERIFICATION_NEEDS_ATTENTION"
-        } else {
-            "VERIFICATION_FINISHED"
-        }
+        default_verification_workflow_stage(
+            certificate.is_some(),
+            !human_decisions.is_empty(),
+            !manifest.evidence.is_empty(),
+            &report.decision.state,
+            user_rejected,
+            failed_count,
+        )
     });
     let summary = match stage {
         "VERIFIED_COMPLETE" => "All required evidence passed and the completion certificate is valid.",
@@ -6357,6 +6375,21 @@ mod tests {
         assert!(ensure_terminal_p7_workspace_matches("changed", "terminal")
             .expect_err("post-P7 edit must require revalidation")
             .contains("P8_REVALIDATION_REQUIRED"));
+    }
+
+    #[test]
+    fn pending_human_decision_is_reconstructed_when_no_machine_evidence_is_accepted() {
+        assert_eq!(
+            default_verification_workflow_stage(
+                false,
+                true,
+                false,
+                &relintor_evidence::CompletionState::StoppedIncomplete,
+                false,
+                0,
+            ),
+            "WAITING_FOR_USER_DECISION"
+        );
     }
 
     #[test]
