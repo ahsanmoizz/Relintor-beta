@@ -241,6 +241,38 @@ fn mutable_workspace_plan_cannot_mint_criterion_authority() {
 }
 
 #[test]
+fn unavailable_machine_collector_persists_truthful_blocked_evidence() {
+    let (authority, current, root) = authority_fixture();
+    let config_dir = root.path().join(".relintor");
+    fs::create_dir_all(&config_dir).expect("verification config directory");
+    let plan = serde_json::json!({
+        "collectors": [{
+            "class": "TEST_OUTPUT",
+            "program": "relintor-deliberately-missing-test-runner",
+            "args": []
+        }]
+    });
+    fs::write(
+        config_dir.join("verification-plan.json"),
+        serde_json::to_vec(&plan).expect("verification plan"),
+    )
+    .expect("verification plan");
+    let store = store(root.path());
+    let result = VerificationCollectorOrchestrator::new(root.path())
+        .collect_required_evidence(&authority, &current, &store)
+        .expect("collector orchestration remains inspectable");
+
+    assert!(!result.blocked_external.is_empty());
+    let artifacts = store.list().expect("persisted collector failure");
+    assert!(!artifacts.is_empty());
+    assert!(artifacts.iter().all(|artifact| {
+        artifact.metadata.class == EvidenceClass::TestOutput
+            && artifact.metadata.result == EvidenceResult::Blocked
+            && artifact.metadata.confidence == EvidenceConfidence::Missing
+    }));
+}
+
+#[test]
 fn protected_criterion_mapping_mints_evidence_only_for_matching_candidate() {
     let (authority, current, root) = authority_fixture();
     let config_dir = root.path().join(".relintor");

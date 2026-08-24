@@ -10,9 +10,11 @@ use relintor_distribution::{
 };
 use relintor_evidence::{
     environment_fingerprint, export_manifest, fingerprint_workspace, AiVerifierInput,
-    AuthenticatedP7Execution, CompletionAuthority, CompletionCertificate, EvidenceManifest,
-    EvidenceStore, EvidenceSummary, FreshnessContext, ProductionAiProvider, VerificationAuthority,
-    VerificationCollectorOrchestrator, VerificationEngine,
+    AuthenticatedP7Execution, CollectorOrchestrationResult, CompletionAuthority,
+    CompletionCertificate, EvidenceManifest, EvidenceStore, EvidenceSummary,
+    ExplicitUserDecisionInput, ExplicitUserDecisionRecorder, FreshnessContext,
+    ProductionAiProvider, VerificationAuthority, VerificationCollectorOrchestrator,
+    VerificationEngine,
 };
 use relintor_execution::{
     CheckpointKind, ConservativeProcessInspector, ExecutionRun, ProcessInspector,
@@ -49,7 +51,7 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
-use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::UpdaterExt;
 
@@ -660,7 +662,21 @@ struct VerificationStatusView {
     accepted_risks: Vec<String>,
     evidence_count: usize,
     certificate: Option<CompletionCertificateView>,
+    workflow_stage: String,
+    summary: String,
+    human_decisions: Vec<HumanDecisionPromptView>,
+    collector_activity: Vec<String>,
+    collection_failures: Vec<String>,
     detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HumanDecisionPromptView {
+    requirement_id: String,
+    title: String,
+    question: String,
+    summary: String,
+    criterion_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -4851,28 +4867,34 @@ fn load_p8_verification_context(
 fn evaluate_p8(
     app: &AppHandle,
     project_id: &str,
+    collect_machine_evidence: bool,
 ) -> Result<
     (
         P8VerificationContext,
         relintor_evidence::VerificationReport,
         EvidenceManifest,
+        CollectorOrchestrationResult,
     ),
     String,
 > {
     let context = load_p8_verification_context(app, project_id)?;
-    let workspace = context
-        .current
-        .workspace_root
-        .clone()
-        .ok_or_else(|| "verification workspace is unavailable".to_string())?;
-    VerificationCollectorOrchestrator::new(workspace)
-        .run_required_collectors(
-            &context.authority,
-            &context.current,
-            &context.store,
-            &context.p7_execution,
-        )
-        .map_err(|error| format!("collect P8 verification evidence: {error}"))?;
+    let collection = if collect_machine_evidence {
+        let workspace = context
+            .current
+            .workspace_root
+            .clone()
+            .ok_or_else(|| "verification workspace is unavailable".to_string())?;
+        VerificationCollectorOrchestrator::new(workspace)
+            .run_required_collectors(
+                &context.authority,
+                &context.current,
+                &context.store,
+                &context.p7_execution,
+            )
+            .map_err(|error| format!("collect P8 verification evidence: {error}"))?
+    } else {
+        CollectorOrchestrationResult::default()
+    };
     let engine = VerificationEngine::new_with_p7_execution(
         context.store.clone(),
         context.authority.clone(),
@@ -4968,7 +4990,47 @@ fn evaluate_p8(
         None,
     )
     .map_err(|error| format!("export P8 evidence manifest: {error}"))?;
-    Ok((context, report, manifest))
+    Ok((context, report, manifest, collection))
+}
+
+fn human_decision_prompts(
+    context: &P8VerificationContext,
+    report: &relintor_evidence::VerificationReport,
+) -> Vec<HumanDecisionPromptView> {
+    report
+        .requirement_statuses
+        .iter()
+        .filter(|status| {
+            status
+                .missing_obligations
+                .contains(&EvidenceClass::HumanDecision)
+        })
+        .filter_map(|status| {
+            context
+                .authority
+                .revision
+                .contract
+                .requirement_graph
+                .requirements
+                .iter()
+                .find(|requirement| requirement.requirement_id == status.requirement_id)
+        })
+        .map(|requirement| HumanDecisionPromptView {
+            requirement_id: requirement.requirement_id.clone(),
+            title: requirement.title.clone(),
+            question: format!(
+                "Does the completed result satisfy the approved {} for this mission?",
+                requirement.title.to_lowercase()
+            ),
+            summary: requirement.intent.clone(),
+            criterion_ids: requirement
+                .acceptance_criteria
+                .iter()
+                .filter(|criterion| !criterion.machine_checkable)
+                .map(|criterion| criterion.criterion_id.clone())
+                .collect(),
+        })
+        .collect()
 }
 
 fn verification_view(
@@ -4977,6 +5039,8 @@ fn verification_view(
     report: &relintor_evidence::VerificationReport,
     manifest: &EvidenceManifest,
     certificate: Option<&CompletionCertificate>,
+    collection: &CollectorOrchestrationResult,
+    workflow_stage: Option<&str>,
 ) -> VerificationStatusView {
     let missing_evidence = report
         .requirement_statuses
@@ -4991,6 +5055,77 @@ fn verification_view(
                 }))
         })
         .collect::<Vec<_>>();
+    let human_decisions = human_decision_prompts(context, report);
+    let failed_count = report
+        .requirement_statuses
+        .iter()
+        .filter(|status| status.status == RequirementStatus::Failed)
+        .count();
+    let user_rejected = report.requirement_statuses.iter().any(|status| {
+        status.failed_evidence.iter().any(|evidence_id| {
+            context
+                .store
+                .load(evidence_id)
+                .is_ok_and(|stored| stored.artifact.metadata.class == EvidenceClass::HumanDecision)
+        })
+    });
+    let collection_failures = collection
+        .blocked_external
+        .iter()
+        .map(|item| {
+            if item.contains("TestOutput") {
+                "The project test command could not be completed.".to_string()
+            } else if item.contains("AccessibilityResult") {
+                "The accessibility check could not be completed.".to_string()
+            } else if item.contains("PerformanceResult") {
+                "The performance check could not be completed.".to_string()
+            } else if item.contains("SecurityScan") {
+                "The security check could not be completed.".to_string()
+            } else if item.contains("HumanDecision") {
+                "Relintor is waiting for your decision.".to_string()
+            } else {
+                "A required automated verification check could not be completed.".to_string()
+            }
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let stage = workflow_stage.unwrap_or_else(|| {
+        if certificate.is_some() {
+            "VERIFIED_COMPLETE"
+        } else if !human_decisions.is_empty() && !manifest.evidence.is_empty() {
+            "WAITING_FOR_USER_DECISION"
+        } else if manifest.evidence.is_empty() {
+            "READY_TO_VERIFY"
+        } else if report.decision.state == relintor_evidence::CompletionState::BlockedExternal {
+            "COLLECTION_BLOCKED"
+        } else if user_rejected {
+            "USER_DECISION_REJECTED"
+        } else if failed_count > 0 {
+            "VERIFICATION_NEEDS_ATTENTION"
+        } else {
+            "VERIFICATION_FINISHED"
+        }
+    });
+    let summary = match stage {
+        "VERIFIED_COMPLETE" => "All required evidence passed and the completion certificate is valid.",
+        "WAITING_FOR_USER_DECISION" => {
+            "Automated checks are complete. Relintor needs your decision before verification can continue."
+        }
+        "CORRECTING_FAILED_REQUIREMENT" => {
+            "A real automated check failed. Antigravity is correcting only the affected work before Relintor verifies again."
+        }
+        "COLLECTION_BLOCKED" => {
+            "Verification could not collect every required automated result. The mission remains safely incomplete."
+        }
+        "USER_DECISION_REJECTED" => {
+            "You rejected the completed result. Relintor preserved your decision and did not start an automatic correction or issue a certificate."
+        }
+        _ if failed_count > 0 => {
+            "One or more automated checks failed. Relintor has not called the mission complete."
+        }
+        _ => "Verification finished. Relintor is waiting for all required evidence.",
+    };
     VerificationStatusView {
         project_id: project_id.into(),
         mission_id: context.authority.revision.seal.mission_id.clone(),
@@ -5027,6 +5162,7 @@ fn verification_view(
             .blocked_external
             .iter()
             .map(|item| format!("{}: {}", item.requirement_id, item.reason))
+            .chain(collection.blocked_external.iter().cloned())
             .collect(),
         accepted_risks: report
             .decision
@@ -5040,6 +5176,16 @@ fn verification_view(
             final_state: format!("{:?}", item.final_state),
             digest: item.digest().unwrap_or_default(),
         }),
+        workflow_stage: stage.into(),
+        summary: summary.into(),
+        human_decisions,
+        collector_activity: collection
+            .executed
+            .iter()
+            .chain(collection.reused_fresh.iter())
+            .cloned()
+            .collect(),
+        collection_failures,
         detail: report.decision.reason.clone(),
     }
 }
@@ -5067,9 +5213,7 @@ fn load_persisted_certificate(
     if !path.is_file() {
         return Ok(None);
     }
-    let bytes = fs::read(&path).map_err(|error| format!("read completion certificate: {error}"))?;
-    let certificate: CompletionCertificate = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("parse completion certificate: {error}"))?;
+    let certificate = read_completion_certificate_file(&path)?;
     let authority = CompletionAuthority::new(&context.local_key)
         .map_err(|error| format!("open P8 completion authority: {error}"))?;
     authority
@@ -5084,12 +5228,15 @@ fn load_persisted_certificate(
     Ok(Some(certificate))
 }
 
-fn persist_completion_certificate(
-    app: &AppHandle,
-    context: &P8VerificationContext,
+fn read_completion_certificate_file(path: &Path) -> Result<CompletionCertificate, String> {
+    let bytes = fs::read(path).map_err(|error| format!("read completion certificate: {error}"))?;
+    serde_json::from_slice(&bytes).map_err(|error| format!("parse completion certificate: {error}"))
+}
+
+fn persist_completion_certificate_file(
+    path: &Path,
     certificate: &CompletionCertificate,
 ) -> Result<(), String> {
-    let path = completion_certificate_path(app, context)?;
     let parent = path
         .parent()
         .ok_or_else(|| "certificate storage has no parent directory".to_string())?;
@@ -5108,8 +5255,17 @@ fn persist_completion_certificate(
     file.sync_all()
         .map_err(|error| format!("sync completion certificate: {error}"))?;
     drop(file);
-    atomic_replace_file(&temporary, &path)
+    atomic_replace_file(&temporary, path)
         .map_err(|error| format!("commit completion certificate: {error}"))
+}
+
+fn persist_completion_certificate(
+    app: &AppHandle,
+    context: &P8VerificationContext,
+    certificate: &CompletionCertificate,
+) -> Result<(), String> {
+    let path = completion_certificate_path(app, context)?;
+    persist_completion_certificate_file(&path, certificate)
 }
 
 fn ensure_verified_completion_certificate(
@@ -5149,12 +5305,23 @@ fn ensure_verified_completion_certificate(
 
 fn deterministic_failed_requirement_ids(
     report: &relintor_evidence::VerificationReport,
+    store: &EvidenceStore,
 ) -> BTreeSet<String> {
     report
         .requirement_statuses
         .iter()
         .filter(|status| {
-            status.status == RequirementStatus::Failed && !status.failed_evidence.is_empty()
+            status.status == RequirementStatus::Failed
+                && status.failed_evidence.iter().any(|evidence_id| {
+                    store.load(evidence_id).is_ok_and(|stored| {
+                        !matches!(
+                            stored.artifact.metadata.class,
+                            EvidenceClass::HumanDecision
+                                | EvidenceClass::AiVerifierJudgement
+                                | EvidenceClass::ExternalServiceReceipt
+                        )
+                    })
+                })
         })
         .map(|status| status.requirement_id.clone())
         .collect()
@@ -5164,8 +5331,9 @@ fn authorize_and_launch_verification_correction(
     app: &AppHandle,
     project_id: &str,
     report: &relintor_evidence::VerificationReport,
+    store: &EvidenceStore,
 ) -> Result<bool, String> {
-    let failed = deterministic_failed_requirement_ids(report);
+    let failed = deterministic_failed_requirement_ids(report, store);
     if failed.is_empty() {
         return Ok(false);
     }
@@ -5206,13 +5374,18 @@ fn authorize_and_launch_verification_correction(
 }
 
 fn automatic_verification_closure(app: &AppHandle, project_id: &str) -> Result<(), String> {
-    let (context, report, manifest) = evaluate_p8(app, project_id)?;
+    let (context, report, manifest, _) = evaluate_p8(app, project_id, true)?;
     match report.decision.state {
         relintor_evidence::CompletionState::VerifiedComplete => {
             ensure_verified_completion_certificate(app, &context, &report, &manifest)?;
         }
         relintor_evidence::CompletionState::FailedVerification => {
-            match authorize_and_launch_verification_correction(app, project_id, &report) {
+            match authorize_and_launch_verification_correction(
+                app,
+                project_id,
+                &report,
+                &context.store,
+            ) {
                 Ok(true) => {}
                 Ok(false) => notify_user(
                     app,
@@ -5248,13 +5421,26 @@ fn verification_start(
     app: AppHandle,
     project_id: String,
 ) -> Result<VerificationStatusView, String> {
-    let (context, report, manifest) = evaluate_p8(&app, &project_id)?;
+    let (context, report, manifest, collection) = evaluate_p8(&app, &project_id, true)?;
     let certificate = ensure_verified_completion_certificate(&app, &context, &report, &manifest)?;
+    let mut workflow_stage = None;
     if report.decision.state == relintor_evidence::CompletionState::FailedVerification {
         // A deterministic implementation failure is not handed back to the
         // user as "done". Relintor authorizes one bounded correction path for
         // the exact failed requirement/dependents when policy still permits it.
-        let _ = authorize_and_launch_verification_correction(&app, &project_id, &report);
+        if authorize_and_launch_verification_correction(&app, &project_id, &report, &context.store)?
+        {
+            workflow_stage = Some("CORRECTING_FAILED_REQUIREMENT");
+        }
+    }
+    if !human_decision_prompts(&context, &report).is_empty() && workflow_stage.is_none() {
+        workflow_stage = Some("WAITING_FOR_USER_DECISION");
+    }
+    if !collection.blocked_external.is_empty()
+        && human_decision_prompts(&context, &report).is_empty()
+        && workflow_stage.is_none()
+    {
+        workflow_stage = Some("COLLECTION_BLOCKED");
     }
     Ok(verification_view(
         &project_id,
@@ -5262,6 +5448,8 @@ fn verification_start(
         &report,
         &manifest,
         certificate.as_ref(),
+        &collection,
+        workflow_stage,
     ))
 }
 
@@ -5270,7 +5458,22 @@ fn verification_status(
     app: AppHandle,
     project_id: String,
 ) -> Result<VerificationStatusView, String> {
-    verification_start(app, project_id)
+    let (context, report, manifest, collection) = evaluate_p8(&app, &project_id, false)?;
+    let certificate =
+        if report.decision.state == relintor_evidence::CompletionState::VerifiedComplete {
+            load_persisted_certificate(&app, &context, &manifest)?
+        } else {
+            None
+        };
+    Ok(verification_view(
+        &project_id,
+        &context,
+        &report,
+        &manifest,
+        certificate.as_ref(),
+        &collection,
+        None,
+    ))
 }
 
 #[tauri::command]
@@ -5282,11 +5485,78 @@ fn verification_rerun(
 }
 
 #[tauri::command]
+async fn verification_submit_human_decision(
+    app: AppHandle,
+    project_id: String,
+    requirement_id: String,
+    approved: bool,
+    notes: String,
+) -> Result<VerificationStatusView, String> {
+    if notes.trim().len() > 4_000 {
+        return Err("Decision notes exceed the 4,000 character limit.".into());
+    }
+    let (context, report, _, _) = evaluate_p8(&app, &project_id, false)?;
+    let prompt = human_decision_prompts(&context, &report)
+        .into_iter()
+        .find(|prompt| prompt.requirement_id == requirement_id)
+        .ok_or_else(|| {
+            "This decision is not currently requested by the sealed verification authority."
+                .to_string()
+        })?;
+    let dialog_app = app.clone();
+    let decision = if approved { "approval" } else { "rejection" };
+    let decision_button = if approved {
+        "Record approval"
+    } else {
+        "Record rejection"
+    };
+    let notes_for_confirmation = if notes.trim().is_empty() {
+        "No notes supplied".to_string()
+    } else {
+        notes.trim().to_string()
+    };
+    let confirmation = format!(
+        "{}\n\n{}\n\nDecision: {}\nNotes: {}\n\nOnly confirm if this is your own decision.",
+        prompt.question, prompt.summary, decision, notes_for_confirmation
+    );
+    let confirmed = tauri::async_runtime::spawn_blocking(move || {
+        dialog_app
+            .dialog()
+            .message(confirmation)
+            .title("Confirm your Relintor decision")
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                decision_button.into(),
+                "Cancel".into(),
+            ))
+            .blocking_show()
+    })
+    .await
+    .map_err(|error| format!("confirm explicit user decision: {error}"))?;
+    if !confirmed {
+        return verification_status(app, project_id);
+    }
+    ExplicitUserDecisionRecorder
+        .record(
+            &context.authority,
+            &context.current,
+            &context.store,
+            &context.p7_execution,
+            ExplicitUserDecisionInput {
+                requirement_id: &requirement_id,
+                approved,
+                notes: &notes,
+            },
+        )
+        .map_err(|error| format!("record explicit user decision: {error}"))?;
+    verification_start(app, project_id)
+}
+
+#[tauri::command]
 fn verification_evidence(
     app: AppHandle,
     project_id: String,
 ) -> Result<Vec<VerificationEvidenceView>, String> {
-    let (_, _, manifest) = evaluate_p8(&app, &project_id)?;
+    let (_, _, manifest, _) = evaluate_p8(&app, &project_id, false)?;
     Ok(manifest
         .evidence
         .into_iter()
@@ -5305,7 +5575,7 @@ fn verification_certificate(
     app: AppHandle,
     project_id: String,
 ) -> Result<CompletionCertificateView, String> {
-    let (context, report, manifest) = evaluate_p8(&app, &project_id)?;
+    let (context, report, manifest, _) = evaluate_p8(&app, &project_id, false)?;
     let authority = CompletionAuthority::new(&context.local_key)
         .map_err(|error| format!("open P8 completion authority: {error}"))?;
     let certificate = authority
@@ -5337,7 +5607,7 @@ fn verification_certificate(
 
 #[tauri::command]
 fn verification_export_manifest(app: AppHandle, project_id: String) -> Result<String, String> {
-    let (_, _, manifest) = evaluate_p8(&app, &project_id)?;
+    let (_, _, manifest, _) = evaluate_p8(&app, &project_id, false)?;
     String::from_utf8(manifest.export_json().map_err(|error| error.to_string())?)
         .map_err(|error| format!("manifest is not UTF-8: {error}"))
 }
@@ -6033,6 +6303,7 @@ pub fn run() {
             verification_start,
             verification_status,
             verification_rerun,
+            verification_submit_human_decision,
             verification_evidence,
             verification_certificate,
             verification_export_manifest,
@@ -6086,6 +6357,39 @@ mod tests {
         assert!(ensure_terminal_p7_workspace_matches("changed", "terminal")
             .expect_err("post-P7 edit must require revalidation")
             .contains("P8_REVALIDATION_REQUIRED"));
+    }
+
+    #[test]
+    fn completion_certificate_survives_atomic_persistence_and_fresh_reload() {
+        let path = test_path("certificate-reload").with_extension("json");
+        let certificate = CompletionCertificate {
+            certificate_version: "p8-completion-certificate-v1".into(),
+            certificate_id: "certificate-reload-fixture".into(),
+            project_id: "project-reload".into(),
+            mission_id: "mission-project-reload".into(),
+            mission_revision: 1,
+            p6_seal_hash: "seal".into(),
+            registry_id: "registry".into(),
+            registry_version: 1,
+            registry_digest: "registry-digest".into(),
+            p7_execution_run_id: "run".into(),
+            workspace_source_fingerprint: "workspace".into(),
+            verification_run_id: "verification".into(),
+            requirement_status_ledger_hash: "requirements".into(),
+            evidence_manifest_hash: "evidence".into(),
+            accepted_risks: Vec::new(),
+            blocked_external: Vec::new(),
+            final_state: relintor_evidence::CompletionState::VerifiedComplete,
+            issued_at_ms: 1,
+            authority_version: "authority".into(),
+            signature: "signature".into(),
+        };
+
+        persist_completion_certificate_file(&path, &certificate)
+            .expect("persist certificate atomically");
+        let reloaded = read_completion_certificate_file(&path).expect("reload certificate");
+        assert_eq!(reloaded, certificate);
+        let _ = fs::remove_file(path);
     }
 
     #[test]

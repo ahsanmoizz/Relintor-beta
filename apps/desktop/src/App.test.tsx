@@ -57,6 +57,11 @@ function pendingVerification(): VerificationStatus {
     accepted_risks: [],
     evidence_count: 2,
     certificate: null,
+    workflow_stage: "READY_TO_VERIFY",
+    summary: "Verification is ready.",
+    human_decisions: [],
+    collector_activity: [],
+    collection_failures: [],
     detail: "requirements remain unverified",
   };
 }
@@ -257,6 +262,7 @@ describe("desktop shell foundation", () => {
         verificationNotice={null}
         onCommand={vi.fn()}
         onVerify={onVerify}
+        onDecision={vi.fn()}
         onRefresh={vi.fn()}
       />,
     );
@@ -267,6 +273,41 @@ describe("desktop shell foundation", () => {
 
   it("turns a failed verification invocation into visible user-facing text", () => {
     expect(verificationActionError(new Error("verification authority command failed"))).toMatch(/couldn't verify this work/i);
+  });
+
+  it("captures a genuine human decision in plain language without exposing IDs in primary copy", () => {
+    const onDecision = vi.fn();
+    const decision = pendingVerification();
+    decision.workflow_stage = "WAITING_FOR_USER_DECISION";
+    decision.summary = "Automated checks are complete. Relintor needs your decision before verification can continue.";
+    decision.human_decisions = [{
+      requirement_id: "requirement-secret-internal-id",
+      title: "Approved outcome",
+      question: "Does the completed result match the outcome you approved for this mission?",
+      summary: "Review the completed project outcome before approving it.",
+      criterion_ids: ["criterion-secret-internal-id"],
+    }];
+    render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={decision}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={onDecision}
+        onRefresh={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Relintor needs your decision" })).toBeTruthy();
+    expect(screen.getByText("Technical evidence details")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Optional notes"), { target: { value: "The result matches." } });
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    expect(onDecision).toHaveBeenCalledWith("requirement-secret-internal-id", true, "The result matches.");
+    expect(screen.queryByRole("button", { name: "Verify work" })).toBeNull();
   });
 
   it("exposes privacy controls and safe diagnostics without sensitive fields", async () => {

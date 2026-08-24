@@ -34,9 +34,9 @@ import {
   continueExecution,
   verificationStatus,
   verificationStart,
+  submitHumanDecision,
   rerunVerification,
   verificationEvidence,
-  completionCertificate,
   exportVerificationManifest,
   takeoverScan,
   chooseWorkspace,
@@ -338,14 +338,10 @@ export function verificationActionError(reason: unknown): string {
 }
 
 export function verificationActionMessage(status: VerificationStatus): string {
-  const attention = [...status.missing_evidence, ...status.blocked_external, ...status.failed_checks, ...status.stale_evidence];
   if (status.completion_state.replace(/[^a-z0-9]/gi, "").toUpperCase() === "VERIFIEDCOMPLETE") {
-    return "Verification finished successfully. Review the verified requirements before issuing the completion certificate.";
+    return "Verification finished successfully. The completion certificate is valid and saved.";
   }
-  if (attention.some((item) => /HUMAN[_ ]DECISION|explicit user decision/i.test(item))) {
-    return "Verification finished, but an explicit human decision is still required. Relintor did not infer one.";
-  }
-  return "Verification finished. Review the result and the remaining evidence requirements below.";
+  return status.summary;
 }
 
 function friendlyExecutionLabel(value: string | null | undefined, fallback: string): string {
@@ -706,19 +702,6 @@ function VerificationSection({ projectId }: { projectId: string }) {
     }
   };
 
-  const issueCertificate = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const certificate = await completionCertificate(projectId);
-      setStatus((current) => current ? { ...current, certificate } : current);
-    } catch (reason) {
-      setError(userFacingAuthorityError(reason, "The completion certificate is unavailable until verification has a real P7 execution ledger."));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const exportManifest = async () => {
     try {
       const manifest = await exportVerificationManifest(projectId);
@@ -735,7 +718,7 @@ function VerificationSection({ projectId }: { projectId: string }) {
   };
 
   const verificationView = verificationPresentation(status);
-  const canStart = Boolean(status && status.execution_run_id !== "browser-preview" && status.evidence_count > 0);
+  const canStart = Boolean(status && status.execution_run_id !== "browser-preview");
   const attentionItems = [
     ...(status?.failed_checks || []),
     ...(status?.stale_evidence || []),
@@ -753,11 +736,10 @@ function VerificationSection({ projectId }: { projectId: string }) {
         <div><span className="panel-kicker">CURRENT RESULT</span><strong>{verificationView.label}</strong><p>{verificationView.supporting}</p></div>
         <div className="verification-stages" aria-label="Completion stages"><span><small>Execution</small><strong>{status.execution_run_id !== "browser-preview" ? "Recorded" : "Waiting"}</strong></span><span><small>Evidence</small><strong>{status.evidence_count > 0 ? "Captured" : "Waiting"}</strong></span><span><small>Verification</small><strong>{verificationView.verifiedComplete ? "Passed" : attentionItems.length ? "Needs attention" : "Waiting"}</strong></span></div>
       </div>}
-      {attentionItems.length > 0 && <section className="attention-list" aria-labelledby="verification-attention-title"><h3 id="verification-attention-title">What needs attention</h3><ul>{attentionItems.slice(0, 5).map((item) => <li key={item}>{item}</li>)}</ul>{attentionItems.length > 5 && <p>{attentionItems.length - 5} more items are available in verification details.</p>}</section>}
+      {attentionItems.length > 0 && <section className="attention-list" aria-labelledby="verification-attention-title"><h3 id="verification-attention-title">What needs attention</h3><p>{status?.summary || "Relintor needs more evidence before this mission can be complete."}</p><details className="technical-details"><summary>Technical evidence details</summary><ul>{attentionItems.map((item) => <li key={item}>{item}</li>)}</ul></details></section>}
       {!canStart && !verificationView.verifiedComplete && <p className="info-callout">Waiting for execution evidence.</p>}
       <div className="result-actions">
         {!verificationView.verifiedComplete && <button className="primary-button" type="button" disabled={busy || !canStart} onClick={() => void runVerification()}>{busy ? "Verifying…" : "Verify work"}</button>}
-        {verificationView.verifiedComplete && !status?.certificate && <button className="primary-button" type="button" disabled={busy} onClick={() => void issueCertificate()}>{busy ? "Issuing certificate…" : "Issue completion certificate"}</button>}
         {verificationView.verifiedComplete && status?.certificate && <span className="success-text">Completion certificate issued.</span>}
         <details className="advanced-controls"><summary>Verification details</summary><div className="verification-details"><ResultPanel title="Missing evidence" items={status?.missing_evidence || []} empty="No missing evidence reported." /><ResultPanel title="Failed checks" items={status?.failed_checks || []} empty="No failed checks reported." /><ResultPanel title="Skipped checks" items={status?.skipped_checks || []} empty="No skipped checks reported." /><ResultPanel title="Stale evidence" items={status?.stale_evidence || []} empty="No stale evidence reported." /><ResultPanel title="External blockers" items={status?.blocked_external || []} empty="No external blocker reported." /><ResultPanel title="Accepted risks" items={status?.accepted_risks || []} empty="No accepted risks recorded." />{evidence.length ? <div className="drilldown-list">{evidence.map((item) => <details key={item.evidence_id}><summary>{item.evidence_id} · {humanStatus(item.result)}</summary><dl><div><dt>Class</dt><dd>{item.class}</dd></div><div><dt>Confidence</dt><dd>{item.confidence}</dd></div><div><dt>Digest</dt><dd>{item.digest}</dd></div></dl></details>)}</div> : <p className="muted-copy">No persisted evidence artifacts are available.</p>}<div className="advanced-control-row"><button className="secondary-button" type="button" disabled={busy || !canStart} onClick={() => void rerun()}>Run verification again</button><button className="secondary-button" type="button" disabled={busy} onClick={() => void refresh()}>Refresh status</button><button className="secondary-button" type="button" disabled={busy} onClick={() => void exportManifest()}>Export evidence manifest</button></div>{status?.detail && <p className="form-hint">{status.detail}</p>}{status?.certificate && <dl className="technical-list"><div><dt>Certificate</dt><dd>{status.certificate.certificate_id}</dd></div><div><dt>Digest</dt><dd>{status.certificate.digest}</dd></div></dl>}</div></details>
       </div>
@@ -1136,6 +1118,22 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
     }
   };
 
+  const recordHumanDecision = async (requirementId: string, approved: boolean, notes: string) => {
+    if (!projectId) return;
+    setBusy(true);
+    setError(null);
+    setVerificationNotice(approved ? "Recording your approval and resuming verification…" : "Recording your rejection…");
+    try {
+      const next = await submitHumanDecision(projectId, requirementId, approved, notes);
+      setVerification(next);
+      setVerificationNotice(verificationActionMessage(next));
+    } catch (reason) {
+      setError(verificationActionError(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return <section className="view" aria-labelledby="activity-title">
     <div className="eyebrow">MISSION ACTIVITY</div>
     <h1 id="activity-title">{status?.project_name || "Activity"}</h1>
@@ -1143,7 +1141,7 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
     {handoff && <AntigravitySetupCard health={antigravity} onRefresh={refreshAntigravity} />}
     {!handoff && <div className="panel empty-panel" data-testid="activity-empty"><span className="panel-kicker">NO SEALED MISSION</span><h2>Nothing is ready to execute.</h2><p>Review a blueprint and let the Rust authority seal a mission first. There is no frontend-only activity to display.</p></div>}
     {handoff && loading && <div className="panel loading-panel" role="status" aria-live="polite"><span className="panel-kicker">MISSION STATE</span><h2>Reading persisted state…</h2><p>Waiting for the Rust execution and verification authorities.</p></div>}
-    {handoff && !loading && status && <MissionCockpit status={status} verification={verification} antigravity={antigravity} busy={busy} revalidating={revalidating} verificationNotice={verificationNotice} onCommand={runCommand} onVerify={() => void runVerificationCommand()} onRefresh={() => void load()} />}
+    {handoff && !loading && status && <MissionCockpit status={status} verification={verification} antigravity={antigravity} busy={busy} revalidating={revalidating} verificationNotice={verificationNotice} onCommand={runCommand} onVerify={() => void runVerificationCommand()} onDecision={(requirementId, approved, notes) => void recordHumanDecision(requirementId, approved, notes)} onRefresh={() => void load()} />}
     {handoff && !loading && !status && !error && <div className="panel empty-panel"><span className="panel-kicker">STATE UNAVAILABLE</span><h2>No mission state returned.</h2><p>The authority did not provide an execution record, so the UI will not infer one.</p></div>}
     {error && <div className="panel error-panel" role="alert"><span className="panel-kicker">ACTION REQUIRED</span><h2>{/Antigravity is not ready/i.test(error) ? "Antigravity setup required" : authorityReadFailure ? "Mission state unavailable" : "Relintor needs your attention"}</h2><p>{error}</p>{authorityReadFailure && <button className="secondary-button" type="button" onClick={() => void load()}>Retry authority read</button>}{authorityReadFailure && authorityReadStatus && <p className="form-hint" role="status">{authorityReadStatus}</p>}</div>}
   </section>;
@@ -1330,7 +1328,8 @@ function AntigravitySetupCard({ health, onRefresh }: { health: AntigravityHealth
   </section>;
 }
 
-export function MissionCockpit({ status, verification, antigravity, busy, revalidating, verificationNotice, onCommand, onVerify, onRefresh }: { status: ExecutionStatus; verification: VerificationStatus | null; antigravity: AntigravityHealth | null; busy: boolean; revalidating: boolean; verificationNotice: string | null; onCommand: (command: (id: string) => Promise<ExecutionStatus>) => Promise<void>; onVerify: () => void; onRefresh: () => void }) {
+export function MissionCockpit({ status, verification, antigravity, busy, revalidating, verificationNotice, onCommand, onVerify, onDecision, onRefresh }: { status: ExecutionStatus; verification: VerificationStatus | null; antigravity: AntigravityHealth | null; busy: boolean; revalidating: boolean; verificationNotice: string | null; onCommand: (command: (id: string) => Promise<ExecutionStatus>) => Promise<void>; onVerify: () => void; onDecision: (requirementId: string, approved: boolean, notes: string) => void; onRefresh: () => void }) {
+  const [decisionNotes, setDecisionNotes] = useState("");
   const executorReady = antigravity?.adapter_ready === true;
   const presentation = missionPresentation(status, verification, executorReady);
   const verificationView = verificationPresentation(verification);
@@ -1357,6 +1356,9 @@ export function MissionCockpit({ status, verification, antigravity, busy, revali
     ...(verification?.failed_checks || []),
     ...(verification?.stale_evidence || []),
   ];
+  const pendingDecision = verification?.workflow_stage === "WAITING_FOR_USER_DECISION"
+    ? verification.human_decisions[0] || null
+    : null;
   const recentEvents = status.events.slice(-5).reverse();
   const verifying = busy && status.state === "ExecutionTasksFinishedAwaitingVerification";
   const completedTaskMessage =
@@ -1371,7 +1373,7 @@ export function MissionCockpit({ status, verification, antigravity, busy, revali
       const manualRetry = status.recovery_action === "MANUAL_REVIEW_RETRY";
       return <button className="primary-button" type="button" disabled={busy || dispatching} onClick={() => void onCommand(manualRetry ? retryRecoveredTask : revalidateExecution)}>{manualRetry ? (busy ? "Authorizing reviewed retry…" : "Review changes and retry this task") : (revalidating ? "Checking recovery safety…" : "Check recovery safety")}</button>;
     }
-    if (presentation.primaryAction === "verify") return <button className="primary-button" type="button" disabled={busy} onClick={onVerify}>{verifying ? "Capturing evidence and checking requirements…" : "Verify work"}</button>;
+    if (presentation.primaryAction === "verify") return <button className="primary-button" type="button" disabled={busy || Boolean(pendingDecision)} onClick={onVerify}>{verifying ? "Capturing evidence and checking requirements…" : "Verify work"}</button>;
     if (presentation.primaryAction === "view_verification") return <button className="primary-button" type="button" onClick={() => document.getElementById("mission-verification-details")?.scrollIntoView({ behavior: "smooth", block: "start" })}>View verification</button>;
     return null;
   })();
@@ -1393,7 +1395,8 @@ export function MissionCockpit({ status, verification, antigravity, busy, revali
     {presentation.recoveryRequired && <section className="panel attention-panel" aria-labelledby="recovery-title"><span className="panel-kicker">RECOVERY</span><h3 id="recovery-title">Review the interrupted task before continuing</h3><p>{recoveryMessage}</p>{status.external_changes.length > 0 && <ul>{status.external_changes.map((path) => <li key={path}>Workspace change to review: {displayWindowsPath(path)}</li>)}</ul>}<p className="form-hint">Relintor will not retry automatically or claim the workspace is unchanged. A reviewed retry creates a new exact attempt and preserves this history.</p></section>}
 
     {verificationNotice && <p className="form-hint" role="status" aria-live="polite">{verificationNotice}</p>}
-    {(verificationAttention.length > 0 || (verification && verificationView.tone === "warning")) && <section className="panel attention-panel" aria-labelledby="verification-blocker-title"><span className="panel-kicker">VERIFICATION</span><h3 id="verification-blocker-title">Verification needs attention</h3><p>{verificationView.supporting}</p>{verificationAttention.length > 0 && <ul>{verificationAttention.slice(0, 4).map((item) => <li key={item}>{item}</li>)}</ul>}</section>}
+    {pendingDecision && <section className="panel attention-panel decision-panel" aria-labelledby="human-decision-title"><span className="panel-kicker">YOUR DECISION</span><h3 id="human-decision-title">Relintor needs your decision</h3><p><strong>{pendingDecision.question}</strong></p><p>{pendingDecision.summary}</p><label className="field-label" htmlFor="decision-notes">Optional notes</label><textarea id="decision-notes" value={decisionNotes} maxLength={4000} disabled={busy} onChange={(event) => setDecisionNotes(event.target.value)} placeholder="Add context for the audit record (optional)" /><div className="primary-action-row"><button className="primary-button" type="button" disabled={busy} onClick={() => onDecision(pendingDecision.requirement_id, true, decisionNotes)}>{busy ? "Recording decision…" : "Approve"}</button><button className="danger-button" type="button" disabled={busy} onClick={() => onDecision(pendingDecision.requirement_id, false, decisionNotes)}>{busy ? "Recording decision…" : "Reject"}</button></div><p className="form-hint">Only your action can satisfy this decision. Relintor and Antigravity cannot approve it for you.</p><details className="technical-details"><summary>Technical evidence details</summary><dl><div><dt>Requirement</dt><dd><code>{pendingDecision.requirement_id}</code></dd></div><div><dt>Criteria</dt><dd><code>{pendingDecision.criterion_ids.join(", ")}</code></dd></div></dl></details></section>}
+    {!pendingDecision && (verificationAttention.length > 0 || (verification && verificationView.tone === "warning")) && <section className="panel attention-panel" aria-labelledby="verification-blocker-title"><span className="panel-kicker">VERIFICATION</span><h3 id="verification-blocker-title">Verification needs attention</h3><p>{verification?.summary || verificationView.supporting}</p>{verification?.collection_failures.length ? <ul>{verification.collection_failures.map((item) => <li key={item}>{item}</li>)}</ul> : null}{verificationAttention.length > 0 && <details className="technical-details"><summary>Technical evidence details</summary><ul>{verificationAttention.map((item) => <li key={item}>{item}</li>)}</ul></details>}</section>}
 
     <div className="mission-summary-grid" aria-label="Mission summary">
       <section><span>Progress</span><strong>{status.finished_tasks} of {status.total_tasks} complete</strong><small>{status.runnable_tasks.length} ready to run</small></section>

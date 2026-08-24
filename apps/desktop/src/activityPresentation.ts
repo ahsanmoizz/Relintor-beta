@@ -94,12 +94,36 @@ export function verificationPresentation(status: VerificationStatus | null): {
     status.requirements_total === 0 ||
     status.requirements_verified !== status.requirements_total;
   const authoritySaysVerified = token(status.completion_state) === "VERIFIEDCOMPLETE";
-  if (authoritySaysVerified && !hasMaterialGap && status.evidence_count > 0) {
+  if (authoritySaysVerified && !hasMaterialGap && status.evidence_count > 0 && status.certificate) {
     return {
       label: "Verified Complete",
       supporting: `${status.requirements_verified} of ${status.requirements_total} requirements passed with ${status.evidence_count} evidence ${status.evidence_count === 1 ? "artifact" : "artifacts"}.`,
       tone: "success",
       verifiedComplete: true,
+    };
+  }
+  if (status.workflow_stage === "WAITING_FOR_USER_DECISION") {
+    return {
+      label: "Your decision is needed",
+      supporting: status.summary,
+      tone: "warning",
+      verifiedComplete: false,
+    };
+  }
+  if (status.workflow_stage === "CORRECTING_FAILED_REQUIREMENT") {
+    return {
+      label: "Correction in progress",
+      supporting: status.summary,
+      tone: "info",
+      verifiedComplete: false,
+    };
+  }
+  if (status.workflow_stage === "USER_DECISION_REJECTED") {
+    return {
+      label: "Result rejected",
+      supporting: status.summary,
+      tone: "warning",
+      verifiedComplete: false,
     };
   }
   if (
@@ -206,6 +230,28 @@ export function missionPresentation(
         badge: "Evidence pending",
         tone: "info",
         primaryAction: "verify",
+        recoveryRequired: false,
+        verifiedComplete: false,
+      };
+    }
+    if (verification.workflow_stage === "WAITING_FOR_USER_DECISION") {
+      return {
+        headline: "Your decision is needed",
+        supporting: verification.summary,
+        badge: "Waiting for you",
+        tone: "warning",
+        primaryAction: "none",
+        recoveryRequired: false,
+        verifiedComplete: false,
+      };
+    }
+    if (verification.workflow_stage === "CORRECTING_FAILED_REQUIREMENT") {
+      return {
+        headline: "Antigravity is correcting failed work",
+        supporting: verification.summary,
+        badge: "Correcting",
+        tone: "info",
+        primaryAction: "none",
         recoveryRequired: false,
         verifiedComplete: false,
       };
