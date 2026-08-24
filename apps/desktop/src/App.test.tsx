@@ -1,6 +1,84 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
-import { App } from "./App";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { App, MissionCockpit, verificationActionError } from "./App";
+import type { AntigravityHealth, ExecutionStatus, VerificationStatus } from "./backend";
+
+function finishedExecution(): ExecutionStatus {
+  return {
+    project_id: "project-1",
+    project_name: "Test project",
+    mission_id: "mission-project-1",
+    revision: 1,
+    state: "ExecutionTasksFinishedAwaitingVerification",
+    watchdog_state: "Healthy",
+    current_turn: 1,
+    active_task: null,
+    current_task_objective: null,
+    recovery_task_id: null,
+    recovery_task_objective: null,
+    runnable_tasks: [],
+    total_tasks: 11,
+    finished_tasks: 11,
+    tool_calls: 0,
+    execution_steps: 0,
+    estimated_cost_micros: null,
+    safe_boundary_reached: true,
+    last_event: "TASK_IMPLEMENTATION_FINISHED",
+    ledger_path: "D:\\Relintor\\mission.json",
+    recovery_state: "NO_RECOVERY_REQUIRED",
+    last_safe_checkpoint: null,
+    resume_disposition: null,
+    resume_blocker: null,
+    external_changes: [],
+    recovery_detected: false,
+    recovery_action: "NONE",
+    dispatch_active: false,
+    execution_phase: "FINISHED_AWAITING_VERIFICATION",
+    execution_time_limit_ms: 600_000,
+    events: [],
+  };
+}
+
+function pendingVerification(): VerificationStatus {
+  return {
+    project_id: "project-1",
+    mission_id: "mission-project-1",
+    revision: 1,
+    execution_run_id: "run-1",
+    state: "VERIFICATION_FINISHED",
+    completion_state: "StoppedIncomplete",
+    requirements_verified: 2,
+    requirements_total: 11,
+    missing_evidence: ["requirement-human: missing HUMAN_DECISION"],
+    failed_checks: [],
+    skipped_checks: [],
+    stale_evidence: [],
+    blocked_external: [],
+    accepted_risks: [],
+    evidence_count: 2,
+    certificate: null,
+    detail: "requirements remain unverified",
+  };
+}
+
+const readyAntigravity: AntigravityHealth = {
+  status: "ready",
+  version: "1",
+  executable: "antigravity.exe",
+  compatibility: "compatible",
+  cli_invocation_capability: true,
+  plugin_hook_capability: true,
+  ide_status: "installed",
+  cli_status: "installed",
+  authentication_status: "authenticated",
+  executable_detectable: true,
+  adapter_ready: true,
+  setup_required: false,
+  environment: "test",
+  platform: "windows",
+  detected_at_ms: 1,
+  detail: "ready",
+};
 
 describe("desktop shell foundation", () => {
   beforeEach(() => {
@@ -165,6 +243,30 @@ describe("desktop shell foundation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Activity" }));
     expect(screen.getByTestId("activity-empty")).toBeTruthy();
     expect(screen.getByText(/There is no frontend-only activity/)).toBeTruthy();
+  });
+
+  it("routes Verify work through the P8 action callback after all tasks finish", () => {
+    const onVerify = vi.fn();
+    render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={pendingVerification()}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={onVerify}
+        onRefresh={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Verify work" }));
+    expect(onVerify).toHaveBeenCalledTimes(1);
+  });
+
+  it("turns a failed verification invocation into visible user-facing text", () => {
+    expect(verificationActionError(new Error("verification authority command failed"))).toMatch(/couldn't verify this work/i);
   });
 
   it("exposes privacy controls and safe diagnostics without sensitive fields", async () => {

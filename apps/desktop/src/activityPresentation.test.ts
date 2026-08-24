@@ -106,6 +106,39 @@ describe("user-visible mission state model", () => {
     expect(view.tone).toBe("info");
   });
 
+  it("surfaces incomplete verification instead of reporting ready", () => {
+    const view = verificationPresentation(verification({
+      requirements_verified: 2,
+      requirements_total: 11,
+      evidence_count: 2,
+      missing_evidence: ["requirement-human: missing HUMAN_DECISION"],
+    }));
+    expect(view.label).toBe("Verification needs attention");
+    expect(view.tone).toBe("warning");
+    expect(view.supporting).toMatch(/explicit human decision/i);
+  });
+
+  it("keeps Verify work as the P8 action after all tasks finish", () => {
+    const view = missionPresentation(
+      execution({
+        state: "ExecutionTasksFinishedAwaitingVerification",
+        execution_phase: "FINISHED_AWAITING_VERIFICATION",
+        finished_tasks: 11,
+        total_tasks: 11,
+        runnable_tasks: [],
+      }),
+      verification({
+        requirements_verified: 2,
+        requirements_total: 11,
+        evidence_count: 2,
+        missing_evidence: ["requirement-human: missing HUMAN_DECISION"],
+      }),
+      true,
+    );
+    expect(view.primaryAction).toBe("verify");
+    expect(view.headline).toBe("Verification needs attention");
+  });
+
   it("keeps canonical Windows paths internally while removing the extended prefix for display", () => {
     expect(displayWindowsPath("\\\\?\\D:\\Projects\\Relintor Beta")).toBe("D:\\Projects\\Relintor Beta");
     expect(displayProjectName("\\\\?\\D:\\Projects\\Relintor Beta")).toBe("Relintor Beta");

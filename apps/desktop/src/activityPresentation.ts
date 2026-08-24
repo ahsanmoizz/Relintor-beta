@@ -102,10 +102,21 @@ export function verificationPresentation(status: VerificationStatus | null): {
       verifiedComplete: true,
     };
   }
-  if (status.failed_checks.length || status.stale_evidence.length || status.blocked_external.length || authoritySaysVerified) {
+  if (
+    status.evidence_count > 0 &&
+    (status.failed_checks.length ||
+      status.stale_evidence.length ||
+      status.blocked_external.length ||
+      status.missing_evidence.length ||
+      status.requirements_verified !== status.requirements_total ||
+      authoritySaysVerified)
+  ) {
+    const humanDecisionRequired = [...status.missing_evidence, ...status.blocked_external].some((item) => /HUMAN[_ ]DECISION|explicit user decision/i.test(item));
     return {
       label: "Verification needs attention",
-      supporting: "Relintor found evidence or dependency issues that must be resolved before completion can be claimed.",
+      supporting: humanDecisionRequired
+        ? "An explicit human decision is required before Relintor can call this work complete. Relintor will not infer or manufacture that decision."
+        : "Relintor found missing evidence or dependency issues that must be resolved before completion can be claimed.",
       tone: "warning",
       verifiedComplete: false,
     };

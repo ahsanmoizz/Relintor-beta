@@ -9,10 +9,12 @@ use relintor_execution::{
     ExecutionRun, ExecutionRunState, ExecutionTaskState, SuccessfulExecutionIdentity,
     TaskAttemptState,
 };
+#[cfg(test)]
+use relintor_standards::RequirementSource;
 use relintor_standards::{
     AuthorityEngine, DecisionActor, DecisionKind, EvidenceClass, EvidenceConfidence,
-    ExecutionHandoff, ExplicitDecision, MissionRevision, Requirement, RequirementSource,
-    RequirementStatus, StandardsRegistry, TrustedSignerSet,
+    ExecutionHandoff, ExplicitDecision, MissionRevision, Requirement, RequirementStatus,
+    StandardsRegistry, TrustedSignerSet,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -36,7 +38,13 @@ const MANIFEST_VERSION: &str = "p8-evidence-manifest-v1";
 const CERTIFICATE_VERSION: &str = "p8-completion-certificate-v1";
 const INVALIDATION_INDEX_VERSION: &str = "p8-invalidation-index-v1";
 const MAX_PATH_COMPONENTS: usize = 128;
+const EXPLICIT_USER_DECISION_COLLECTOR: &str = "explicit-user-decision";
 type HmacSha256 = Hmac<Sha256>;
+
+fn is_user_authored_human_decision_artifact(metadata: &EvidenceMetadata) -> bool {
+    metadata.class == EvidenceClass::HumanDecision
+        && metadata.collector.name == EXPLICIT_USER_DECISION_COLLECTOR
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EvidenceError {
@@ -2374,7 +2382,7 @@ impl VerificationCollectorOrchestrator {
                     let fresh = existing.iter().any(|artifact| {
                         artifact.metadata.requirement_ids
                             == vec![requirement.requirement_id.clone()]
-                            && artifact.metadata.class == EvidenceClass::HumanDecision
+                            && is_user_authored_human_decision_artifact(&artifact.metadata)
                             && artifact.metadata.result == EvidenceResult::Pass
                             && confidence_meets(
                                 artifact.metadata.confidence,
@@ -2392,42 +2400,9 @@ impl VerificationCollectorOrchestrator {
                         result.reused_fresh.push(operation);
                         continue;
                     }
-                    let binding = match CollectorBinding::for_sealed_human_decision(
-                        authority,
-                        current,
-                        format!("p8-human-decision-{}", requirement.requirement_id),
-                        &requirement.requirement_id,
-                    )
-                    .and_then(|binding| match p7_execution {
-                        Some(p7) => binding.bind_successful_execution(
-                            p7,
-                            authority,
-                            &requirement.requirement_id,
-                        ),
-                        None => binding
-                            .bind_test_successful_execution(authority, &requirement.requirement_id),
-                    }) {
-                        Ok(binding) => binding,
-                        Err(error) => {
-                            result
-                                .blocked_external
-                                .push(format!("{operation}: {error}"));
-                            continue;
-                        }
-                    };
-                    match HumanDecisionCollector.collect(&binding, authority, requirement) {
-                        Ok(collected) => {
-                            store.put(collected.receipt, &collected.artifact_bytes)?;
-                            result
-                                .executed
-                                .push(format!("{operation} via sealed mission authority"));
-                        }
-                        Err(error) => {
-                            result
-                                .blocked_external
-                                .push(format!("{operation}: {error}"));
-                        }
-                    }
+                    result.blocked_external.push(format!(
+                        "{operation}: an explicit user decision is required; Relintor will not infer or generate HUMAN_DECISION evidence"
+                    ));
                     continue;
                 }
                 let Some(spec) = plan.for_class(obligation.class) else {
@@ -2806,65 +2781,6 @@ impl CollectorBinding {
         {
             binding = binding.bind_test_successful_execution(authority, requirement_id)?;
         }
-        Ok(binding)
-    }
-
-    fn for_sealed_human_decision(
-        authority: &VerificationAuthority,
-        current: &FreshnessContext,
-        evidence_id: impl Into<String>,
-        requirement_id: &str,
-    ) -> Result<Self, EvidenceError> {
-        let requirement = authority
-            .revision
-            .contract
-            .requirement_graph
-            .requirements
-            .iter()
-            .find(|item| item.requirement_id == requirement_id)
-            .ok_or_else(|| {
-                EvidenceError::InvalidAuthority(format!(
-                    "collector requirement is not present in the sealed plan: {requirement_id}"
-                ))
-            })?;
-        let obligation = requirement
-            .verification_policy
-            .obligations
-            .iter()
-            .find(|item| item.required && item.class == EvidenceClass::HumanDecision)
-            .ok_or_else(|| {
-                EvidenceError::InvalidAuthority(format!(
-                    "sealed requirement {requirement_id} does not require a human decision"
-                ))
-            })?;
-        sealed_user_decision_source(requirement).map_err(|error| {
-            EvidenceError::InvalidAuthority(format!(
-                "sealed human-decision requirement {requirement_id} is not eligible: {error}"
-            ))
-        })?;
-        let accepted_criteria = requirement
-            .acceptance_criteria
-            .iter()
-            .filter(|criterion| !criterion.machine_checkable)
-            .map(|criterion| criterion.criterion_id.clone())
-            .collect::<BTreeSet<_>>();
-        if accepted_criteria.is_empty() {
-            return Err(EvidenceError::InvalidAuthority(format!(
-                "sealed human-decision requirement {requirement_id} has no human acceptance criterion"
-            )));
-        }
-        let mut binding = Self::from_authority_internal(
-            authority,
-            current,
-            evidence_id,
-            vec![requirement.requirement_id.clone()],
-            obligation.required,
-            accepted_criteria,
-            BTreeSet::new(),
-        )?;
-        // Human assertions are already part of the signed/sealed mission authority.
-        // They do not use machine-probe criterion provenance.
-        binding.criterion_provenance.clear();
         Ok(binding)
     }
 
@@ -3509,6 +3425,7 @@ impl PerformanceCollector {
     }
 }
 
+#[cfg(test)]
 fn sealed_user_decision_source(requirement: &Requirement) -> Result<String, EvidenceError> {
     if requirement.requirement_type != "decision" {
         return Err(EvidenceError::InvalidAuthority(
@@ -3532,73 +3449,6 @@ fn sealed_user_decision_source(requirement: &Requirement) -> Result<String, Evid
             "human decision evidence may only attest a directly user-authored sealed decision"
                 .into(),
         )),
-    }
-}
-
-pub struct HumanDecisionCollector;
-
-impl HumanDecisionCollector {
-    pub fn collect(
-        &self,
-        binding: &CollectorBinding,
-        authority: &VerificationAuthority,
-        requirement: &Requirement,
-    ) -> Result<CollectedEvidence<HumanDecisionObservation>, EvidenceError> {
-        authority.validate()?;
-        if !binding
-            .requirement_ids
-            .contains(&requirement.requirement_id)
-        {
-            return Err(EvidenceError::InvalidAuthority(
-                "sealed human decision binding does not match its requirement".into(),
-            ));
-        }
-        let source_reference = sealed_user_decision_source(requirement)?;
-        let accepted_criteria = requirement
-            .acceptance_criteria
-            .iter()
-            .filter(|criterion| !criterion.machine_checkable)
-            .map(|criterion| criterion.criterion_id.clone())
-            .collect::<BTreeSet<_>>();
-        if accepted_criteria.is_empty() || accepted_criteria != binding.accepted_criteria {
-            return Err(EvidenceError::InvalidAuthority(
-                "sealed human decision criteria do not match the collector binding".into(),
-            ));
-        }
-        let sealed_requirement_digest = sha256(&canonical(requirement)?);
-        let observation = HumanDecisionObservation {
-            requirement_id: requirement.requirement_id.clone(),
-            source_reference: source_reference.clone(),
-            sealed_requirement_digest: sealed_requirement_digest.clone(),
-            accepted_criteria: accepted_criteria.clone(),
-            seal_hash: authority.revision.seal.contract_hash.clone(),
-            result: EvidenceResult::Pass,
-        };
-        let bytes = canonical(&observation)?;
-        let command_digest = sha256(&canonical(&(
-            "SEALED_HUMAN_DECISION",
-            &authority.revision.seal.mission_id,
-            authority.revision.revision,
-            &authority.revision.seal.contract_hash,
-            &requirement.requirement_id,
-            &source_reference,
-            &sealed_requirement_digest,
-            &accepted_criteria,
-        ))?);
-        let receipt = binding.receipt(
-            CollectorIdentity::new("sealed-human-decision-collector", "p8-v1"),
-            "SEALED_HUMAN_DECISION",
-            command_digest,
-            EvidenceResult::Pass,
-            EvidenceClass::HumanDecision,
-            EvidenceConfidence::HumanAsserted,
-            &bytes,
-        )?;
-        Ok(CollectedEvidence {
-            receipt,
-            observation,
-            artifact_bytes: bytes,
-        })
     }
 }
 
@@ -4593,6 +4443,8 @@ impl VerificationEngine {
                         .metadata
                         .requirement_ids
                         .contains(&requirement.requirement_id)
+                    && (artifact.metadata.class != EvidenceClass::HumanDecision
+                        || is_user_authored_human_decision_artifact(&artifact.metadata))
                     && self.p7_execution.as_ref().is_none_or(|p7| {
                         p7.validates_evidence_metadata(&self.authority, &artifact.metadata)
                             .is_ok_and(|valid| valid)
@@ -5441,6 +5293,25 @@ mod tests {
             sealed_user_decision_source(&inferred),
             Err(EvidenceError::InvalidAuthority(_))
         ));
+    }
+
+    fn human_decision_metadata(collector: &str) -> EvidenceMetadata {
+        let mut metadata = bound_metadata(execution_identity());
+        metadata.class = EvidenceClass::HumanDecision;
+        metadata.confidence = EvidenceConfidence::HumanAsserted;
+        metadata.collector = CollectorIdentity::new(collector, "p8-v1");
+        metadata.requirement_ids = vec!["requirement-human".into()];
+        metadata.accepted_criteria = BTreeSet::from(["criterion-human".into()]);
+        metadata
+    }
+
+    #[test]
+    fn generated_human_decisions_are_rejected_but_explicit_user_evidence_is_eligible() {
+        let generated = human_decision_metadata("sealed-human-decision-collector");
+        assert!(!is_user_authored_human_decision_artifact(&generated));
+
+        let explicit = human_decision_metadata(EXPLICIT_USER_DECISION_COLLECTOR);
+        assert!(is_user_authored_human_decision_artifact(&explicit));
     }
 
     #[test]

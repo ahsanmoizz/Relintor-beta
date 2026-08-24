@@ -330,6 +330,24 @@ function userFacingAuthorityError(reason: unknown, fallback: string): string {
   return /authority|execution state|ledger|sqlite|database|query/i.test(message) ? fallback : message;
 }
 
+export function verificationActionError(reason: unknown): string {
+  return userFacingAuthorityError(
+    reason,
+    "Relintor couldn't verify this work. The execution record is preserved; review the verification details before retrying.",
+  );
+}
+
+export function verificationActionMessage(status: VerificationStatus): string {
+  const attention = [...status.missing_evidence, ...status.blocked_external, ...status.failed_checks, ...status.stale_evidence];
+  if (status.completion_state.replace(/[^a-z0-9]/gi, "").toUpperCase() === "VERIFIEDCOMPLETE") {
+    return "Verification finished successfully. Review the verified requirements before issuing the completion certificate.";
+  }
+  if (attention.some((item) => /HUMAN[_ ]DECISION|explicit user decision/i.test(item))) {
+    return "Verification finished, but an explicit human decision is still required. Relintor did not infer one.";
+  }
+  return "Verification finished. Review the result and the remaining evidence requirements below.";
+}
+
 function friendlyExecutionLabel(value: string | null | undefined, fallback: string): string {
   const normalized = (value || "").toUpperCase();
   const labels: Record<string, string> = {
@@ -966,6 +984,7 @@ function ResultPanel({ title, items, empty }: { title: string; items: string[]; 
 export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
   const [status, setStatus] = useState<ExecutionStatus | null>(null);
   const [verification, setVerification] = useState<VerificationStatus | null>(null);
+  const [verificationNotice, setVerificationNotice] = useState<string | null>(null);
   const [antigravity, setAntigravity] = useState<AntigravityHealth | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(Boolean(handoff));
@@ -1105,10 +1124,13 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
     if (!projectId) return;
     setBusy(true);
     setError(null);
+    setVerificationNotice(null);
     try {
-      setVerification(await verificationStart(projectId));
+      const next = await verificationStart(projectId);
+      setVerification(next);
+      setVerificationNotice(verificationActionMessage(next));
     } catch (reason) {
-      setError(userFacingAuthorityError(reason, "Relintor couldn't verify this work. The execution record is preserved; review the verification details before retrying."));
+      setError(verificationActionError(reason));
     } finally {
       setBusy(false);
     }
@@ -1121,7 +1143,7 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
     {handoff && <AntigravitySetupCard health={antigravity} onRefresh={refreshAntigravity} />}
     {!handoff && <div className="panel empty-panel" data-testid="activity-empty"><span className="panel-kicker">NO SEALED MISSION</span><h2>Nothing is ready to execute.</h2><p>Review a blueprint and let the Rust authority seal a mission first. There is no frontend-only activity to display.</p></div>}
     {handoff && loading && <div className="panel loading-panel" role="status" aria-live="polite"><span className="panel-kicker">MISSION STATE</span><h2>Reading persisted state…</h2><p>Waiting for the Rust execution and verification authorities.</p></div>}
-    {handoff && !loading && status && <MissionCockpit status={status} verification={verification} antigravity={antigravity} busy={busy} revalidating={revalidating} onCommand={runCommand} onVerify={() => void runVerificationCommand()} onRefresh={() => void load()} />}
+    {handoff && !loading && status && <MissionCockpit status={status} verification={verification} antigravity={antigravity} busy={busy} revalidating={revalidating} verificationNotice={verificationNotice} onCommand={runCommand} onVerify={() => void runVerificationCommand()} onRefresh={() => void load()} />}
     {handoff && !loading && !status && !error && <div className="panel empty-panel"><span className="panel-kicker">STATE UNAVAILABLE</span><h2>No mission state returned.</h2><p>The authority did not provide an execution record, so the UI will not infer one.</p></div>}
     {error && <div className="panel error-panel" role="alert"><span className="panel-kicker">ACTION REQUIRED</span><h2>{/Antigravity is not ready/i.test(error) ? "Antigravity setup required" : authorityReadFailure ? "Mission state unavailable" : "Relintor needs your attention"}</h2><p>{error}</p>{authorityReadFailure && <button className="secondary-button" type="button" onClick={() => void load()}>Retry authority read</button>}{authorityReadFailure && authorityReadStatus && <p className="form-hint" role="status">{authorityReadStatus}</p>}</div>}
   </section>;
@@ -1308,7 +1330,7 @@ function AntigravitySetupCard({ health, onRefresh }: { health: AntigravityHealth
   </section>;
 }
 
-function MissionCockpit({ status, verification, antigravity, busy, revalidating, onCommand, onVerify, onRefresh }: { status: ExecutionStatus; verification: VerificationStatus | null; antigravity: AntigravityHealth | null; busy: boolean; revalidating: boolean; onCommand: (command: (id: string) => Promise<ExecutionStatus>) => Promise<void>; onVerify: () => void; onRefresh: () => void }) {
+export function MissionCockpit({ status, verification, antigravity, busy, revalidating, verificationNotice, onCommand, onVerify, onRefresh }: { status: ExecutionStatus; verification: VerificationStatus | null; antigravity: AntigravityHealth | null; busy: boolean; revalidating: boolean; verificationNotice: string | null; onCommand: (command: (id: string) => Promise<ExecutionStatus>) => Promise<void>; onVerify: () => void; onRefresh: () => void }) {
   const executorReady = antigravity?.adapter_ready === true;
   const presentation = missionPresentation(status, verification, executorReady);
   const verificationView = verificationPresentation(verification);
@@ -1329,7 +1351,12 @@ function MissionCockpit({ status, verification, antigravity, busy, revalidating,
         : status.last_safe_checkpoint
           ? "A trusted checkpoint is available for review."
           : "Relintor has not authorized another attempt yet.";
-  const verificationBlocked = verification?.blocked_external || [];
+  const verificationAttention = [
+    ...(verification?.blocked_external || []),
+    ...(verification?.missing_evidence || []),
+    ...(verification?.failed_checks || []),
+    ...(verification?.stale_evidence || []),
+  ];
   const recentEvents = status.events.slice(-5).reverse();
   const verifying = busy && status.state === "ExecutionTasksFinishedAwaitingVerification";
   const completedTaskMessage =
@@ -1365,7 +1392,8 @@ function MissionCockpit({ status, verification, antigravity, busy, revalidating,
 
     {presentation.recoveryRequired && <section className="panel attention-panel" aria-labelledby="recovery-title"><span className="panel-kicker">RECOVERY</span><h3 id="recovery-title">Review the interrupted task before continuing</h3><p>{recoveryMessage}</p>{status.external_changes.length > 0 && <ul>{status.external_changes.map((path) => <li key={path}>Workspace change to review: {displayWindowsPath(path)}</li>)}</ul>}<p className="form-hint">Relintor will not retry automatically or claim the workspace is unchanged. A reviewed retry creates a new exact attempt and preserves this history.</p></section>}
 
-    {(verificationBlocked.length > 0 || (verification && verificationView.tone === "warning")) && <section className="panel attention-panel" aria-labelledby="verification-blocker-title"><span className="panel-kicker">VERIFICATION</span><h3 id="verification-blocker-title">Verification needs attention</h3><p>{verificationView.supporting}</p>{verificationBlocked.length > 0 && <ul>{verificationBlocked.slice(0, 4).map((item) => <li key={item}>{item}</li>)}</ul>}</section>}
+    {verificationNotice && <p className="form-hint" role="status" aria-live="polite">{verificationNotice}</p>}
+    {(verificationAttention.length > 0 || (verification && verificationView.tone === "warning")) && <section className="panel attention-panel" aria-labelledby="verification-blocker-title"><span className="panel-kicker">VERIFICATION</span><h3 id="verification-blocker-title">Verification needs attention</h3><p>{verificationView.supporting}</p>{verificationAttention.length > 0 && <ul>{verificationAttention.slice(0, 4).map((item) => <li key={item}>{item}</li>)}</ul>}</section>}
 
     <div className="mission-summary-grid" aria-label="Mission summary">
       <section><span>Progress</span><strong>{status.finished_tasks} of {status.total_tasks} complete</strong><small>{status.runnable_tasks.length} ready to run</small></section>
