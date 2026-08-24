@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { App, MissionCockpit, verificationActionError } from "./App";
+import { App, MissionCockpit, mergeVerificationRefresh, verificationActionError } from "./App";
 import type { AntigravityHealth, ExecutionStatus, VerificationStatus } from "./backend";
 
 function finishedExecution(): ExecutionStatus {
@@ -252,7 +252,7 @@ describe("desktop shell foundation", () => {
 
   it("routes Verify work through the P8 action callback after all tasks finish", () => {
     const onVerify = vi.fn();
-    render(
+    const rendered = render(
       <MissionCockpit
         status={finishedExecution()}
         verification={pendingVerification()}
@@ -287,7 +287,7 @@ describe("desktop shell foundation", () => {
       summary: "Review the completed project outcome before approving it.",
       criterion_ids: ["criterion-secret-internal-id"],
     }];
-    render(
+    const rendered = render(
       <MissionCockpit
         status={finishedExecution()}
         verification={decision}
@@ -305,9 +305,90 @@ describe("desktop shell foundation", () => {
     expect(screen.getByRole("heading", { name: "Relintor needs your decision" })).toBeTruthy();
     expect(screen.getByText("Technical evidence details")).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Optional notes"), { target: { value: "The result matches." } });
+    const staleRefresh: VerificationStatus = {
+      ...decision,
+      workflow_stage: "READY_TO_VERIFY",
+      summary: "Verification is ready.",
+      human_decisions: [],
+      missing_evidence: ["requirement-secret-internal-id: missing HUMAN_DECISION"],
+    };
+    rendered.rerender(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={mergeVerificationRefresh(decision, staleRefresh)}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={onDecision}
+        onRefresh={vi.fn()}
+      />,
+    );
+    expect((screen.getByLabelText("Optional notes") as HTMLTextAreaElement).value).toBe("The result matches.");
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     expect(onDecision).toHaveBeenCalledWith("requirement-secret-internal-id", true, "The result matches.");
     expect(screen.queryByRole("button", { name: "Verify work" })).toBeNull();
+  });
+
+  it("keeps the pending decision stable across multiple five-second polling refreshes", async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = pendingVerification();
+      pending.workflow_stage = "WAITING_FOR_USER_DECISION";
+      pending.summary = "Automated checks are complete. Relintor needs your decision before verification can continue.";
+      pending.human_decisions = [{
+        requirement_id: "requirement-human",
+        title: "Approved outcome",
+        question: "Does the completed result satisfy the approved outcome for this mission?",
+        summary: "Review the completed project outcome before approving it.",
+        criterion_ids: ["criterion-human"],
+      }];
+      const staleRefresh: VerificationStatus = {
+        ...pending,
+        workflow_stage: "READY_TO_VERIFY",
+        summary: "Verification is ready.",
+        human_decisions: [],
+        missing_evidence: ["requirement-human: missing HumanDecision"],
+      };
+      let current = pending;
+      const notes = "My decision remains attached to this mission.";
+      const timer = window.setInterval(() => {
+        current = mergeVerificationRefresh(current, staleRefresh);
+      }, 5_000);
+
+      await vi.advanceTimersByTimeAsync(15_000);
+
+      expect(current.workflow_stage).toBe("WAITING_FOR_USER_DECISION");
+      expect(current.human_decisions[0]?.requirement_id).toBe("requirement-human");
+      expect(notes).toBe("My decision remains attached to this mission.");
+      window.clearInterval(timer);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("allows an authoritative decision transition to replace the pending card", () => {
+    const pending = pendingVerification();
+    pending.workflow_stage = "WAITING_FOR_USER_DECISION";
+    pending.human_decisions = [{
+      requirement_id: "requirement-human",
+      title: "Approved outcome",
+      question: "Does the completed result satisfy the approved outcome for this mission?",
+      summary: "Review the completed project outcome before approving it.",
+      criterion_ids: ["criterion-human"],
+    }];
+    const rejected: VerificationStatus = {
+      ...pending,
+      workflow_stage: "USER_DECISION_REJECTED",
+      human_decisions: [],
+      summary: "You rejected the completed result.",
+      missing_evidence: [],
+    };
+
+    expect(mergeVerificationRefresh(pending, rejected).workflow_stage).toBe("USER_DECISION_REJECTED");
+    expect(mergeVerificationRefresh(pending, rejected).human_decisions).toHaveLength(0);
   });
 
   it("exposes privacy controls and safe diagnostics without sensitive fields", async () => {

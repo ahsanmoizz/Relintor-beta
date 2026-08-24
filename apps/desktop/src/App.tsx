@@ -653,6 +653,35 @@ function WorkspaceSelector({ projectId, onUpdated }: { projectId: string; onUpda
   </section>;
 }
 
+export function mergeVerificationRefresh(
+  previous: VerificationStatus | null,
+  next: VerificationStatus,
+): VerificationStatus {
+  if (!previous || previous.workflow_stage !== "WAITING_FOR_USER_DECISION" || !previous.human_decisions.length) {
+    return next;
+  }
+  if (
+    next.mission_id !== previous.mission_id
+    || next.project_id !== previous.project_id
+    || next.revision !== previous.revision
+    || next.execution_run_id !== previous.execution_run_id
+    || ["VERIFIED_COMPLETE", "USER_DECISION_REJECTED"].includes(next.workflow_stage)
+    || next.human_decisions.length > 0
+  ) {
+    return next;
+  }
+
+  const humanDecisionStillRequired = next.missing_evidence.some((item) => /human.?decision/i.test(item));
+  if (!humanDecisionStillRequired) return next;
+
+  return {
+    ...next,
+    workflow_stage: previous.workflow_stage,
+    summary: previous.summary,
+    human_decisions: previous.human_decisions,
+  };
+}
+
 function VerificationSection({ projectId }: { projectId: string }) {
   const [status, setStatus] = useState<VerificationStatus | null>(null);
   const [evidence, setEvidence] = useState<VerificationEvidence[]>([]);
@@ -976,6 +1005,8 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
   const [authorityReadStatus, setAuthorityReadStatus] = useState<string | null>(null);
   const [revalidating, setRevalidating] = useState(false);
   const pollInFlight = useRef(false);
+  const verificationRefreshGeneration = useRef(0);
+  const decisionSubmissionInFlight = useRef(false);
   const readinessGate = useRef(createReadinessGate<AntigravityHealth | null>(3_000)).current;
   const projectId = handoff?.mission_id.replace(/^mission-/, "") || null;
 
@@ -992,6 +1023,8 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
 
   const load = async () => {
     if (!projectId) return;
+    const generation = verificationRefreshGeneration.current + 1;
+    verificationRefreshGeneration.current = generation;
     const attempt = authorityReadAttempt + 1;
     setAuthorityReadAttempt(attempt);
     setLoading(true);
@@ -1003,9 +1036,12 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
       setStatus(executionState);
       setAuthorityReadStatus(`Authority read attempt ${attempt} succeeded.`);
       try {
-        setVerification(await verificationStatus(projectId));
+        const value = await verificationStatus(projectId);
+        if (verificationRefreshGeneration.current === generation) {
+          setVerification((previous) => mergeVerificationRefresh(previous, value));
+        }
       } catch {
-        setVerification(null);
+        if (verificationRefreshGeneration.current === generation) setVerification(null);
       }
     } catch (reason) {
       setAuthorityReadFailure(true);
@@ -1052,11 +1088,14 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
           // run reaches its terminal evidence boundary. Poll it from the same
           // single-flight loop so the user never has to refresh by hand.
           if (current.state === "ExecutionTasksFinishedAwaitingVerification") {
+            const generation = verificationRefreshGeneration.current;
             try {
               const value = await verificationStatus(projectId);
-              if (active) setVerification(value);
+              if (active && verificationRefreshGeneration.current === generation) {
+                setVerification((previous) => mergeVerificationRefresh(previous, value));
+              }
             } catch {
-              if (active) setVerification(null);
+              if (active && verificationRefreshGeneration.current === generation) setVerification(null);
             }
           }
         }
@@ -1083,6 +1122,8 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
   const runCommand = async (command: (id: string) => Promise<ExecutionStatus>) => {
     if (!projectId) return;
     const isRevalidation = command === revalidateExecution;
+    const generation = verificationRefreshGeneration.current + 1;
+    verificationRefreshGeneration.current = generation;
     if (isRevalidation) setRevalidating(true);
     setBusy(true);
     setError(null);
@@ -1090,9 +1131,12 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
     try {
       setStatus(await command(projectId));
       try {
-        setVerification(await verificationStatus(projectId));
+        const value = await verificationStatus(projectId);
+        if (verificationRefreshGeneration.current === generation) {
+          setVerification((previous) => mergeVerificationRefresh(previous, value));
+        }
       } catch {
-        setVerification(null);
+        if (verificationRefreshGeneration.current === generation) setVerification(null);
       }
     } catch (reason) {
       setError(userFacingAuthorityError(reason, "Relintor couldn't apply that action. No completion state was changed; refresh the status and try again."));
@@ -1104,13 +1148,17 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
 
   const runVerificationCommand = async () => {
     if (!projectId) return;
+    const generation = verificationRefreshGeneration.current + 1;
+    verificationRefreshGeneration.current = generation;
     setBusy(true);
     setError(null);
     setVerificationNotice(null);
     try {
       const next = await verificationStart(projectId);
-      setVerification(next);
-      setVerificationNotice(verificationActionMessage(next));
+      if (verificationRefreshGeneration.current === generation) {
+        setVerification(next);
+        setVerificationNotice(verificationActionMessage(next));
+      }
     } catch (reason) {
       setError(verificationActionError(reason));
     } finally {
@@ -1119,18 +1167,24 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
   };
 
   const recordHumanDecision = async (requirementId: string, approved: boolean, notes: string) => {
-    if (!projectId) return;
+    if (!projectId || decisionSubmissionInFlight.current) return;
+    decisionSubmissionInFlight.current = true;
+    const generation = verificationRefreshGeneration.current + 1;
+    verificationRefreshGeneration.current = generation;
     setBusy(true);
     setError(null);
     setVerificationNotice(approved ? "Recording your approval and resuming verification…" : "Recording your rejection…");
     try {
       const next = await submitHumanDecision(projectId, requirementId, approved, notes);
-      setVerification(next);
-      setVerificationNotice(verificationActionMessage(next));
+      if (verificationRefreshGeneration.current === generation) {
+        setVerification(next);
+        setVerificationNotice(verificationActionMessage(next));
+      }
     } catch (reason) {
       setError(verificationActionError(reason));
     } finally {
       setBusy(false);
+      decisionSubmissionInFlight.current = false;
     }
   };
 
@@ -1359,6 +1413,16 @@ export function MissionCockpit({ status, verification, antigravity, busy, revali
   const pendingDecision = verification?.workflow_stage === "WAITING_FOR_USER_DECISION"
     ? verification.human_decisions[0] || null
     : null;
+  const decisionIdentity = pendingDecision
+    ? `${status.mission_id}:${status.revision}:${verification?.execution_run_id}:${pendingDecision.requirement_id}`
+    : null;
+  const lastDecisionIdentity = useRef<string | null>(null);
+  useEffect(() => {
+    if (decisionIdentity && lastDecisionIdentity.current !== decisionIdentity) {
+      setDecisionNotes("");
+      lastDecisionIdentity.current = decisionIdentity;
+    }
+  }, [decisionIdentity]);
   const recentEvents = status.events.slice(-5).reverse();
   const verifying = busy && status.state === "ExecutionTasksFinishedAwaitingVerification";
   const completedTaskMessage =
