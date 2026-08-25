@@ -79,7 +79,29 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Rust tests
-        run: cargo test --workspace --locked
+        shell: python
+        run: |
+          import subprocess
+
+          result = subprocess.run(
+              ["cargo", "test", "--workspace", "--locked"],
+              capture_output=True,
+              text=True,
+          )
+          output = result.stdout + result.stderr
+          print(output, end="")
+          if result.returncode:
+              detail = (
+                  output[-12000:]
+                  .replace("%", "%25")
+                  .replace("\r", "%0D")
+                  .replace("\n", "%0A")
+              )
+              print(
+                  "::error file=.github/workflows/quality.yml,line=82,col=1::"
+                  f"Rust tests failed: {detail}"
+              )
+          raise SystemExit(result.returncode)
 
       - name: Desktop TypeScript typecheck
         run: pnpm --dir apps/desktop typecheck
