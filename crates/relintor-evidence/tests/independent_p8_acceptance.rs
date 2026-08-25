@@ -207,12 +207,22 @@ fn mutable_workspace_plan_cannot_mint_criterion_authority() {
     let (authority, current, root) = authority_fixture();
     let config_dir = root.path().join(".relintor");
     fs::create_dir_all(&config_dir).expect("verification config directory");
+    let command = command_for_exit(root.path(), true);
+    let plan = serde_json::json!({
+        "collectors": [{
+            "class": "TEST_OUTPUT",
+            "program": &command.program,
+            "args": &command.args,
+            "criteria": [{
+                "requirement_id": "P8-TEST-01",
+                "criterion_id": "P8-TEST-01-criterion",
+                "probe_identity": "cmd-exit-probe"
+            }]
+        }]
+    });
     fs::write(
         config_dir.join("verification-plan.json"),
-        r#"{"collectors":[
-            {"class":"TEST_OUTPUT","program":"cmd","args":["/C","exit","0"],
-             "criteria":[{"requirement_id":"P8-TEST-01","criterion_id":"P8-TEST-01-criterion","probe_identity":"cmd-exit-probe"}]}
-        ]}"#,
+        serde_json::to_vec(&plan).expect("portable verification plan"),
     )
     .expect("verification plan");
     let store = store(root.path());
@@ -231,23 +241,55 @@ fn mutable_workspace_plan_cannot_mint_criterion_authority() {
 }
 
 #[test]
+fn unavailable_machine_collector_persists_truthful_blocked_evidence() {
+    let (authority, current, root) = authority_fixture();
+    let config_dir = root.path().join(".relintor");
+    fs::create_dir_all(&config_dir).expect("verification config directory");
+    let plan = serde_json::json!({
+        "collectors": [{
+            "class": "TEST_OUTPUT",
+            "program": "relintor-deliberately-missing-test-runner",
+            "args": []
+        }]
+    });
+    fs::write(
+        config_dir.join("verification-plan.json"),
+        serde_json::to_vec(&plan).expect("verification plan"),
+    )
+    .expect("verification plan");
+    let store = store(root.path());
+    let result = VerificationCollectorOrchestrator::new(root.path())
+        .collect_required_evidence(&authority, &current, &store)
+        .expect("collector orchestration remains inspectable");
+
+    assert!(!result.blocked_external.is_empty());
+    let artifacts = store.list().expect("persisted collector failure");
+    assert!(!artifacts.is_empty());
+    assert!(artifacts.iter().all(|artifact| {
+        artifact.metadata.class == EvidenceClass::TestOutput
+            && artifact.metadata.result == EvidenceResult::Blocked
+            && artifact.metadata.confidence == EvidenceConfidence::Missing
+    }));
+}
+
+#[test]
 fn protected_criterion_mapping_mints_evidence_only_for_matching_candidate() {
     let (authority, current, root) = authority_fixture();
     let config_dir = root.path().join(".relintor");
     fs::create_dir_all(&config_dir).expect("verification config directory");
+    let command = command_for_exit(root.path(), true);
+    let plan = serde_json::json!({
+        "collectors": [{
+            "class": "TEST_OUTPUT",
+            "program": &command.program,
+            "args": &command.args
+        }]
+    });
     fs::write(
         config_dir.join("verification-plan.json"),
-        r#"{"collectors":[
-            {"class":"TEST_OUTPUT","program":"cmd","args":["/C","exit","0"]}
-        ]}"#,
+        serde_json::to_vec(&plan).expect("portable verification plan"),
     )
     .expect("verification plan");
-    let command = CommandSpec {
-        program: "cmd".into(),
-        args: vec!["/C".into(), "exit".into(), "0".into()],
-        working_directory: root.path().to_path_buf(),
-        environment: BTreeMap::new(),
-    };
     let protected = ProtectedCriterionVerificationPlan::from_test_support(
         &authority,
         vec![CriterionProbeAuthorizationInput {
@@ -781,6 +823,52 @@ fn atomic_evidence_commit_reloads_and_partial_metadata_is_never_accepted() {
 }
 
 #[test]
+fn long_collector_evidence_ids_round_trip_without_using_path_length_as_failure_state() {
+    let (authority, current, root) = authority_fixture();
+    let evidence_store = store(root.path());
+    let evidence_id = format!(
+        "p8-collector-{}",
+        "requirement-criterion-project-blueprint-candidate-".repeat(8)
+    );
+    let artifact = evidence_store
+        .put_test_fixture(
+            metadata(
+                &authority,
+                &current,
+                &evidence_id,
+                EvidenceClass::TestOutput,
+                EvidenceResult::Pass,
+                EvidenceConfidence::StrongDeterministic,
+            ),
+            b"durable long-id proof",
+        )
+        .expect("long evidence metadata must commit");
+
+    let reopened = store(root.path());
+    assert_eq!(reopened.load(&evidence_id).unwrap().artifact, artifact);
+    assert!(reopened
+        .list()
+        .unwrap()
+        .iter()
+        .any(|item| item.metadata.evidence_id == evidence_id));
+    reopened
+        .invalidate(&evidence_id, "long-id invalidation regression")
+        .expect("long evidence invalidation must commit");
+    assert!(reopened
+        .invalidations()
+        .unwrap()
+        .iter()
+        .any(|item| item.evidence_id == evidence_id));
+    assert!(reopened.list().unwrap().is_empty());
+    #[cfg(windows)]
+    assert!(fs::read_dir(reopened.root().join("metadata"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+        .all(|entry| entry.file_name().to_string_lossy() != format!("{evidence_id}.json")));
+}
+
+#[test]
 fn unknown_evidence_store_version_is_rejected_before_use() {
     let (authority, current, root) = authority_fixture();
     let store = store(root.path());
@@ -989,7 +1077,7 @@ fn performance_threshold_failure_is_visible() {
         BTreeSet::new(),
     )
     .unwrap();
-    let collected = PerformanceCollector
+    let collected = PerformanceCollector::default()
         .measure(&binding, "p95", 400.0, 200.0, "ms", "real-runtime")
         .unwrap();
     assert_eq!(collected.observation.result, EvidenceResult::Fail);
@@ -1580,6 +1668,25 @@ fn process_collector_records_actual_exit_and_bounded_output() {
     assert_eq!(result.exit_code, Some(0));
     assert_eq!(result.result, EvidenceResult::Pass);
     assert!(!result.stdout.is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn process_collector_runs_batch_script_commands_from_native_desktop_context() {
+    let root = tempdir().unwrap();
+    let script = root.path().join("collector with spaces.cmd");
+    fs::write(&script, "@echo off\r\necho native-batch\r\nexit /b 0\r\n").unwrap();
+    let command = CommandSpec::new(script.to_string_lossy(), root.path());
+    let result = ProcessCollector::default().run(&command).unwrap();
+    assert_eq!(
+        result.exit_code,
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.result, EvidenceResult::Pass);
+    assert!(String::from_utf8_lossy(&result.stdout).contains("native-batch"));
 }
 
 #[test]

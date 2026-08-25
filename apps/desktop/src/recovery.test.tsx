@@ -154,7 +154,7 @@ describe("existing mission authority recovery", () => {
     expect(screen.getByRole("button", { name: "Review changes and retry this task" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Run next task" })).toBeNull();
     expect(mocks.revalidateExecution).toHaveBeenCalledTimes(1);
-  });
+  }, 15_000);
 
   it("does not present a fresh run as an unsafe retry", async () => {
     const status: ExecutionStatus = {

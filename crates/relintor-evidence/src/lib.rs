@@ -11,8 +11,8 @@ use relintor_execution::{
 };
 use relintor_standards::{
     AuthorityEngine, DecisionActor, DecisionKind, EvidenceClass, EvidenceConfidence,
-    ExecutionHandoff, ExplicitDecision, MissionRevision, Requirement, RequirementStatus,
-    StandardsRegistry, TrustedSignerSet,
+    ExecutionHandoff, ExplicitDecision, MissionRevision, Requirement, RequirementSource,
+    RequirementStatus, StandardsRegistry, TrustedSignerSet,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -36,7 +36,13 @@ const MANIFEST_VERSION: &str = "p8-evidence-manifest-v1";
 const CERTIFICATE_VERSION: &str = "p8-completion-certificate-v1";
 const INVALIDATION_INDEX_VERSION: &str = "p8-invalidation-index-v1";
 const MAX_PATH_COMPONENTS: usize = 128;
+const EXPLICIT_USER_DECISION_COLLECTOR: &str = "explicit-user-decision";
 type HmacSha256 = Hmac<Sha256>;
+
+fn is_user_authored_human_decision_artifact(metadata: &EvidenceMetadata) -> bool {
+    metadata.class == EvidenceClass::HumanDecision
+        && metadata.collector.name == EXPLICIT_USER_DECISION_COLLECTOR
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EvidenceError {
@@ -609,25 +615,47 @@ impl EvidenceStore {
         evidence_id: &str,
         digest: &str,
     ) -> Result<(PathBuf, PathBuf, PathBuf), EvidenceError> {
-        if evidence_id.is_empty()
-            || evidence_id.contains(['/', '\\'])
-            || evidence_id.contains("..")
-            || digest.len() != 64
-            || !digest.chars().all(|c| c.is_ascii_hexdigit())
-        {
+        validate_evidence_id(evidence_id)?;
+        if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(EvidenceError::InvalidInput(
                 "unsafe evidence path component".into(),
             ));
         }
         Ok((
             self.root.join("blobs").join(digest),
-            self.root
-                .join("metadata")
-                .join(format!("{evidence_id}.json")),
-            self.root
-                .join("invalidations")
-                .join(format!("{evidence_id}.json")),
+            self.metadata_path(evidence_id)?,
+            self.invalidation_path(evidence_id)?,
         ))
+    }
+
+    fn metadata_path(&self, evidence_id: &str) -> Result<PathBuf, EvidenceError> {
+        validate_evidence_id(evidence_id)?;
+        let legacy = self
+            .root
+            .join("metadata")
+            .join(format!("{evidence_id}.json"));
+        if legacy.is_file() || !requires_safe_store_path(&legacy) {
+            return Ok(legacy);
+        }
+        Ok(self
+            .root
+            .join("metadata")
+            .join(format!("evidence-{}.json", sha256(evidence_id.as_bytes()))))
+    }
+
+    fn invalidation_path(&self, evidence_id: &str) -> Result<PathBuf, EvidenceError> {
+        validate_evidence_id(evidence_id)?;
+        let legacy = self
+            .root
+            .join("invalidations")
+            .join(format!("{evidence_id}.json"));
+        if legacy.is_file() || !requires_safe_store_path(&legacy) {
+            return Ok(legacy);
+        }
+        Ok(self.root.join("invalidations").join(format!(
+            "invalidation-{}.json",
+            sha256(evidence_id.as_bytes())
+        )))
     }
 
     pub fn put(
@@ -686,10 +714,7 @@ impl EvidenceStore {
     }
 
     pub fn load(&self, evidence_id: &str) -> Result<StoredEvidence, EvidenceError> {
-        let metadata_path = self
-            .root
-            .join("metadata")
-            .join(format!("{evidence_id}.json"));
+        let metadata_path = self.metadata_path(evidence_id)?;
         if !metadata_path.is_file() {
             return Err(EvidenceError::EvidenceNotFound(evidence_id.into()));
         }
@@ -754,12 +779,7 @@ impl EvidenceStore {
         evidence_id: &str,
         reason: impl Into<String>,
     ) -> Result<(), EvidenceError> {
-        if !self
-            .root
-            .join("metadata")
-            .join(format!("{evidence_id}.json"))
-            .is_file()
-        {
+        if !self.metadata_path(evidence_id)?.is_file() {
             return Err(EvidenceError::EvidenceNotFound(evidence_id.into()));
         }
         let index = self.load_invalidation_index()?;
@@ -777,10 +797,7 @@ impl EvidenceStore {
             integrity: String::new(),
         };
         record.integrity = hmac_hex(&self.key, &canonical(&record.signing_body())?)?;
-        let path = self
-            .root
-            .join("invalidations")
-            .join(format!("{evidence_id}.json"));
+        let path = self.invalidation_path(evidence_id)?;
         write_atomic_file(&path, &canonical(&record)?)?;
         let mut records = index.records;
         records.insert(evidence_id.into(), sha256(&canonical(&record)?));
@@ -794,12 +811,13 @@ impl EvidenceStore {
             if !entry.path().is_file() || entry.file_name().to_string_lossy().starts_with('.') {
                 continue;
             }
-            let evidence_id = entry
-                .path()
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .ok_or_else(|| EvidenceError::IntegrityFailure("invalid evidence filename".into()))?
-                .to_owned();
+            let envelope: EvidenceEnvelope =
+                serde_json::from_slice(&fs::read(entry.path()).map_err(io_error)?)
+                    .map_err(json_error)?;
+            let evidence_id = envelope.artifact.metadata.evidence_id;
+            if self.is_revoked(&evidence_id)? {
+                continue;
+            }
             artifacts.push(self.load(&evidence_id)?.artifact);
         }
         artifacts.sort_by(|left, right| left.metadata.evidence_id.cmp(&right.metadata.evidence_id));
@@ -917,10 +935,7 @@ impl EvidenceStore {
         let index = self.load_invalidation_index()?;
         let mut records = Vec::new();
         for evidence_id in index.records.keys() {
-            let path = self
-                .root
-                .join("invalidations")
-                .join(format!("{evidence_id}.json"));
+            let path = self.invalidation_path(evidence_id)?;
             if !path.is_file() {
                 return Err(EvidenceError::IntegrityFailure(
                     "invalidation record is missing from authenticated index".into(),
@@ -982,12 +997,11 @@ impl EvidenceStore {
                 && !entry.file_name().to_string_lossy().starts_with('.')
             {
                 let invalidation_path = entry.path();
-                let evidence_id = invalidation_path
-                    .file_stem()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or_default()
-                    .to_owned();
-                if !index.records.contains_key(&evidence_id) {
+                let record: EvidenceInvalidation =
+                    serde_json::from_slice(&fs::read(invalidation_path).map_err(io_error)?)
+                        .map_err(json_error)?;
+                self.validate_invalidation(&record)?;
+                if !index.records.contains_key(&record.evidence_id) {
                     return Err(EvidenceError::IntegrityFailure(
                         "unindexed invalidation record detected".into(),
                     ));
@@ -1033,6 +1047,26 @@ impl EvidenceStore {
             .records
             .contains_key(evidence_id))
     }
+}
+
+fn validate_evidence_id(evidence_id: &str) -> Result<(), EvidenceError> {
+    if evidence_id.is_empty() || evidence_id.contains(['/', '\\']) || evidence_id.contains("..") {
+        return Err(EvidenceError::InvalidInput(
+            "unsafe evidence path component".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn requires_safe_store_path(path: &Path) -> bool {
+    // Keep room for the atomic-write temporary suffix and for filesystems'
+    // per-component limits. The legacy evidence-id filename is retained when
+    // it already exists so old stores remain readable, while new long IDs use
+    // a stable hash on every supported platform.
+    let filename_is_long = path
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().len() >= 220);
+    filename_is_long || path.to_string_lossy().len() >= 220
 }
 
 fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), EvidenceError> {
@@ -1691,6 +1725,9 @@ impl VerificationCollectorPlan {
                 ("lint", EvidenceClass::LintStaticAnalysis),
                 ("security-scan", EvidenceClass::SecurityScan),
                 ("accessibility-audit", EvidenceClass::AccessibilityResult),
+                ("performance-result", EvidenceClass::PerformanceResult),
+                ("performance-scan", EvidenceClass::PerformanceResult),
+                ("performance-budget", EvidenceClass::PerformanceResult),
             ] {
                 if scripts.is_some_and(|items| items.contains_key(script)) {
                     add_discovered_command(
@@ -1890,9 +1927,8 @@ impl ProcessCollector {
             ));
         }
         let started_at_ms = now_ms();
-        let mut process = Command::new(&command.program);
+        let mut process = process_command(command);
         process
-            .args(&command.args)
             .current_dir(&command.working_directory)
             .envs(&command.environment)
             .stdout(Stdio::piped())
@@ -1954,6 +1990,67 @@ impl ProcessCollector {
                 EvidenceResult::Fail
             },
         })
+    }
+}
+
+fn process_command(command: &CommandSpec) -> Command {
+    #[cfg(windows)]
+    if let Some(script) = windows_script_program(&command.program) {
+        let command_line = std::iter::once(script)
+            .chain(command.args.iter().cloned())
+            .map(|argument| quote_cmd_argument(&argument))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut process = Command::new("cmd.exe");
+        process.args(["/D", "/S", "/C"]);
+        // `cmd.exe` parses its `/C` payload itself. A normal `Command::arg`
+        // escapes embedded quotes for CreateProcess, which makes cmd.exe see
+        // literal backslashes. Use a pre-quoted raw payload so `/S /C` can
+        // remove the outer pair and preserve the quoted script path.
+        use std::os::windows::process::CommandExt;
+        process.raw_arg(format!(" \"{command_line}\""));
+        return process;
+    }
+
+    let mut process = Command::new(&command.program);
+    process.args(&command.args);
+    process
+}
+
+#[cfg(windows)]
+fn windows_script_program(program: &str) -> Option<String> {
+    let path = Path::new(program);
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if extension == "cmd" || extension == "bat" {
+        return Some(program.to_owned());
+    }
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(name.as_str(), "npm" | "npx" | "pnpm" | "yarn") {
+        Some(format!("{program}.cmd"))
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn quote_cmd_argument(argument: &str) -> String {
+    if argument.is_empty() {
+        return "\"\"".into();
+    }
+    if argument.chars().any(|character| {
+        character.is_whitespace() || matches!(character, '"' | '&' | '|' | '<' | '>' | '^')
+    }) {
+        format!("\"{}\"", argument.replace('"', "\\\""))
+    } else {
+        argument.to_owned()
     }
 }
 
@@ -2200,6 +2297,14 @@ pub struct CollectorOrchestrationResult {
     pub blocked_external: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CollectorFailureObservation {
+    evidence_class: EvidenceClass,
+    command_digest: String,
+    error_digest: String,
+    result: EvidenceResult,
+}
+
 /// Rust-owned P8 collector planning and execution. The sealed requirement
 /// graph is the sole source of requirement IDs, evidence classes, and
 /// acceptance criteria. Missing live dependencies are left incomplete rather
@@ -2213,6 +2318,67 @@ impl VerificationCollectorOrchestrator {
         Self {
             workspace_root: workspace_root.into(),
         }
+    }
+
+    fn persist_collector_failure(
+        &self,
+        binding: &CollectorBinding,
+        class: EvidenceClass,
+        command: &CommandSpec,
+        error: &EvidenceError,
+        store: &EvidenceStore,
+    ) -> Result<(), EvidenceError> {
+        let collector = trusted_collector_identity(class).ok_or_else(|| {
+            EvidenceError::CollectorUnavailable(
+                "no trusted collector identity exists for the failed check".into(),
+            )
+        })?;
+        let command_digest = command.digest()?;
+        let observation = CollectorFailureObservation {
+            evidence_class: class,
+            command_digest: command_digest.clone(),
+            error_digest: sha256(error.to_string().as_bytes()),
+            result: EvidenceResult::Blocked,
+        };
+        let bytes = canonical(&observation)?;
+        let mut failure_binding = binding.clone();
+        failure_binding.evidence_id = format!(
+            "{}-blocked-{}",
+            binding.evidence_id,
+            &observation.error_digest[..16]
+        );
+        if store.load(&failure_binding.evidence_id).is_ok() {
+            return Ok(());
+        }
+        let receipt = failure_binding.receipt(
+            collector,
+            "COLLECTOR_EXECUTION_BLOCKED",
+            command_digest,
+            EvidenceResult::Blocked,
+            class,
+            EvidenceConfidence::Missing,
+            &bytes,
+        )?;
+        store.put(receipt, &bytes)?;
+        Ok(())
+    }
+
+    fn invalidate_resolved_collector_failures(
+        &self,
+        binding: &CollectorBinding,
+        class: EvidenceClass,
+        store: &EvidenceStore,
+    ) -> Result<(), EvidenceError> {
+        let prefix = format!("{}-blocked-", binding.evidence_id);
+        for artifact in store.list()?.into_iter().filter(|artifact| {
+            artifact.metadata.evidence_id.starts_with(&prefix) && artifact.metadata.class == class
+        }) {
+            store.invalidate(
+                &artifact.metadata.evidence_id,
+                "superseded by a successful rerun of the same authenticated collector",
+            )?;
+        }
+        Ok(())
     }
 
     fn execute_binding(
@@ -2296,9 +2462,12 @@ impl VerificationCollectorOrchestrator {
                 store.put(collected.receipt, &collected.artifact_bytes)?;
             }
             EvidenceClass::PerformanceResult => {
-                return Err(EvidenceError::CollectorUnavailable(
-                    "performance collector requires a measured value and sealed threshold".into(),
-                ));
+                let collected = PerformanceCollector::default().collect_process(
+                    binding,
+                    command,
+                    spec.route.as_deref().unwrap_or("workspace"),
+                )?;
+                store.put(collected.receipt, &collected.artifact_bytes)?;
             }
             _ => {
                 return Err(EvidenceError::CollectorUnavailable(
@@ -2364,6 +2533,33 @@ impl VerificationCollectorOrchestrator {
                 .filter(|item| item.required)
             {
                 let operation = format!("{}:{:?}", requirement.requirement_id, obligation.class);
+                if obligation.class == EvidenceClass::HumanDecision {
+                    let fresh = existing.iter().any(|artifact| {
+                        artifact.metadata.requirement_ids
+                            == vec![requirement.requirement_id.clone()]
+                            && is_user_authored_human_decision_artifact(&artifact.metadata)
+                            && artifact.metadata.result == EvidenceResult::Pass
+                            && confidence_meets(
+                                artifact.metadata.confidence,
+                                obligation.minimum_confidence,
+                            )
+                            && p7_execution.is_none_or(|p7| {
+                                p7.validates_evidence_metadata(authority, &artifact.metadata)
+                                    .is_ok_and(|valid| valid)
+                            })
+                            && store
+                                .freshness(&artifact.metadata.evidence_id, current)
+                                .is_ok_and(|value| value == EvidenceFreshness::Fresh)
+                    });
+                    if fresh {
+                        result.reused_fresh.push(operation);
+                        continue;
+                    }
+                    result.blocked_external.push(format!(
+                        "{operation}: an explicit user decision is required; Relintor will not infer or generate HUMAN_DECISION evidence"
+                    ));
+                    continue;
+                }
                 let Some(spec) = plan.for_class(obligation.class) else {
                     result.blocked_external.push(format!(
                         "{operation}: no trusted collector was discovered for {:?}",
@@ -2441,11 +2637,19 @@ impl VerificationCollectorOrchestrator {
                         &plan.project_kind,
                         store,
                     ) {
+                        let _ = self.persist_collector_failure(
+                            &binding,
+                            obligation.class,
+                            &command,
+                            &error,
+                            store,
+                        );
                         result
                             .blocked_external
                             .push(format!("{operation}: {error}"));
                         continue;
                     }
+                    self.invalidate_resolved_collector_failures(&binding, obligation.class, store)?;
                     result.executed.push(format!(
                         "{operation} via {} ({})",
                         command.program, spec.provenance
@@ -2519,11 +2723,19 @@ impl VerificationCollectorOrchestrator {
                         &plan.project_kind,
                         store,
                     ) {
+                        let _ = self.persist_collector_failure(
+                            &binding,
+                            obligation.class,
+                            &command,
+                            &error,
+                            store,
+                        );
                         result
                             .blocked_external
                             .push(format!("{criterion_operation}: {error}"));
                         continue;
                     }
+                    self.invalidate_resolved_collector_failures(&binding, obligation.class, store)?;
                     result.executed.push(format!(
                         "{criterion_operation} via {} ({}) probe={}",
                         command.program, spec.provenance, probe.probe_identity
@@ -2646,6 +2858,188 @@ pub struct PerformanceObservation {
     pub unit: String,
     pub probe_definition: String,
     pub result: EvidenceResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PerformanceProcessObservation {
+    pub probe_definition: String,
+    pub process: ProcessEvidence,
+    pub result: EvidenceResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HumanDecisionObservation {
+    pub requirement_id: String,
+    pub source_reference: String,
+    pub sealed_requirement_digest: String,
+    pub accepted_criteria: BTreeSet<String>,
+    pub seal_hash: String,
+    pub result: EvidenceResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExplicitUserDecisionObservation {
+    pub requirement_id: String,
+    pub source_reference: String,
+    pub sealed_requirement_digest: String,
+    pub accepted_criteria: BTreeSet<String>,
+    pub seal_hash: String,
+    pub approved: bool,
+    pub notes: String,
+    pub recorded_at_ms: u64,
+    pub result: EvidenceResult,
+}
+
+#[derive(Default)]
+pub struct ExplicitUserDecisionRecorder;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplicitUserDecisionInput<'a> {
+    pub requirement_id: &'a str,
+    pub approved: bool,
+    pub notes: &'a str,
+}
+
+impl ExplicitUserDecisionRecorder {
+    pub fn record(
+        &self,
+        authority: &VerificationAuthority,
+        current: &FreshnessContext,
+        store: &EvidenceStore,
+        p7_execution: &AuthenticatedP7Execution,
+        input: ExplicitUserDecisionInput<'_>,
+    ) -> Result<EvidenceArtifact, EvidenceError> {
+        let requirement_id = input.requirement_id;
+        let approved = input.approved;
+        let notes = input.notes.trim();
+        if notes.len() > 4_000 {
+            return Err(EvidenceError::InvalidInput(
+                "user decision notes exceed the 4,000 character limit".into(),
+            ));
+        }
+        let requirement = authority
+            .revision
+            .contract
+            .requirement_graph
+            .requirements
+            .iter()
+            .find(|item| item.requirement_id == requirement_id)
+            .ok_or_else(|| {
+                EvidenceError::InvalidAuthority(
+                    "user decision does not match a sealed requirement".into(),
+                )
+            })?;
+        let source_reference = sealed_user_decision_source(requirement)?;
+        if !requirement
+            .verification_policy
+            .obligations
+            .iter()
+            .any(|item| {
+                item.required
+                    && item.class == EvidenceClass::HumanDecision
+                    && confidence_meets(EvidenceConfidence::HumanAsserted, item.minimum_confidence)
+            })
+        {
+            return Err(EvidenceError::InvalidAuthority(
+                "sealed requirement does not authorize explicit human decision evidence".into(),
+            ));
+        }
+        let accepted_criteria = requirement
+            .acceptance_criteria
+            .iter()
+            .filter(|criterion| !criterion.machine_checkable)
+            .map(|criterion| criterion.criterion_id.clone())
+            .collect::<BTreeSet<_>>();
+        if accepted_criteria.is_empty() {
+            return Err(EvidenceError::InvalidAuthority(
+                "sealed human decision has no user-review criterion".into(),
+            ));
+        }
+        let recorded_at_ms = now_ms();
+        let decision_digest = sha256(&canonical(&(
+            authority.identity_digest()?,
+            requirement_id,
+            approved,
+            notes,
+            recorded_at_ms,
+        ))?);
+        let collector = CollectorIdentity::new(EXPLICIT_USER_DECISION_COLLECTOR, "p8-v1");
+        let probe_identity = "EXPLICIT_USER_ACTION".to_string();
+        let command_digest = sha256(&canonical(&(
+            &collector,
+            &probe_identity,
+            requirement_id,
+            approved,
+            notes,
+        ))?);
+        let plan_digest = sha256(&canonical(&(
+            authority.identity_digest()?,
+            requirement_id,
+            &accepted_criteria,
+            &collector,
+            &probe_identity,
+            &command_digest,
+        ))?);
+        let mut binding = CollectorBinding::from_authority_internal(
+            authority,
+            current,
+            format!(
+                "p8-user-decision-{requirement_id}-{}",
+                &decision_digest[..16]
+            ),
+            vec![requirement_id.into()],
+            true,
+            accepted_criteria.clone(),
+            BTreeSet::new(),
+        )?;
+        binding.criterion_provenance = accepted_criteria
+            .iter()
+            .map(|criterion_id| CriterionVerificationPlan {
+                mission_id: authority.revision.seal.mission_id.clone(),
+                mission_revision: authority.revision.revision,
+                project_id: authority.revision.seal.project_id.clone(),
+                p6_seal_hash: authority.revision.seal.contract_hash.clone(),
+                requirement_id: requirement_id.into(),
+                criterion_id: criterion_id.clone(),
+                evidence_class: EvidenceClass::HumanDecision,
+                collector_identity: collector.clone(),
+                probe_identity: probe_identity.clone(),
+                command_digest: command_digest.clone(),
+                verification_plan_authority_digest: plan_digest.clone(),
+            })
+            .collect();
+        binding = binding.bind_successful_execution(p7_execution, authority, requirement_id)?;
+        let result = if approved {
+            EvidenceResult::Pass
+        } else {
+            EvidenceResult::Fail
+        };
+        let observation = ExplicitUserDecisionObservation {
+            requirement_id: requirement_id.into(),
+            source_reference,
+            sealed_requirement_digest: requirement
+                .sealed_hash
+                .clone()
+                .ok_or_else(|| EvidenceError::InvalidAuthority("sealed hash is missing".into()))?,
+            accepted_criteria,
+            seal_hash: authority.revision.seal.contract_hash.clone(),
+            approved,
+            notes: notes.into(),
+            recorded_at_ms,
+            result,
+        };
+        let bytes = canonical(&observation)?;
+        let receipt = binding.receipt(
+            collector,
+            &probe_identity,
+            command_digest,
+            result,
+            EvidenceClass::HumanDecision,
+            EvidenceConfidence::HumanAsserted,
+            &bytes,
+        )?;
+        store.put(receipt, &bytes)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3292,9 +3686,41 @@ impl AccessibilityCollector {
     }
 }
 
-pub struct PerformanceCollector;
+#[derive(Default)]
+pub struct PerformanceCollector {
+    process: ProcessCollector,
+}
 
 impl PerformanceCollector {
+    pub fn collect_process(
+        &self,
+        binding: &CollectorBinding,
+        command: &CommandSpec,
+        probe_definition: &str,
+    ) -> Result<CollectedEvidence<PerformanceProcessObservation>, EvidenceError> {
+        let process = self.process.run(command)?;
+        let bytes = process_output_bytes(&process)?;
+        let observation = PerformanceProcessObservation {
+            probe_definition: probe_definition.into(),
+            process: process.clone(),
+            result: process.result,
+        };
+        let receipt = binding.receipt(
+            CollectorIdentity::new("performance-collector", "p8-v1"),
+            "CONFIGURED_PERFORMANCE_PROCESS",
+            command.digest()?,
+            process.result,
+            EvidenceClass::PerformanceResult,
+            EvidenceConfidence::StrongRuntime,
+            &bytes,
+        )?;
+        Ok(CollectedEvidence {
+            receipt,
+            observation,
+            artifact_bytes: bytes,
+        })
+    }
+
     pub fn measure(
         &self,
         binding: &CollectorBinding,
@@ -3332,6 +3758,32 @@ impl PerformanceCollector {
             observation,
             artifact_bytes: bytes,
         })
+    }
+}
+
+fn sealed_user_decision_source(requirement: &Requirement) -> Result<String, EvidenceError> {
+    if requirement.requirement_type != "decision" {
+        return Err(EvidenceError::InvalidAuthority(
+            "human decision evidence requires a sealed decision requirement".into(),
+        ));
+    }
+    if requirement
+        .sealed_hash
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        return Err(EvidenceError::InvalidAuthority(
+            "human decision evidence requires the requirement to be sealed".into(),
+        ));
+    }
+    match &requirement.source {
+        RequirementSource::User { reference } if !reference.trim().is_empty() => {
+            Ok(reference.clone())
+        }
+        _ => Err(EvidenceError::InvalidAuthority(
+            "human decision evidence may only attest a directly user-authored sealed decision"
+                .into(),
+        )),
     }
 }
 
@@ -4326,6 +4778,8 @@ impl VerificationEngine {
                         .metadata
                         .requirement_ids
                         .contains(&requirement.requirement_id)
+                    && (artifact.metadata.class != EvidenceClass::HumanDecision
+                        || is_user_authored_human_decision_artifact(&artifact.metadata))
                     && self.p7_execution.as_ref().is_none_or(|p7| {
                         p7.validates_evidence_metadata(&self.authority, &artifact.metadata)
                             .is_ok_and(|valid| valid)
@@ -5103,6 +5557,118 @@ mod tests {
             dependency_lock_hashes: BTreeMap::new(),
             scope_fingerprint: None,
         }
+    }
+
+    fn sealed_user_decision_requirement() -> Requirement {
+        Requirement {
+            requirement_id: "requirement-human".into(),
+            title: "User product purpose".into(),
+            intent: "Build the user-requested product".into(),
+            source: RequirementSource::User {
+                reference: "project://example/idea".into(),
+            },
+            priority: relintor_standards::RequirementPriority::P1,
+            applicability: relintor_standards::ApplicabilityOutcome::Applicable,
+            acceptance_criteria: vec![AcceptanceCriterion {
+                criterion_id: "criterion-human".into(),
+                statement: "A reviewable evidence record demonstrates the user decision".into(),
+                criterion_type: "project-authority-obligation".into(),
+                machine_checkable: false,
+            }],
+            verification_policy: VerificationPolicy {
+                obligations: vec![EvidenceObligation {
+                    class: EvidenceClass::HumanDecision,
+                    minimum_confidence: EvidenceConfidence::HumanAsserted,
+                    rationale: "A genuine project decision requires explicit human review.".into(),
+                    required: true,
+                }],
+                p8_collector_required: true,
+            },
+            dependencies: Vec::new(),
+            risk: RequirementRisk::High,
+            status: RequirementStatus::Unstarted,
+            implementation_links: Vec::new(),
+            evidence_links: Vec::new(),
+            explicit_exceptions: Vec::new(),
+            sealed_hash: Some("a".repeat(64)),
+            requirement_type: "decision".into(),
+            origin_rule_id: None,
+            revision: 1,
+            schema_version: 1,
+        }
+    }
+
+    #[test]
+    fn human_decision_evidence_accepts_only_sealed_user_decision_requirements() {
+        let requirement = sealed_user_decision_requirement();
+        assert_eq!(
+            sealed_user_decision_source(&requirement).expect("sealed user decision"),
+            "project://example/idea"
+        );
+
+        let mut functional = requirement.clone();
+        functional.requirement_type = "functional".into();
+        assert!(matches!(
+            sealed_user_decision_source(&functional),
+            Err(EvidenceError::InvalidAuthority(_))
+        ));
+
+        let mut unsealed = requirement.clone();
+        unsealed.sealed_hash = None;
+        assert!(matches!(
+            sealed_user_decision_source(&unsealed),
+            Err(EvidenceError::InvalidAuthority(_))
+        ));
+
+        let mut inferred = requirement;
+        inferred.source = RequirementSource::Inference {
+            reference: "inferred".into(),
+        };
+        assert!(matches!(
+            sealed_user_decision_source(&inferred),
+            Err(EvidenceError::InvalidAuthority(_))
+        ));
+    }
+
+    fn human_decision_metadata(collector: &str) -> EvidenceMetadata {
+        let mut metadata = bound_metadata(execution_identity());
+        metadata.class = EvidenceClass::HumanDecision;
+        metadata.confidence = EvidenceConfidence::HumanAsserted;
+        metadata.collector = CollectorIdentity::new(collector, "p8-v1");
+        metadata.requirement_ids = vec!["requirement-human".into()];
+        metadata.accepted_criteria = BTreeSet::from(["criterion-human".into()]);
+        metadata
+    }
+
+    #[test]
+    fn generated_human_decisions_are_rejected_but_explicit_user_evidence_is_eligible() {
+        let generated = human_decision_metadata("sealed-human-decision-collector");
+        assert!(!is_user_authored_human_decision_artifact(&generated));
+
+        let explicit = human_decision_metadata(EXPLICIT_USER_DECISION_COLLECTOR);
+        assert!(is_user_authored_human_decision_artifact(&explicit));
+    }
+
+    #[test]
+    fn package_json_performance_scripts_are_discovered_as_runtime_evidence() {
+        let root = tempfile::tempdir().expect("temp workspace");
+        fs::write(
+            root.path().join("package.json"),
+            br#"{"scripts":{"performance-result":"node perf.js"}}"#,
+        )
+        .expect("write package json");
+        let plan = VerificationCollectorPlan::discover(root.path()).expect("discover collectors");
+        let spec = plan
+            .collectors
+            .iter()
+            .find(|item| item.evidence_class == EvidenceClass::PerformanceResult)
+            .expect("performance collector");
+        let command = spec.command.as_ref().expect("performance command");
+        assert_eq!(command.program, "npm");
+        assert_eq!(
+            command.args,
+            vec!["run".to_string(), "performance-result".to_string()]
+        );
     }
 
     #[test]

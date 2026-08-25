@@ -1,0 +1,281 @@
+name: Relintor Phase 2-4 Windows Closure
+
+on:
+  push:
+    branches:
+      - phase2-4-ci
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CI: "true"
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  phase2_4_windows:
+    name: Phase 2-4 Windows exhaustive gates
+    runs-on: windows-2022
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Rust 1.96
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.96.0
+          components: rustfmt, clippy
+
+      - name: Setup pnpm 11.17
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.17.0
+          run_install: false
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Reproducibility preflight
+        id: preflight
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustc -vV
+          cargo -V
+          rustfmt -V
+          cargo clippy -V
+          node -v
+          pnpm -v
+          python --version
+          if (-not (Test-Path Cargo.lock)) { throw 'Cargo.lock missing' }
+          if (-not (Test-Path pnpm-lock.yaml)) { throw 'pnpm-lock.yaml missing' }
+
+      - name: Install JavaScript dependencies
+        id: pnpm_install
+        continue-on-error: true
+        shell: pwsh
+        run: pnpm install --frozen-lockfile
+
+      - name: Locked product authority
+        id: spec
+        continue-on-error: true
+        shell: pwsh
+        run: python tooling/spec/verify_spec.py
+
+      - name: Locked-spec tamper fixtures
+        id: tamper
+        continue-on-error: true
+        shell: pwsh
+        run: python tooling/acceptance/test_spec_verifier.py
+
+      - name: 144-record traceability
+        id: traceability
+        continue-on-error: true
+        shell: pwsh
+        run: python tooling/acceptance/verify_traceability.py
+
+      - name: Secret baseline
+        id: secrets
+        continue-on-error: true
+        shell: pwsh
+        run: python tooling/acceptance/secret_scan.py
+
+      - name: Rust formatting
+        id: rustfmt
+        continue-on-error: true
+        shell: pwsh
+        run: cargo fmt --all -- --check
+
+      - name: Focused Clippy - execution
+        id: clippy_execution
+        continue-on-error: true
+        shell: pwsh
+        run: cargo clippy -p relintor-execution --all-targets --locked -- -D warnings
+
+      - name: Focused Clippy - evidence
+        id: clippy_evidence
+        continue-on-error: true
+        shell: pwsh
+        run: cargo clippy -p relintor-evidence --all-targets --locked -- -D warnings
+
+      - name: Focused Clippy - Antigravity
+        id: clippy_antigravity
+        continue-on-error: true
+        shell: pwsh
+        run: cargo clippy -p relintor-antigravity --all-targets --locked -- -D warnings
+
+      - name: Focused Clippy - desktop
+        id: clippy_desktop
+        continue-on-error: true
+        shell: pwsh
+        run: cargo clippy -p relintor-desktop --all-targets --locked -- -D warnings
+
+      - name: Strict workspace Clippy
+        id: clippy_workspace
+        continue-on-error: true
+        shell: pwsh
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Phase 2-3 execution regression tests
+        id: tests_execution
+        continue-on-error: true
+        shell: pwsh
+        run: cargo test -p relintor-execution --locked -- --nocapture
+
+      - name: Phase 4 evidence regression tests
+        id: tests_evidence
+        continue-on-error: true
+        shell: pwsh
+        run: cargo test -p relintor-evidence --locked -- --nocapture
+
+      - name: Antigravity regression tests
+        id: tests_antigravity
+        continue-on-error: true
+        shell: pwsh
+        run: cargo test -p relintor-antigravity --locked -- --nocapture
+
+      - name: Desktop Rust regression tests
+        id: tests_desktop
+        continue-on-error: true
+        shell: pwsh
+        run: cargo test -p relintor-desktop --lib --locked -- --nocapture
+
+      - name: Full Rust workspace regression
+        id: tests_workspace
+        continue-on-error: true
+        shell: pwsh
+        run: cargo test --workspace --locked --no-fail-fast -- --nocapture
+
+      - name: Desktop TypeScript typecheck
+        id: desktop_typecheck
+        continue-on-error: true
+        shell: pwsh
+        run: pnpm --dir apps/desktop typecheck
+
+      - name: Desktop ESLint
+        id: desktop_lint
+        continue-on-error: true
+        shell: pwsh
+        run: pnpm --dir apps/desktop lint
+
+      - name: Desktop unit tests
+        id: desktop_tests
+        continue-on-error: true
+        shell: pwsh
+        run: pnpm --dir apps/desktop test
+
+      - name: Desktop frontend production build
+        id: desktop_build
+        continue-on-error: true
+        shell: pwsh
+        run: pnpm --dir apps/desktop build
+
+      - name: Native Windows Tauri no-bundle build
+        id: tauri_build
+        continue-on-error: true
+        shell: pwsh
+        run: pnpm --dir apps/desktop tauri build --no-bundle
+
+      - name: Write consolidated gate report
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ci-results | Out-Null
+          @'
+          preflight=${{ steps.preflight.outcome }}
+          pnpm_install=${{ steps.pnpm_install.outcome }}
+          spec=${{ steps.spec.outcome }}
+          tamper=${{ steps.tamper.outcome }}
+          traceability=${{ steps.traceability.outcome }}
+          secrets=${{ steps.secrets.outcome }}
+          rustfmt=${{ steps.rustfmt.outcome }}
+          clippy_execution=${{ steps.clippy_execution.outcome }}
+          clippy_evidence=${{ steps.clippy_evidence.outcome }}
+          clippy_antigravity=${{ steps.clippy_antigravity.outcome }}
+          clippy_desktop=${{ steps.clippy_desktop.outcome }}
+          clippy_workspace=${{ steps.clippy_workspace.outcome }}
+          tests_execution=${{ steps.tests_execution.outcome }}
+          tests_evidence=${{ steps.tests_evidence.outcome }}
+          tests_antigravity=${{ steps.tests_antigravity.outcome }}
+          tests_desktop=${{ steps.tests_desktop.outcome }}
+          tests_workspace=${{ steps.tests_workspace.outcome }}
+          desktop_typecheck=${{ steps.desktop_typecheck.outcome }}
+          desktop_lint=${{ steps.desktop_lint.outcome }}
+          desktop_tests=${{ steps.desktop_tests.outcome }}
+          desktop_build=${{ steps.desktop_build.outcome }}
+          tauri_build=${{ steps.tauri_build.outcome }}
+          '@ | Set-Content ci-results/gates.txt
+          Get-Content ci-results/gates.txt
+
+      - name: Collect Windows executable
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ci-results/native | Out-Null
+          Get-ChildItem -Path target -Filter *.exe -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\release\\' } |
+            ForEach-Object { Copy-Item $_.FullName ci-results/native/ -Force }
+
+      - name: Upload Phase 2-4 CI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relintor-phase2-4-windows-${{ github.sha }}
+          path: ci-results/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Enforce all required gates
+        if: always()
+        shell: pwsh
+        run: |
+          $failed = @()
+          $gates = [ordered]@{
+            preflight='${{ steps.preflight.outcome }}'
+            pnpm_install='${{ steps.pnpm_install.outcome }}'
+            spec='${{ steps.spec.outcome }}'
+            tamper='${{ steps.tamper.outcome }}'
+            traceability='${{ steps.traceability.outcome }}'
+            secrets='${{ steps.secrets.outcome }}'
+            rustfmt='${{ steps.rustfmt.outcome }}'
+            clippy_execution='${{ steps.clippy_execution.outcome }}'
+            clippy_evidence='${{ steps.clippy_evidence.outcome }}'
+            clippy_antigravity='${{ steps.clippy_antigravity.outcome }}'
+            clippy_desktop='${{ steps.clippy_desktop.outcome }}'
+            clippy_workspace='${{ steps.clippy_workspace.outcome }}'
+            tests_execution='${{ steps.tests_execution.outcome }}'
+            tests_evidence='${{ steps.tests_evidence.outcome }}'
+            tests_antigravity='${{ steps.tests_antigravity.outcome }}'
+            tests_desktop='${{ steps.tests_desktop.outcome }}'
+            tests_workspace='${{ steps.tests_workspace.outcome }}'
+            desktop_typecheck='${{ steps.desktop_typecheck.outcome }}'
+            desktop_lint='${{ steps.desktop_lint.outcome }}'
+            desktop_tests='${{ steps.desktop_tests.outcome }}'
+            desktop_build='${{ steps.desktop_build.outcome }}'
+            tauri_build='${{ steps.tauri_build.outcome }}'
+          }
+          foreach ($entry in $gates.GetEnumerator()) {
+            if ($entry.Value -ne 'success') { $failed += "$($entry.Key)=$($entry.Value)" }
+          }
+          if ($failed.Count -gt 0) {
+            Write-Host 'FAILED REQUIRED GATES:'
+            $failed | ForEach-Object { Write-Host " - $_" }
+            exit 1
+          }
+          Write-Host 'ALL PHASE 2-4 WINDOWS CI GATES PASSED.'

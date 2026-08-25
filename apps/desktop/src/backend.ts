@@ -269,6 +269,17 @@ export type VerificationStatus = {
   accepted_risks: string[];
   evidence_count: number;
   certificate: { certificate_id: string; final_state: string; digest: string } | null;
+  workflow_stage: string;
+  summary: string;
+  human_decisions: Array<{
+    requirement_id: string;
+    title: string;
+    question: string;
+    summary: string;
+    criterion_ids: string[];
+  }>;
+  collector_activity: string[];
+  collection_failures: string[];
   detail: string;
 };
 
@@ -678,6 +689,11 @@ function browserPreviewVerification(projectId: string): VerificationStatus {
     accepted_risks: [],
     evidence_count: 0,
     certificate: null,
+    workflow_stage: "DESKTOP_AUTHORITY_REQUIRED",
+    summary: "Verification is available only in the installed Relintor desktop application.",
+    human_decisions: [],
+    collector_activity: [],
+    collection_failures: [],
     detail: "Browser preview never fabricates evidence, verification state, or certificates.",
   };
 }
@@ -695,6 +711,23 @@ export async function verificationStart(projectId: string): Promise<Verification
 export async function rerunVerification(projectId: string): Promise<VerificationStatus> {
   if (!isTauriRuntime()) return browserPreviewVerification(projectId);
   return invoke<VerificationStatus>("verification_rerun", { projectId });
+}
+
+export async function submitHumanDecision(
+  projectId: string,
+  requirementId: string,
+  approved: boolean,
+  notes: string,
+): Promise<VerificationStatus> {
+  if (!isTauriRuntime()) {
+    throw new Error("The installed Relintor desktop authority is required to record a decision.");
+  }
+  return invoke<VerificationStatus>("verification_submit_human_decision", {
+    projectId,
+    requirementId,
+    approved,
+    notes,
+  });
 }
 
 export async function verificationEvidence(projectId: string): Promise<VerificationEvidence[]> {

@@ -79,7 +79,58 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Rust tests
-        run: cargo test --workspace --locked
+        shell: python
+        run: |
+          import subprocess
+
+          result = subprocess.run(
+              ["cargo", "test", "--workspace", "--locked"],
+              capture_output=True,
+              text=True,
+          )
+          output = result.stdout + result.stderr
+          print(output, end="")
+          if result.returncode:
+              diagnostic = subprocess.run(
+                  [
+                      "cargo",
+                      "test",
+                      "-p",
+                      "relintor-evidence",
+                      "--test",
+                      "independent_p8_acceptance",
+                      "--locked",
+                      "--",
+                      "--nocapture",
+                      "--test-threads=1",
+                  ],
+                  capture_output=True,
+                  text=True,
+              )
+              diagnostic_output = diagnostic.stdout + diagnostic.stderr
+              diagnostic_detail = diagnostic_output[-12000:]
+              for offset in range(0, len(diagnostic_detail), 3000):
+                  part = (
+                      diagnostic_detail[offset : offset + 3000]
+                      .replace("%", "%25")
+                      .replace("\r", "%0D")
+                      .replace("\n", "%0A")
+                  )
+                  print(
+                      "::error file=.github/workflows/quality.yml,line=82,col=1::"
+                      f"Targeted independent_p8_acceptance rerun: {part}"
+                  )
+              detail = (
+                  output[-3500:]
+                  .replace("%", "%25")
+                  .replace("\r", "%0D")
+                  .replace("\n", "%0A")
+              )
+              print(
+                  "::error file=.github/workflows/quality.yml,line=82,col=1::"
+                  f"Rust tests failed: {detail}"
+              )
+          raise SystemExit(result.returncode)
 
       - name: Desktop TypeScript typecheck
         run: pnpm --dir apps/desktop typecheck

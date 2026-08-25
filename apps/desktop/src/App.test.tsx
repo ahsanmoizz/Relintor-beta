@@ -1,11 +1,101 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
-import { App } from "./App";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
+import { Activity, App, MissionCockpit, mergeVerificationRefresh, verificationActionError } from "./App";
+import type { AntigravityHealth, ExecutionStatus, VerificationStatus } from "./backend";
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+
+const tauriInvoke = vi.mocked(invoke);
+
+function finishedExecution(): ExecutionStatus {
+  return {
+    project_id: "project-1",
+    project_name: "Test project",
+    mission_id: "mission-project-1",
+    revision: 1,
+    state: "ExecutionTasksFinishedAwaitingVerification",
+    watchdog_state: "Healthy",
+    current_turn: 1,
+    active_task: null,
+    current_task_objective: null,
+    recovery_task_id: null,
+    recovery_task_objective: null,
+    runnable_tasks: [],
+    total_tasks: 11,
+    finished_tasks: 11,
+    tool_calls: 0,
+    execution_steps: 0,
+    estimated_cost_micros: null,
+    safe_boundary_reached: true,
+    last_event: "TASK_IMPLEMENTATION_FINISHED",
+    ledger_path: "D:\\Relintor\\mission.json",
+    recovery_state: "NO_RECOVERY_REQUIRED",
+    last_safe_checkpoint: null,
+    resume_disposition: null,
+    resume_blocker: null,
+    external_changes: [],
+    recovery_detected: false,
+    recovery_action: "NONE",
+    dispatch_active: false,
+    execution_phase: "FINISHED_AWAITING_VERIFICATION",
+    execution_time_limit_ms: 600_000,
+    events: [],
+  };
+}
+
+function pendingVerification(): VerificationStatus {
+  return {
+    project_id: "project-1",
+    mission_id: "mission-project-1",
+    revision: 1,
+    execution_run_id: "run-1",
+    state: "VERIFICATION_FINISHED",
+    completion_state: "StoppedIncomplete",
+    requirements_verified: 2,
+    requirements_total: 11,
+    missing_evidence: ["requirement-human: missing HUMAN_DECISION"],
+    failed_checks: [],
+    skipped_checks: [],
+    stale_evidence: [],
+    blocked_external: [],
+    accepted_risks: [],
+    evidence_count: 2,
+    certificate: null,
+    workflow_stage: "READY_TO_VERIFY",
+    summary: "Verification is ready.",
+    human_decisions: [],
+    collector_activity: [],
+    collection_failures: [],
+    detail: "requirements remain unverified",
+  };
+}
+
+const readyAntigravity: AntigravityHealth = {
+  status: "ready",
+  version: "1",
+  executable: "antigravity.exe",
+  compatibility: "compatible",
+  cli_invocation_capability: true,
+  plugin_hook_capability: true,
+  ide_status: "installed",
+  cli_status: "installed",
+  authentication_status: "authenticated",
+  executable_detectable: true,
+  adapter_ready: true,
+  setup_required: false,
+  environment: "test",
+  platform: "windows",
+  detected_at_ms: 1,
+  detail: "ready",
+};
 
 describe("desktop shell foundation", () => {
   beforeEach(() => {
     window.location.hash = "#home";
     localStorage.clear();
+    Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+    tauriInvoke.mockReset();
   });
 
   it("exposes exactly four primary destinations and a truthful new-project launcher", () => {
@@ -78,7 +168,7 @@ describe("desktop shell foundation", () => {
     expect(screen.getByText("C:\\Projects\\existing-app")).toBeTruthy();
     expect(screen.getByRole("textbox", { name: "What do you want Relintor to change?" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Back to reality report" })).toBeTruthy();
-  });
+  }, 15_000);
 
   it("makes a selected investigation answer visually and semantically explicit", async () => {
     render(<App />);
@@ -165,6 +255,370 @@ describe("desktop shell foundation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Activity" }));
     expect(screen.getByTestId("activity-empty")).toBeTruthy();
     expect(screen.getByText(/There is no frontend-only activity/)).toBeTruthy();
+  });
+
+  it("routes Verify work through the P8 action callback after all tasks finish", () => {
+    const onVerify = vi.fn();
+    const rendered = render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={pendingVerification()}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={onVerify}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Verify work" }));
+    expect(onVerify).toHaveBeenCalledTimes(1);
+  });
+
+  it("drives the native approval command through Tauri and renders the returned certificate state", async () => {
+    const pending = pendingVerification();
+    pending.workflow_stage = "WAITING_FOR_USER_DECISION";
+    pending.human_decisions = [{
+      requirement_id: "requirement-human",
+      title: "Approved outcome",
+      question: "Does the completed result satisfy the approved outcome for this mission?",
+      summary: "Review the completed project outcome before approving it.",
+      criterion_ids: ["criterion-human"],
+    }];
+    const completed: VerificationStatus = {
+      ...pending,
+      completion_state: "VerifiedComplete",
+      workflow_stage: "VERIFIED_COMPLETE",
+      summary: "All required evidence passed and the completion certificate is valid.",
+      missing_evidence: [],
+      requirements_verified: 11,
+      requirements_total: 11,
+      evidence_count: 11,
+      human_decisions: [],
+      certificate: {
+        certificate_id: "cert-native-closure",
+        final_state: "VerifiedComplete",
+        digest: "certificate-digest",
+      },
+    };
+    Reflect.defineProperty(window, "__TAURI_INTERNALS__", { value: {} });
+    tauriInvoke.mockImplementation(async (command, args) => {
+      if (command === "execution_status") return finishedExecution();
+      if (command === "health_antigravity") return readyAntigravity;
+      if (command === "antigravity_setup_status") return { active: false, adapter_ready: true };
+      if (command === "verification_status") return pending;
+      if (command === "verification_submit_human_decision") {
+        expect(args).toEqual({
+          projectId: "project-1",
+          requirementId: "requirement-human",
+          approved: true,
+          notes: "The result satisfies the approved outcome.",
+        });
+        return completed;
+      }
+      throw new Error(`unexpected Tauri command: ${command}`);
+    });
+
+    render(<Activity handoff={{
+      mission_id: "mission-project-1",
+      revision: 1,
+      contract_hash: "contract-hash",
+      state: "SEALED",
+      task_order: [],
+      scheduler_owner: "relintor",
+    }} />);
+
+    expect(await screen.findByRole("heading", { name: "Relintor needs your decision" })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Optional notes"), {
+      target: { value: "The result satisfies the approved outcome." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+
+    await waitFor(() => expect(screen.getByText("Verification finished successfully. The completion certificate is valid and saved.")).toBeTruthy());
+    expect(screen.getAllByText("Verified Complete").length).toBeGreaterThan(0);
+    expect(tauriInvoke).toHaveBeenCalledWith("verification_submit_human_decision", {
+      projectId: "project-1",
+      requirementId: "requirement-human",
+      approved: true,
+      notes: "The result satisfies the approved outcome.",
+    });
+  });
+
+  it("turns a failed verification invocation into visible user-facing text", () => {
+    expect(verificationActionError(new Error("verification authority command failed"))).toMatch(/couldn't verify this work/i);
+  });
+
+  it("captures a genuine human decision in plain language without exposing IDs in primary copy", () => {
+    const onDecision = vi.fn();
+    const decision = pendingVerification();
+    decision.workflow_stage = "WAITING_FOR_USER_DECISION";
+    decision.summary = "Automated checks are complete. Relintor needs your decision before verification can continue.";
+    decision.human_decisions = [{
+      requirement_id: "requirement-secret-internal-id",
+      title: "Approved outcome",
+      question: "Does the completed result match the outcome you approved for this mission?",
+      summary: "Review the completed project outcome before approving it.",
+      criterion_ids: ["criterion-secret-internal-id"],
+    }];
+    const rendered = render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={decision}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={onDecision}
+        onRefresh={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Relintor needs your decision" })).toBeTruthy();
+    expect(screen.getByText("Technical evidence details")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Optional notes"), { target: { value: "The result matches." } });
+    const staleRefresh: VerificationStatus = {
+      ...decision,
+      workflow_stage: "READY_TO_VERIFY",
+      summary: "Verification is ready.",
+      human_decisions: [],
+      missing_evidence: ["requirement-secret-internal-id: missing HUMAN_DECISION"],
+    };
+    rendered.rerender(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={mergeVerificationRefresh(decision, staleRefresh)}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={onDecision}
+        onRefresh={vi.fn()}
+      />,
+    );
+    expect((screen.getByLabelText("Optional notes") as HTMLTextAreaElement).value).toBe("The result matches.");
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    expect(onDecision).toHaveBeenCalledWith("requirement-secret-internal-id", true, "The result matches.");
+    expect(screen.queryByRole("button", { name: "Verify work" })).toBeNull();
+  });
+
+  it("keeps the pending decision and notes stable across six five-second polling refreshes", async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = pendingVerification();
+      pending.workflow_stage = "WAITING_FOR_USER_DECISION";
+      pending.summary = "Automated checks are complete. Relintor needs your decision before verification can continue.";
+      pending.human_decisions = [{
+        requirement_id: "requirement-human",
+        title: "Approved outcome",
+        question: "Does the completed result satisfy the approved outcome for this mission?",
+        summary: "Review the completed project outcome before approving it.",
+        criterion_ids: ["criterion-human"],
+      }];
+      const staleRefresh: VerificationStatus = {
+        ...pending,
+        workflow_stage: "READY_TO_VERIFY",
+        summary: "Verification is ready.",
+        human_decisions: [],
+        missing_evidence: ["requirement-human: missing HumanDecision"],
+      };
+      const onDecision = vi.fn();
+      let current = pending;
+      const rendered = render(
+        <MissionCockpit
+          status={finishedExecution()}
+          verification={current}
+          antigravity={readyAntigravity}
+          busy={false}
+          revalidating={false}
+          verificationNotice={null}
+          onCommand={vi.fn()}
+          onVerify={vi.fn()}
+          onDecision={onDecision}
+          onRefresh={vi.fn()}
+        />,
+      );
+      fireEvent.change(screen.getByLabelText("Optional notes"), {
+        target: { value: "My decision remains attached to this mission." },
+      });
+      const timer = window.setInterval(() => {
+        current = mergeVerificationRefresh(current, staleRefresh);
+        rendered.rerender(
+          <MissionCockpit
+            status={finishedExecution()}
+            verification={current}
+            antigravity={readyAntigravity}
+            busy={false}
+            revalidating={false}
+            verificationNotice={null}
+            onCommand={vi.fn()}
+            onVerify={vi.fn()}
+            onDecision={onDecision}
+            onRefresh={vi.fn()}
+          />,
+        );
+      }, 5_000);
+
+      await act(async () => vi.advanceTimersByTimeAsync(30_000));
+
+      expect(current.workflow_stage).toBe("WAITING_FOR_USER_DECISION");
+      expect(current.human_decisions[0]?.requirement_id).toBe("requirement-human");
+      expect(screen.getByRole("heading", { name: "Relintor needs your decision" })).toBeTruthy();
+      expect((screen.getByLabelText("Optional notes") as HTMLTextAreaElement).value)
+        .toBe("My decision remains attached to this mission.");
+      window.clearInterval(timer);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a pending decision when status polling returns the same prompts with READY_TO_VERIFY", () => {
+    const pending = pendingVerification();
+    pending.workflow_stage = "WAITING_FOR_USER_DECISION";
+    pending.human_decisions = [{
+      requirement_id: "requirement-human",
+      title: "Approved outcome",
+      question: "Does the completed result satisfy the approved outcome for this mission?",
+      summary: "Review the completed project outcome before approving it.",
+      criterion_ids: ["criterion-human"],
+    }];
+    pending.missing_evidence = ["requirement-human: missing HumanDecision"];
+    const polled = {
+      ...pending,
+      workflow_stage: "READY_TO_VERIFY",
+      summary: "Verification is ready.",
+    };
+
+    const merged = mergeVerificationRefresh(pending, polled);
+
+    expect(merged.workflow_stage).toBe("WAITING_FOR_USER_DECISION");
+    expect(merged.human_decisions).toEqual(pending.human_decisions);
+  });
+
+  it("allows an authoritative decision transition to replace the pending card", () => {
+    const pending = pendingVerification();
+    pending.workflow_stage = "WAITING_FOR_USER_DECISION";
+    pending.human_decisions = [{
+      requirement_id: "requirement-human",
+      title: "Approved outcome",
+      question: "Does the completed result satisfy the approved outcome for this mission?",
+      summary: "Review the completed project outcome before approving it.",
+      criterion_ids: ["criterion-human"],
+    }];
+    const rejected: VerificationStatus = {
+      ...pending,
+      workflow_stage: "USER_DECISION_REJECTED",
+      human_decisions: [],
+      summary: "You rejected the completed result.",
+      missing_evidence: [],
+    };
+
+    expect(mergeVerificationRefresh(pending, rejected).workflow_stage).toBe("USER_DECISION_REJECTED");
+    expect(mergeVerificationRefresh(pending, rejected).human_decisions).toHaveLength(0);
+  });
+
+  it("submits the exact rejection and retains the card and notes while persistence is pending or fails", () => {
+    const onDecision = vi.fn();
+    const pending = pendingVerification();
+    pending.workflow_stage = "WAITING_FOR_USER_DECISION";
+    pending.human_decisions = [{
+      requirement_id: "requirement-human",
+      title: "Approved outcome",
+      question: "Does the completed result satisfy the approved outcome for this mission?",
+      summary: "Review the completed project outcome before approving it.",
+      criterion_ids: ["criterion-human"],
+    }];
+    const props = {
+      status: finishedExecution(),
+      verification: pending,
+      antigravity: readyAntigravity,
+      revalidating: false,
+      onCommand: vi.fn(),
+      onVerify: vi.fn(),
+      onDecision,
+      onRefresh: vi.fn(),
+    };
+    const rendered = render(
+      <MissionCockpit {...props} busy={false} verificationNotice={null} />,
+    );
+    fireEvent.change(screen.getByLabelText("Optional notes"), {
+      target: { value: "The result does not meet the approved outcome." },
+    });
+
+    rendered.rerender(
+      <MissionCockpit {...props} busy verificationNotice="Recording your rejection…" />,
+    );
+    expect(screen.getByRole("heading", { name: "Relintor needs your decision" })).toBeTruthy();
+    expect((screen.getByLabelText("Optional notes") as HTMLTextAreaElement).value)
+      .toBe("The result does not meet the approved outcome.");
+    expect((screen.getAllByRole("button", { name: "Recording decision…" })[0] as HTMLButtonElement).disabled)
+      .toBe(true);
+    fireEvent.click(screen.getAllByRole("button", { name: "Recording decision…" })[0]);
+    expect(onDecision).not.toHaveBeenCalled();
+
+    rendered.rerender(
+      <MissionCockpit {...props} busy={false} verificationNotice={null} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Reject" }));
+    expect(onDecision).toHaveBeenCalledWith(
+      "requirement-human",
+      false,
+      "The result does not meet the approved outcome.",
+    );
+  });
+
+  it("removes the decision card only after an authoritative successful submission response", () => {
+    const pending = pendingVerification();
+    pending.workflow_stage = "WAITING_FOR_USER_DECISION";
+    pending.human_decisions = [{
+      requirement_id: "requirement-human",
+      title: "Approved outcome",
+      question: "Does the completed result satisfy the approved outcome for this mission?",
+      summary: "Review the completed project outcome before approving it.",
+      criterion_ids: ["criterion-human"],
+    }];
+    const rendered = render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={pending}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+      />,
+    );
+    const resumed = {
+      ...pending,
+      workflow_stage: "VERIFICATION_NEEDS_ATTENTION",
+      human_decisions: [],
+      missing_evidence: ["requirement-test: missing TestOutput"],
+    };
+    rendered.rerender(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={resumed}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice="Verification finished."
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("heading", { name: "Relintor needs your decision" })).toBeNull();
+    expect(screen.getAllByRole("heading", { name: "Verification needs attention" })).toHaveLength(2);
   });
 
   it("exposes privacy controls and safe diagnostics without sensitive fields", async () => {

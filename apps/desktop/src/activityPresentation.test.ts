@@ -57,6 +57,11 @@ function verification(overrides: Partial<VerificationStatus> = {}): Verification
     accepted_risks: [],
     evidence_count: 0,
     certificate: null,
+    workflow_stage: "READY_TO_VERIFY",
+    summary: "Verification is ready.",
+    human_decisions: [],
+    collector_activity: [],
+    collection_failures: [],
     detail: "",
     ...overrides,
   };
@@ -100,10 +105,80 @@ describe("user-visible mission state model", () => {
     expect(view.label).toBe("Verification needs attention");
   });
 
+  it("does not show Verified Complete until the authority certificate is present", () => {
+    const view = verificationPresentation(verification({
+      completion_state: "VerifiedComplete",
+      requirements_verified: 3,
+      requirements_total: 3,
+      evidence_count: 3,
+      certificate: null,
+    }));
+    expect(view.verifiedComplete).toBe(false);
+  });
+
+  it("pauses the one-click flow for a real user decision instead of offering Verify again", () => {
+    const view = missionPresentation(
+      execution({
+        state: "ExecutionTasksFinishedAwaitingVerification",
+        execution_phase: "FINISHED_AWAITING_VERIFICATION",
+        finished_tasks: 3,
+        runnable_tasks: [],
+      }),
+      verification({
+        workflow_stage: "WAITING_FOR_USER_DECISION",
+        summary: "Relintor needs your decision.",
+        evidence_count: 2,
+        human_decisions: [{
+          requirement_id: "requirement-human",
+          title: "Approved outcome",
+          question: "Does this match the approved outcome?",
+          summary: "Review the result.",
+          criterion_ids: ["criterion-human"],
+        }],
+      }),
+      true,
+    );
+    expect(view.primaryAction).toBe("none");
+    expect(view.headline).toBe("Your decision is needed");
+  });
+
   it("treats pre-evidence verification as waiting rather than failed", () => {
     const view = verificationPresentation(verification());
     expect(view.label).toBe("Waiting for evidence");
     expect(view.tone).toBe("info");
+  });
+
+  it("surfaces incomplete verification instead of reporting ready", () => {
+    const view = verificationPresentation(verification({
+      requirements_verified: 2,
+      requirements_total: 11,
+      evidence_count: 2,
+      missing_evidence: ["requirement-human: missing HUMAN_DECISION"],
+    }));
+    expect(view.label).toBe("Verification needs attention");
+    expect(view.tone).toBe("warning");
+    expect(view.supporting).toMatch(/explicit human decision/i);
+  });
+
+  it("keeps Verify work as the P8 action after all tasks finish", () => {
+    const view = missionPresentation(
+      execution({
+        state: "ExecutionTasksFinishedAwaitingVerification",
+        execution_phase: "FINISHED_AWAITING_VERIFICATION",
+        finished_tasks: 11,
+        total_tasks: 11,
+        runnable_tasks: [],
+      }),
+      verification({
+        requirements_verified: 2,
+        requirements_total: 11,
+        evidence_count: 2,
+        missing_evidence: ["requirement-human: missing HUMAN_DECISION"],
+      }),
+      true,
+    );
+    expect(view.primaryAction).toBe("verify");
+    expect(view.headline).toBe("Verification needs attention");
   });
 
   it("keeps canonical Windows paths internally while removing the extended prefix for display", () => {
