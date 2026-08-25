@@ -1059,18 +1059,14 @@ fn validate_evidence_id(evidence_id: &str) -> Result<(), EvidenceError> {
 }
 
 fn requires_safe_store_path(path: &Path) -> bool {
-    #[cfg(windows)]
-    {
-        // Keep room for the atomic-write temporary suffix. The legacy
-        // evidence-id filename is retained when it already exists so old
-        // stores remain readable, while new long IDs use a stable hash.
-        path.to_string_lossy().len() >= 220
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = path;
-        false
-    }
+    // Keep room for the atomic-write temporary suffix and for filesystems'
+    // per-component limits. The legacy evidence-id filename is retained when
+    // it already exists so old stores remain readable, while new long IDs use
+    // a stable hash on every supported platform.
+    let filename_is_long = path
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().len() >= 220);
+    filename_is_long || path.to_string_lossy().len() >= 220
 }
 
 fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), EvidenceError> {
