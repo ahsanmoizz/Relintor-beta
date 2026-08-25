@@ -92,7 +92,7 @@ jobs:
           print(output, end="")
           if result.returncode:
               detail = (
-                  output[-12000:]
+                  output[-3500:]
                   .replace("%", "%25")
                   .replace("\r", "%0D")
                   .replace("\n", "%0A")
