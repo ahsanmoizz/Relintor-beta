@@ -14,7 +14,7 @@ use relintor_evidence::{
     CompletionCertificate, EvidenceManifest, EvidenceStore, EvidenceSummary,
     ExplicitUserDecisionInput, ExplicitUserDecisionRecorder, FreshnessContext,
     ProductionAiProvider, VerificationAuthority, VerificationCollectorOrchestrator,
-    VerificationEngine,
+    VerificationCollectorPlan, VerificationEngine,
 };
 use relintor_execution::{
     CheckpointKind, ConservativeProcessInspector, ExecutionRun, ProcessInspector,
@@ -3208,6 +3208,96 @@ fn project_execution_scope(connection: &Connection, project_id: &str) -> Result<
     Ok(path)
 }
 
+fn required_collector_blockers(
+    workspace: &Path,
+    required_classes: &[EvidenceClass],
+) -> Result<Vec<String>, String> {
+    let plan = VerificationCollectorPlan::discover(workspace)
+        .map_err(|error| format!("discover verification collectors: {error}"))?;
+    let mut blockers = Vec::new();
+    for class in required_classes {
+        if matches!(
+            class,
+            EvidenceClass::HumanDecision | EvidenceClass::AiVerifierJudgement
+        ) {
+            continue;
+        }
+        if blockers
+            .iter()
+            .any(|blocker: &String| blocker.starts_with(&format!("{class:?}:")))
+        {
+            continue;
+        }
+        let available = plan
+            .for_class(*class)
+            .and_then(|spec| spec.command.as_ref())
+            .is_some_and(|command| {
+                !command.program.trim().is_empty()
+                    && collector_program_available(&command.program, workspace)
+            });
+        if !available {
+            blockers.push(format!(
+                "{class:?}: no executable collector was discovered in workspace {}",
+                workspace.display()
+            ));
+        }
+    }
+    Ok(blockers)
+}
+
+fn collector_program_available(program: &str, workspace: &Path) -> bool {
+    let program_path = Path::new(program);
+    let has_path_component = program_path.components().count() > 1;
+    let mut candidates = Vec::new();
+    if has_path_component || program_path.is_absolute() {
+        let path = if program_path.is_absolute() {
+            program_path.to_path_buf()
+        } else {
+            workspace.join(program_path)
+        };
+        candidates.push(path);
+    } else if let Some(path_value) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path_value) {
+            candidates.push(directory.join(program));
+            #[cfg(windows)]
+            if Path::new(program).extension().is_none() {
+                for extension in [".com", ".exe", ".bat", ".cmd"] {
+                    candidates.push(directory.join(format!("{program}{extension}")));
+                }
+            }
+        }
+    }
+    candidates.into_iter().any(|candidate| candidate.is_file())
+}
+
+fn ensure_required_collectors_before_execution(
+    workspace: &Path,
+    revision: &MissionRevision,
+) -> Result<(), String> {
+    let required_classes = revision
+        .contract
+        .requirement_graph
+        .requirements
+        .iter()
+        .flat_map(|requirement| {
+            requirement
+                .verification_policy
+                .obligations
+                .iter()
+                .filter(|obligation| obligation.required)
+                .map(|obligation| obligation.class)
+        })
+        .collect::<Vec<_>>();
+    let blockers = required_collector_blockers(workspace, &required_classes)?;
+    if blockers.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "P8_COLLECTOR_AUTHORIZATION_REQUIRED: execution was not started because required machine evidence collectors are unavailable: {}",
+        blockers.join("; ")
+    ))
+}
+
 fn current_timestamp() -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3584,6 +3674,7 @@ fn notify_user(app: &AppHandle, title: &str, body: &str) {
 }
 
 static EXECUTION_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static VERIFICATION_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct ActiveExecution {
     cancel: Arc<AtomicU64>,
@@ -4207,6 +4298,15 @@ fn with_execution_mutation_lock<T>(
     let _guard = EXECUTION_MUTATION_LOCK
         .lock()
         .map_err(|_| "execution authority lock is poisoned".to_string())?;
+    operation()
+}
+
+fn with_verification_mutation_lock<T>(
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _guard = VERIFICATION_MUTATION_LOCK
+        .lock()
+        .map_err(|_| "verification authority lock is poisoned".to_string())?;
     operation()
 }
 
@@ -5392,6 +5492,10 @@ fn authorize_and_launch_verification_correction(
 }
 
 fn automatic_verification_closure(app: &AppHandle, project_id: &str) -> Result<(), String> {
+    with_verification_mutation_lock(|| automatic_verification_closure_inner(app, project_id))
+}
+
+fn automatic_verification_closure_inner(app: &AppHandle, project_id: &str) -> Result<(), String> {
     let (context, report, manifest, _) = evaluate_p8(app, project_id, true)?;
     match report.decision.state {
         relintor_evidence::CompletionState::VerifiedComplete => {
@@ -5436,6 +5540,13 @@ fn automatic_verification_closure(app: &AppHandle, project_id: &str) -> Result<(
 
 #[tauri::command]
 fn verification_start(
+    app: AppHandle,
+    project_id: String,
+) -> Result<VerificationStatusView, String> {
+    with_verification_mutation_lock(|| verification_start_inner(app, project_id))
+}
+
+fn verification_start_inner(
     app: AppHandle,
     project_id: String,
 ) -> Result<VerificationStatusView, String> {
@@ -5566,7 +5677,27 @@ async fn verification_submit_human_decision(
             },
         )
         .map_err(|error| format!("record explicit user decision: {error}"))?;
-    verification_start(app, project_id)
+    let continuation_app = app.clone();
+    let continuation_project_id = project_id.clone();
+    thread::Builder::new()
+        .name(format!("relintor-verification-{}", continuation_project_id))
+        .spawn(move || {
+            if let Err(error) = automatic_verification_closure(
+                &continuation_app,
+                &continuation_project_id,
+            ) {
+                eprintln!(
+                    "Relintor post-decision verification closure stopped: {error}"
+                );
+                notify_user(
+                    &continuation_app,
+                    "Relintor needs your attention",
+                    "Your decision was saved. Verification could not continue automatically; review the preserved mission before retrying.",
+                );
+            }
+        })
+        .map_err(|error| format!("launch post-decision verification closure: {error}"))?;
+    verification_status(app, project_id)
 }
 
 #[tauri::command]
@@ -5653,6 +5784,7 @@ fn execution_start_inner(
     let now = execution_now_ms();
     run.validate_authority_identity(&revision, &handoff, now)
         .map_err(|error| error.to_string())?;
+    ensure_required_collectors_before_execution(&run.workspace, &revision)?;
     let recovery = recovery_store(&app, &revision)?;
     let crash = recovery
         .begin_session(
@@ -6390,6 +6522,65 @@ mod tests {
             ),
             "WAITING_FOR_USER_DECISION"
         );
+    }
+
+    #[test]
+    fn execution_preflight_rejects_required_collectors_missing_from_workspace() {
+        let workspace = std::env::temp_dir().join(format!(
+            "relintor-collector-preflight-missing-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&workspace).expect("collector preflight workspace");
+        fs::write(
+            workspace.join("package.json"),
+            br#"{"scripts":{"test":"node --test"}}"#,
+        )
+        .expect("package manifest");
+
+        let blockers = required_collector_blockers(
+            &workspace,
+            &[
+                EvidenceClass::TestOutput,
+                EvidenceClass::AccessibilityResult,
+                EvidenceClass::SecurityScan,
+            ],
+        )
+        .expect("collector plan discovery");
+        assert_eq!(blockers.len(), 2);
+        assert!(blockers
+            .iter()
+            .any(|item| item.starts_with("AccessibilityResult:")));
+        assert!(blockers
+            .iter()
+            .any(|item| item.starts_with("SecurityScan:")));
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn execution_preflight_accepts_discovered_machine_collectors() {
+        let workspace = std::env::temp_dir().join(format!(
+            "relintor-collector-preflight-ready-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&workspace).expect("collector preflight workspace");
+        fs::write(
+            workspace.join("package.json"),
+            br#"{"scripts":{"test":"node --test","accessibility-audit":"node --test","security-scan":"node --test","performance-result":"node --test"}}"#,
+        )
+        .expect("package manifest");
+
+        let blockers = required_collector_blockers(
+            &workspace,
+            &[
+                EvidenceClass::TestOutput,
+                EvidenceClass::AccessibilityResult,
+                EvidenceClass::SecurityScan,
+                EvidenceClass::PerformanceResult,
+            ],
+        )
+        .expect("collector plan discovery");
+        assert!(blockers.is_empty(), "{blockers:?}");
+        let _ = fs::remove_dir_all(workspace);
     }
 
     #[test]
