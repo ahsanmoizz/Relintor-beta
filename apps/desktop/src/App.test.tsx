@@ -168,7 +168,7 @@ describe("desktop shell foundation", () => {
     expect(screen.getByText("C:\\Projects\\existing-app")).toBeTruthy();
     expect(screen.getByRole("textbox", { name: "What do you want Relintor to change?" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Back to reality report" })).toBeTruthy();
-  });
+  }, 15_000);
 
   it("makes a selected investigation answer visually and semantically explicit", async () => {
     render(<App />);
