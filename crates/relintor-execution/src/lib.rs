@@ -1793,14 +1793,14 @@ impl ExecutionRun {
         Ok(true)
     }
 
-    /// Reopen only the exact task(s) whose sealed requirements failed
-    /// deterministic verification, plus downstream dependents that can no
+    /// Reopen only the exact task(s) whose sealed requirements still lack
+    /// accepted machine verification, plus downstream dependents that can no
     /// longer be trusted. Historical successful attempts remain immutable.
     /// Each reopened task receives one fresh bounded correction allowance and
     /// may not exceed its sealed retry-attempt policy.
     pub fn authorize_verification_correction(
         &mut self,
-        failed_requirement_ids: &BTreeSet<String>,
+        unverified_requirement_ids: &BTreeSet<String>,
         now_ms: u64,
     ) -> Result<Vec<String>, ExecutionError> {
         if self.state != ExecutionRunState::ExecutionTasksFinishedAwaitingVerification {
@@ -1808,9 +1808,9 @@ impl ExecutionRun {
                 "verification correction requires a finished implementation run".into(),
             ));
         }
-        if failed_requirement_ids.is_empty() {
+        if unverified_requirement_ids.is_empty() {
             return Err(ExecutionError::PolicyDenied(
-                "verification correction requires an exact failed requirement".into(),
+                "verification correction requires an exact unverified requirement".into(),
             ));
         }
 
@@ -1819,12 +1819,12 @@ impl ExecutionRun {
             .values()
             .flat_map(|task| task.requirement_ids.iter().cloned())
             .collect::<BTreeSet<_>>();
-        if failed_requirement_ids
+        if unverified_requirement_ids
             .iter()
             .any(|requirement_id| !known_requirements.contains(requirement_id))
         {
             return Err(ExecutionError::RevalidationRequired(
-                "verification failure references a requirement outside the sealed task graph"
+                "verification gap references a requirement outside the sealed task graph"
                     .into(),
             ));
         }
@@ -1835,13 +1835,13 @@ impl ExecutionRun {
             .filter(|task| {
                 task.requirement_ids
                     .iter()
-                    .any(|id| failed_requirement_ids.contains(id))
+                    .any(|id| unverified_requirement_ids.contains(id))
             })
             .map(|task| task.task_id.clone())
             .collect::<BTreeSet<_>>();
         if affected.is_empty() {
             return Err(ExecutionError::RevalidationRequired(
-                "failed verification requirement has no executable sealed task".into(),
+                "unverified requirement has no executable sealed task".into(),
             ));
         }
 
@@ -1936,13 +1936,13 @@ impl ExecutionRun {
                 now_ms,
                 Some(task_id.clone()),
                 ExecutionEventKind::VerificationCorrectionAuthorized,
-                "deterministic verification failure reopened the exact task/dependent boundary",
+                "machine verification gap reopened the exact task/dependent boundary",
             )?;
         }
         self.state = ExecutionRunState::Ready;
         self.last_error = Some(format!(
-            "deterministic verification failed for {}; bounded correction authorized",
-            failed_requirement_ids
+            "machine verification incomplete for {}; bounded correction authorized",
+            unverified_requirement_ids
                 .iter()
                 .cloned()
                 .collect::<Vec<_>>()

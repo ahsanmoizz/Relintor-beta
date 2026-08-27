@@ -5445,14 +5445,53 @@ fn deterministic_failed_requirement_ids(
         .collect()
 }
 
+fn machine_evidence_class(class: EvidenceClass) -> bool {
+    !matches!(
+        class,
+        EvidenceClass::HumanDecision
+            | EvidenceClass::AiVerifierJudgement
+            | EvidenceClass::ExternalServiceReceipt
+    )
+}
+
+fn missing_machine_requirement_ids(
+    report: &relintor_evidence::VerificationReport,
+) -> BTreeSet<String> {
+    report
+        .requirement_statuses
+        .iter()
+        .filter(|status| {
+            status
+                .missing_obligations
+                .iter()
+                .any(|class| machine_evidence_class(*class))
+                || (!status.missing_acceptance_criteria.is_empty()
+                    && !status
+                        .missing_obligations
+                        .iter()
+                        .any(|class| *class == EvidenceClass::HumanDecision))
+        })
+        .map(|status| status.requirement_id.clone())
+        .collect()
+}
+
+fn unverified_machine_requirement_ids(
+    report: &relintor_evidence::VerificationReport,
+    store: &EvidenceStore,
+) -> BTreeSet<String> {
+    let mut requirements = deterministic_failed_requirement_ids(report, store);
+    requirements.extend(missing_machine_requirement_ids(report));
+    requirements
+}
+
 fn authorize_and_launch_verification_correction(
     app: &AppHandle,
     project_id: &str,
     report: &relintor_evidence::VerificationReport,
     store: &EvidenceStore,
 ) -> Result<bool, String> {
-    let failed = deterministic_failed_requirement_ids(report, store);
-    if failed.is_empty() {
+    let unverified = unverified_machine_requirement_ids(report, store);
+    if unverified.is_empty() {
         return Ok(false);
     }
     let project_id = canonical_project_id(project_id)?;
@@ -5460,7 +5499,7 @@ fn authorize_and_launch_verification_correction(
         require_execution_not_active(&project_id)?;
         let (mut run, ledger_path, revision, _handoff) = load_execution_run(app, &project_id)?;
         let affected = run
-            .authorize_verification_correction(&failed, execution_now_ms())
+            .authorize_verification_correction(&unverified, execution_now_ms())
             .map_err(|error| error.to_string())?;
         let recovery = recovery_store(app, &revision)?;
         persist_execution_boundary(
@@ -5469,7 +5508,7 @@ fn authorize_and_launch_verification_correction(
             &recovery,
             &revision,
             &format!(
-                "deterministic verification failed; bounded corrective execution authorized for {}",
+                "machine verification evidence is failed or missing; bounded corrective execution authorized for {}",
                 affected.join(",")
             ),
             CheckpointKind::AfterTaskPersistence,
@@ -5528,11 +5567,37 @@ fn automatic_verification_closure_inner(app: &AppHandle, project_id: &str) -> Re
         | relintor_evidence::CompletionState::RevalidationRequired
         | relintor_evidence::CompletionState::StoppedIncomplete
         | relintor_evidence::CompletionState::CompleteWithAcceptedRisks => {
-            notify_user(
-                app,
-                "Relintor needs your attention",
-                "The mission is preserved, but completion still requires an explicit verification or external decision.",
-            );
+            if !missing_machine_requirement_ids(&report).is_empty()
+                && human_decision_prompts(&context, &report).is_empty()
+            {
+                match authorize_and_launch_verification_correction(
+                    app,
+                    project_id,
+                    &report,
+                    &context.store,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => notify_user(
+                        app,
+                        "Relintor needs your attention",
+                        "Verification is missing machine evidence, but no safe correction target was available.",
+                    ),
+                    Err(error) => {
+                        eprintln!("Relintor missing-evidence correction was not authorized: {error}");
+                        notify_user(
+                            app,
+                            "Relintor needs your attention",
+                            "Verification is missing machine evidence, but bounded automatic correction could not be authorized safely.",
+                        );
+                    }
+                }
+            } else {
+                notify_user(
+                    app,
+                    "Relintor needs your attention",
+                    "The mission is preserved, but completion still requires an explicit verification or external decision.",
+                );
+            }
         }
     }
     Ok(())
@@ -5553,10 +5618,13 @@ fn verification_start_inner(
     let (context, report, manifest, collection) = evaluate_p8(&app, &project_id, true)?;
     let certificate = ensure_verified_completion_certificate(&app, &context, &report, &manifest)?;
     let mut workflow_stage = None;
-    if report.decision.state == relintor_evidence::CompletionState::FailedVerification {
-        // A deterministic implementation failure is not handed back to the
-        // user as "done". Relintor authorizes one bounded correction path for
-        // the exact failed requirement/dependents when policy still permits it.
+    if report.decision.state == relintor_evidence::CompletionState::FailedVerification
+        || (!missing_machine_requirement_ids(&report).is_empty()
+            && human_decision_prompts(&context, &report).is_empty())
+    {
+        // A failed or missing machine proof is not handed back to the user as
+        // "done". Relintor authorizes one bounded correction path for the
+        // exact affected requirement/dependents when policy still permits it.
         if authorize_and_launch_verification_correction(&app, &project_id, &report, &context.store)?
         {
             workflow_stage = Some("CORRECTING_FAILED_REQUIREMENT");
@@ -6522,6 +6590,83 @@ mod tests {
             ),
             "WAITING_FOR_USER_DECISION"
         );
+    }
+
+    fn verification_report_with(
+        statuses: Vec<relintor_evidence::RequirementVerification>,
+    ) -> relintor_evidence::VerificationReport {
+        relintor_evidence::VerificationReport {
+            verification_run_id: "verification-test".into(),
+            authority_digest: "authority-test".into(),
+            requirement_statuses: statuses,
+            decision: relintor_evidence::CompletionDecision {
+                state: relintor_evidence::CompletionState::StoppedIncomplete,
+                reason: "test".into(),
+                deterministic_gates: Vec::new(),
+                accepted_risks: Vec::new(),
+                blocked_external: Vec::new(),
+            },
+            builder_claim: None,
+            coverage_total: 0,
+            coverage_accounted: 0,
+            evidence_manifest_hash: "manifest-test".into(),
+            p7_ledger_digest: None,
+            ai_judgements: Vec::new(),
+            integrity_tag: "integrity-test".into(),
+        }
+    }
+
+    #[test]
+    fn missing_machine_evidence_is_a_verification_correction_target() {
+        let report = verification_report_with(vec![
+            relintor_evidence::RequirementVerification {
+                requirement_id: "requirement-security".into(),
+                status: RequirementStatus::ImplementedUnverified,
+                evidence_ids: Vec::new(),
+                missing_obligations: vec![EvidenceClass::SecurityScan],
+                missing_acceptance_criteria: vec!["criterion-security".into()],
+                stale_evidence: Vec::new(),
+                failed_evidence: Vec::new(),
+                reason: "missing security evidence".into(),
+            },
+            relintor_evidence::RequirementVerification {
+                requirement_id: "requirement-accessibility".into(),
+                status: RequirementStatus::ImplementedUnverified,
+                evidence_ids: Vec::new(),
+                missing_obligations: vec![EvidenceClass::AccessibilityResult],
+                missing_acceptance_criteria: vec!["criterion-accessibility".into()],
+                stale_evidence: Vec::new(),
+                failed_evidence: Vec::new(),
+                reason: "missing accessibility evidence".into(),
+            },
+        ]);
+
+        let missing = missing_machine_requirement_ids(&report);
+        assert_eq!(
+            missing,
+            BTreeSet::from([
+                "requirement-accessibility".to_string(),
+                "requirement-security".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn pending_human_decision_is_not_machine_correction_work() {
+        let report = verification_report_with(vec![
+            relintor_evidence::RequirementVerification {
+                requirement_id: "requirement-human".into(),
+                status: RequirementStatus::ImplementedUnverified,
+                evidence_ids: Vec::new(),
+                missing_obligations: vec![EvidenceClass::HumanDecision],
+                missing_acceptance_criteria: vec!["criterion-human".into()],
+                stale_evidence: Vec::new(),
+                failed_evidence: Vec::new(),
+                reason: "waiting for user".into(),
+            },
+        ]);
+
+        assert!(missing_machine_requirement_ids(&report).is_empty());
     }
 
     #[test]
