@@ -750,7 +750,6 @@ function VerificationSection({ projectId }: { projectId: string }) {
   const canStart = Boolean(status && status.execution_run_id !== "browser-preview");
   const attentionItems = [
     ...(status?.failed_checks || []),
-    ...(status?.stale_evidence || []),
     ...(status?.blocked_external || []),
     ...(status?.missing_evidence || []),
   ];
@@ -1411,7 +1410,6 @@ export function MissionCockpit({ status, verification, antigravity, busy, revali
     ...(verification?.blocked_external || []),
     ...(verification?.missing_evidence || []),
     ...(verification?.failed_checks || []),
-    ...(verification?.stale_evidence || []),
   ];
   const pendingDecision = verification?.workflow_stage === "WAITING_FOR_USER_DECISION"
     ? verification.human_decisions[0] || null
@@ -1463,7 +1461,7 @@ export function MissionCockpit({ status, verification, antigravity, busy, revali
 
     {verificationNotice && <p className="form-hint" role="status" aria-live="polite">{verificationNotice}</p>}
     {pendingDecision && <section className="panel attention-panel decision-panel" aria-labelledby="human-decision-title"><span className="panel-kicker">YOUR DECISION</span><h3 id="human-decision-title">Relintor needs your decision</h3><p><strong>{pendingDecision.question}</strong></p><p>{pendingDecision.summary}</p><label className="field-label" htmlFor="decision-notes">Optional notes</label><textarea id="decision-notes" value={decisionNotes} maxLength={4000} disabled={busy} onChange={(event) => setDecisionNotes(event.target.value)} placeholder="Add context for the audit record (optional)" /><div className="primary-action-row"><button className="primary-button" type="button" disabled={busy} onClick={() => onDecision(pendingDecision.requirement_id, true, decisionNotes)}>{busy ? "Recording decision…" : "Approve"}</button><button className="danger-button" type="button" disabled={busy} onClick={() => onDecision(pendingDecision.requirement_id, false, decisionNotes)}>{busy ? "Recording decision…" : "Reject"}</button></div><p className="form-hint">Only your action can satisfy this decision. Relintor and Antigravity cannot approve it for you.</p><details className="technical-details"><summary>Technical evidence details</summary><dl><div><dt>Requirement</dt><dd><code>{pendingDecision.requirement_id}</code></dd></div><div><dt>Criteria</dt><dd><code>{pendingDecision.criterion_ids.join(", ")}</code></dd></div></dl></details></section>}
-    {!pendingDecision && (verificationAttention.length > 0 || (verification && verificationView.tone === "warning")) && <section className="panel attention-panel" aria-labelledby="verification-blocker-title"><span className="panel-kicker">VERIFICATION</span><h3 id="verification-blocker-title">Verification needs attention</h3><p>{verification?.summary || verificationView.supporting}</p>{verification?.collection_failures.length ? <ul>{verification.collection_failures.map((item) => <li key={item}>{item}</li>)}</ul> : null}{verificationAttention.length > 0 && <details className="technical-details"><summary>Technical evidence details</summary><ul>{verificationAttention.map((item) => <li key={item}>{item}</li>)}</ul></details>}</section>}
+    {!presentation.verifiedComplete && !pendingDecision && (verificationAttention.length > 0 || (verification && verificationView.tone === "warning")) && <section className="panel attention-panel" aria-labelledby="verification-blocker-title"><span className="panel-kicker">VERIFICATION</span><h3 id="verification-blocker-title">Verification needs attention</h3><p>{verification?.summary || verificationView.supporting}</p>{verification?.collection_failures.length ? <ul>{verification.collection_failures.map((item) => <li key={item}>{item}</li>)}</ul> : null}{verificationAttention.length > 0 && <details className="technical-details"><summary>Technical evidence details</summary><ul>{verificationAttention.map((item) => <li key={item}>{item}</li>)}</ul></details>}</section>}
 
     <div className="mission-summary-grid" aria-label="Mission summary">
       <section><span>Progress</span><strong>{status.finished_tasks} of {status.total_tasks} complete</strong><small>{status.runnable_tasks.length} ready to run</small></section>

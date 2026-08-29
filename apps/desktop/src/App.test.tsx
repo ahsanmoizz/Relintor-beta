@@ -621,6 +621,101 @@ describe("desktop shell foundation", () => {
     expect(screen.getAllByRole("heading", { name: "Verification needs attention" })).toHaveLength(2);
   });
 
+  it("renders Verified Complete without attention panel when valid certificate and verified requirements coexist with historical stale records", () => {
+    const verified = {
+      project_id: "project-1",
+      mission_id: "mission-project-1",
+      revision: 1,
+      execution_run_id: "run-1",
+      state: "VERIFICATION_FINISHED",
+      completion_state: "VerifiedComplete",
+      requirements_verified: 6,
+      requirements_total: 6,
+      missing_evidence: [],
+      failed_checks: [],
+      skipped_checks: [],
+      stale_evidence: ["p8-collector-old-blocked-evidence"],
+      blocked_external: [],
+      accepted_risks: [],
+      evidence_count: 6,
+      certificate: {
+        certificate_id: "cert-12345",
+        final_state: "VERIFIED_COMPLETE",
+        digest: "cert-digest",
+      },
+      workflow_stage: "VERIFIED_COMPLETE",
+      summary: "All required evidence passed.",
+      human_decisions: [],
+      collector_activity: [],
+      collection_failures: [],
+      detail: "",
+    };
+
+    render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={verified}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Verified Complete" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Verification needs attention" })).toBeNull();
+    expect(screen.queryByText("What needs attention")).toBeNull();
+  });
+
+  it("renders Verification needs attention when certificate is missing or current evidence is missing", () => {
+    const incomplete = {
+      project_id: "project-1",
+      mission_id: "mission-project-1",
+      revision: 1,
+      execution_run_id: "run-1",
+      state: "VERIFICATION_FINISHED",
+      completion_state: "StoppedIncomplete",
+      requirements_verified: 2,
+      requirements_total: 6,
+      missing_evidence: ["requirement-test: missing TEST_OUTPUT"],
+      failed_checks: [],
+      skipped_checks: [],
+      stale_evidence: [],
+      blocked_external: [],
+      accepted_risks: [],
+      evidence_count: 2,
+      certificate: null,
+      workflow_stage: "VERIFICATION_NEEDS_ATTENTION",
+      summary: "Missing evidence.",
+      human_decisions: [],
+      collector_activity: [],
+      collection_failures: [],
+      detail: "",
+    };
+
+    render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={incomplete}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("heading", { name: "Verified Complete" })).toBeNull();
+    expect(screen.getAllByRole("heading", { name: "Verification needs attention" })).toHaveLength(2);
+  });
+
   it("exposes privacy controls and safe diagnostics without sensitive fields", async () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: "Account" }));
