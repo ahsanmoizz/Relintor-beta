@@ -6668,6 +6668,14 @@ mod tests {
     }
 
     #[test]
+    fn production_custom_protocol_is_active_to_prevent_localhost_devurl() {
+        assert!(
+            cfg!(feature = "custom-protocol"),
+            "tauri custom-protocol feature must be active to bundle frontendDist and prevent devUrl localhost navigation in packaged builds"
+        );
+    }
+
+    #[test]
     fn execution_preflight_rejects_required_collectors_missing_from_workspace() {
         let workspace = std::env::temp_dir().join(format!(
             "relintor-collector-preflight-missing-{}",
