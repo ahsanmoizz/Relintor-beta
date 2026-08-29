@@ -1824,8 +1824,7 @@ impl ExecutionRun {
             .any(|requirement_id| !known_requirements.contains(requirement_id))
         {
             return Err(ExecutionError::RevalidationRequired(
-                "verification gap references a requirement outside the sealed task graph"
-                    .into(),
+                "verification gap references a requirement outside the sealed task graph".into(),
             ));
         }
 

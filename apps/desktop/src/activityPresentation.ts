@@ -89,7 +89,6 @@ export function verificationPresentation(status: VerificationStatus | null): {
   const hasMaterialGap =
     status.missing_evidence.length > 0 ||
     status.failed_checks.length > 0 ||
-    status.stale_evidence.length > 0 ||
     status.blocked_external.length > 0 ||
     status.requirements_total === 0 ||
     status.requirements_verified !== status.requirements_total;
@@ -129,7 +128,6 @@ export function verificationPresentation(status: VerificationStatus | null): {
   if (
     status.evidence_count > 0 &&
     (status.failed_checks.length ||
-      status.stale_evidence.length ||
       status.blocked_external.length ||
       status.missing_evidence.length ||
       status.requirements_verified !== status.requirements_total ||

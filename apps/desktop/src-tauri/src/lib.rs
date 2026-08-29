@@ -6653,18 +6653,16 @@ mod tests {
 
     #[test]
     fn pending_human_decision_is_not_machine_correction_work() {
-        let report = verification_report_with(vec![
-            relintor_evidence::RequirementVerification {
-                requirement_id: "requirement-human".into(),
-                status: RequirementStatus::ImplementedUnverified,
-                evidence_ids: Vec::new(),
-                missing_obligations: vec![EvidenceClass::HumanDecision],
-                missing_acceptance_criteria: vec!["criterion-human".into()],
-                stale_evidence: Vec::new(),
-                failed_evidence: Vec::new(),
-                reason: "waiting for user".into(),
-            },
-        ]);
+        let report = verification_report_with(vec![relintor_evidence::RequirementVerification {
+            requirement_id: "requirement-human".into(),
+            status: RequirementStatus::ImplementedUnverified,
+            evidence_ids: Vec::new(),
+            missing_obligations: vec![EvidenceClass::HumanDecision],
+            missing_acceptance_criteria: vec!["criterion-human".into()],
+            stale_evidence: Vec::new(),
+            failed_evidence: Vec::new(),
+            reason: "waiting for user".into(),
+        }]);
 
         assert!(missing_machine_requirement_ids(&report).is_empty());
     }

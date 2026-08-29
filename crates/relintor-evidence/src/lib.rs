@@ -1725,6 +1725,7 @@ impl VerificationCollectorPlan {
                 ("lint", EvidenceClass::LintStaticAnalysis),
                 ("security-scan", EvidenceClass::SecurityScan),
                 ("accessibility-audit", EvidenceClass::AccessibilityResult),
+                ("accessibility-check", EvidenceClass::AccessibilityResult),
                 ("performance-result", EvidenceClass::PerformanceResult),
                 ("performance-scan", EvidenceClass::PerformanceResult),
                 ("performance-budget", EvidenceClass::PerformanceResult),
@@ -2393,7 +2394,11 @@ impl VerificationCollectorOrchestrator {
         match class {
             EvidenceClass::BuildOutput => {
                 let collected = BuildCollector::default().collect(binding, command)?;
-                store.put(collected.receipt, &collected.artifact_bytes)?;
+                put_collector_receipt_preserving_history(
+                    store,
+                    collected.receipt,
+                    &collected.artifact_bytes,
+                )?;
             }
             EvidenceClass::TestOutput => {
                 let collected = TestCollector::default().collect(
@@ -2402,16 +2407,28 @@ impl VerificationCollectorOrchestrator {
                     project_kind,
                     BTreeSet::new(),
                 )?;
-                store.put(collected.receipt, &collected.artifact_bytes)?;
+                put_collector_receipt_preserving_history(
+                    store,
+                    collected.receipt,
+                    &collected.artifact_bytes,
+                )?;
             }
             EvidenceClass::LintStaticAnalysis => {
                 let collected = StaticAnalysisCollector::default().collect(binding, command)?;
-                store.put(collected.receipt, &collected.artifact_bytes)?;
+                put_collector_receipt_preserving_history(
+                    store,
+                    collected.receipt,
+                    &collected.artifact_bytes,
+                )?;
             }
             EvidenceClass::ApiResponse | EvidenceClass::DatabaseQuery => {
                 let collected =
                     ApiDatabaseCollector::default().collect_for_class(binding, command, class)?;
-                store.put(collected.receipt, &collected.artifact_bytes)?;
+                put_collector_receipt_preserving_history(
+                    store,
+                    collected.receipt,
+                    &collected.artifact_bytes,
+                )?;
             }
             EvidenceClass::BrowserRecording => {
                 let mut adapter = CommandBrowserAdapter {
@@ -2424,7 +2441,11 @@ impl VerificationCollectorOrchestrator {
                     spec.route.as_deref().unwrap_or("/"),
                     &[],
                 )?;
-                store.put(collected.receipt, &collected.artifact_bytes)?;
+                put_collector_receipt_preserving_history(
+                    store,
+                    collected.receipt,
+                    &collected.artifact_bytes,
+                )?;
             }
             EvidenceClass::Screenshot => {
                 let mut adapter = CommandScreenshotAdapter {
@@ -2438,7 +2459,11 @@ impl VerificationCollectorOrchestrator {
                     0,
                     0,
                 )?;
-                store.put(collected.receipt, &collected.artifact_bytes)?;
+                put_collector_receipt_preserving_history(
+                    store,
+                    collected.receipt,
+                    &collected.artifact_bytes,
+                )?;
             }
             EvidenceClass::AccessibilityResult => {
                 let collected = AccessibilityCollector::default().collect_process(
@@ -2446,7 +2471,11 @@ impl VerificationCollectorOrchestrator {
                     command,
                     spec.route.as_deref().unwrap_or("workspace"),
                 )?;
-                store.put(collected.receipt, &collected.artifact_bytes)?;
+                put_collector_receipt_preserving_history(
+                    store,
+                    collected.receipt,
+                    &collected.artifact_bytes,
+                )?;
             }
             EvidenceClass::SecurityScan => {
                 let tool = CollectorIdentity::new(
@@ -2459,7 +2488,11 @@ impl VerificationCollectorOrchestrator {
                     tool,
                     spec.route.as_deref().unwrap_or("workspace"),
                 )?;
-                store.put(collected.receipt, &collected.artifact_bytes)?;
+                put_collector_receipt_preserving_history(
+                    store,
+                    collected.receipt,
+                    &collected.artifact_bytes,
+                )?;
             }
             EvidenceClass::PerformanceResult => {
                 let collected = PerformanceCollector::default().collect_process(
@@ -2467,7 +2500,11 @@ impl VerificationCollectorOrchestrator {
                     command,
                     spec.route.as_deref().unwrap_or("workspace"),
                 )?;
-                store.put(collected.receipt, &collected.artifact_bytes)?;
+                put_collector_receipt_preserving_history(
+                    store,
+                    collected.receipt,
+                    &collected.artifact_bytes,
+                )?;
             }
             _ => {
                 return Err(EvidenceError::CollectorUnavailable(
@@ -2781,6 +2818,44 @@ impl VerificationCollectorOrchestrator {
             authority, current, store, None, protected,
         )
     }
+}
+
+fn put_collector_receipt_preserving_history(
+    store: &EvidenceStore,
+    mut receipt: CollectorReceipt,
+    bytes: &[u8],
+) -> Result<EvidenceArtifact, EvidenceError> {
+    let base_id = receipt.evidence_id.clone();
+    let mut retry_count: u32 = 0;
+    loop {
+        let needs_retargeting = match store.load(&receipt.evidence_id) {
+            Ok(existing) => {
+                if let Ok(candidate) = receipt.clone().into_metadata(bytes) {
+                    existing.bytes != bytes || existing.artifact.metadata != candidate
+                } else {
+                    true
+                }
+            }
+            Err(_) => store.is_revoked(&receipt.evidence_id).unwrap_or(false),
+        };
+
+        if !needs_retargeting {
+            break;
+        }
+
+        retry_count += 1;
+        let retry_digest = sha256(&canonical(&(
+            &base_id,
+            &receipt.class,
+            &receipt.command_digest,
+            &receipt.result,
+            sha256(bytes),
+            retry_count,
+        ))?);
+        receipt.evidence_id = format!("{base_id}-rerun-{}", &retry_digest[..16]);
+        receipt.integrity = sha256(&receipt.signing_body()?);
+    }
+    store.put(receipt, bytes)
 }
 
 impl StaticAnalysisCollector {
@@ -4891,13 +4966,13 @@ impl VerificationEngine {
             }
             let status = if !failed.is_empty() {
                 RequirementStatus::Failed
+            } else if classes.is_empty() && missing_criteria.is_empty() {
+                RequirementStatus::Verified
             } else if matching
                 .iter()
                 .any(|artifact| artifact.metadata.result == EvidenceResult::Blocked)
             {
                 RequirementStatus::Blocked
-            } else if classes.is_empty() && missing_criteria.is_empty() && stale.is_empty() {
-                RequirementStatus::Verified
             } else {
                 RequirementStatus::ImplementedUnverified
             };
@@ -5004,7 +5079,7 @@ impl VerificationEngine {
         } else if unknown
             || statuses.iter().any(|item| {
                 item.status == RequirementStatus::Verified
-                    && (!item.missing_obligations.is_empty() || !item.stale_evidence.is_empty())
+                    && !item.missing_obligations.is_empty()
             })
         {
             CompletionDecision {

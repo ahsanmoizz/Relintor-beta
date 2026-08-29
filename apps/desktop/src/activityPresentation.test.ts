@@ -181,6 +181,72 @@ describe("user-visible mission state model", () => {
     expect(view.headline).toBe("Verification needs attention");
   });
 
+  it("renders Verified Complete when valid certificate is present despite historical stale evidence", () => {
+    const view = verificationPresentation(verification({
+      completion_state: "VerifiedComplete",
+      requirements_verified: 6,
+      requirements_total: 6,
+      evidence_count: 6,
+      stale_evidence: ["p8-collector-old-blocked-evidence"],
+      certificate: {
+        certificate_id: "cert-test-id",
+        final_state: "VerifiedComplete",
+        digest: "cert-digest",
+      },
+    }));
+    expect(view.verifiedComplete).toBe(true);
+    expect(view.label).toBe("Verified Complete");
+    expect(view.tone).toBe("success");
+  });
+
+  it("presents the exact preserved mission state as Verified Complete with primaryAction view_verification", () => {
+    const cert = {
+      certificate_id: "cert-21166a95cb5dea453f739ab10fa946bb0b16d10cf0e6f2657c28e13c3f69ad99",
+      final_state: "VERIFIED_COMPLETE",
+      digest: "certificate-digest",
+    };
+    const ver = verification({
+      project_id: "takeover-project-takeover_b40c6248d6502fccdd411472",
+      mission_id: "mission-takeover-project-takeover_b40c6248d6502fccdd411472",
+      completion_state: "VerifiedComplete",
+      workflow_stage: "VERIFIED_COMPLETE",
+      summary: "All required evidence passed and the completion certificate is valid.",
+      requirements_verified: 6,
+      requirements_total: 6,
+      missing_evidence: [],
+      failed_checks: [],
+      skipped_checks: [],
+      stale_evidence: [
+        "p8-collector-requirement_7556731cb7688c60a0b96fa1-criterion_82177a1c52dc868514fb7e3d-84cb368d1037d2d1-blocked-778a3152bc99bb61",
+        "p8-collector-requirement_81ed3fe05bc59f2050683fee-criterion-project-blueprint-candidate-requirement_38644ce6fdb1b61413ad8c75-0391f0a6654eb134-blocked-778a3152bc99bb61",
+      ],
+      blocked_external: [],
+      accepted_risks: [],
+      evidence_count: 6,
+      certificate: cert,
+      human_decisions: [],
+    });
+    const exec = execution({
+      project_id: "takeover-project-takeover_b40c6248d6502fccdd411472",
+      mission_id: "mission-takeover-project-takeover_b40c6248d6502fccdd411472",
+      state: "ExecutionTasksFinishedAwaitingVerification",
+      execution_phase: "FINISHED_AWAITING_VERIFICATION",
+      finished_tasks: 0,
+      total_tasks: 0,
+      runnable_tasks: [],
+    });
+    const m = missionPresentation(exec, ver, true);
+    const v = verificationPresentation(ver);
+    expect(v.verifiedComplete).toBe(true);
+    expect(v.label).toBe("Verified Complete");
+    expect(v.tone).toBe("success");
+    expect(m.headline).toBe("Verified Complete");
+    expect(m.badge).toBe("Verified");
+    expect(m.tone).toBe("success");
+    expect(m.primaryAction).toBe("view_verification");
+    expect(m.verifiedComplete).toBe(true);
+  });
+
   it("keeps canonical Windows paths internally while removing the extended prefix for display", () => {
     expect(displayWindowsPath("\\\\?\\D:\\Projects\\Relintor Beta")).toBe("D:\\Projects\\Relintor Beta");
     expect(displayProjectName("\\\\?\\D:\\Projects\\Relintor Beta")).toBe("Relintor Beta");
