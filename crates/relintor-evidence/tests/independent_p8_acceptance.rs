@@ -2093,3 +2093,58 @@ fn source_fingerprint_changes_for_same_size_file_change() {
     let after = fingerprint_workspace(root.path()).unwrap();
     assert_ne!(before, after);
 }
+
+#[test]
+fn package_json_script_aliases_and_colon_delimiters_are_discovered() {
+    let root = tempdir().unwrap();
+    let package_json = root.path().join("package.json");
+    fs::write(
+        &package_json,
+        r#"{
+            "name": "alias-test",
+            "scripts": {
+                "accessibility:scan": "node scripts/a11y.js",
+                "security:scan": "node scripts/sec.js",
+                "test:unit": "node --test tests/*.test.js",
+                "lint:check": "eslint ."
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let plan = VerificationCollectorPlan::discover(root.path()).expect("discover package scripts");
+    assert!(plan.for_class(EvidenceClass::AccessibilityResult).is_some());
+    assert_eq!(
+        plan.for_class(EvidenceClass::AccessibilityResult)
+            .unwrap()
+            .command
+            .as_ref()
+            .unwrap()
+            .args,
+        vec!["run", "accessibility:scan"]
+    );
+    assert!(plan.for_class(EvidenceClass::SecurityScan).is_some());
+    assert!(plan.for_class(EvidenceClass::TestOutput).is_some());
+    assert!(plan.for_class(EvidenceClass::LintStaticAnalysis).is_some());
+}
+
+#[test]
+fn idempotent_repeated_verification_evaluation_produces_identical_reports() {
+    let (root, store, authority, current, _) = report_with_all_evidence();
+    let engine = VerificationEngine::new_for_test(
+        store.clone(),
+        authority.clone(),
+        current.clone(),
+        Vec::new(),
+    )
+    .unwrap();
+
+    let first = engine.evaluate(None).unwrap();
+    let second = engine.evaluate(None).unwrap();
+
+    assert_eq!(first.decision.state, second.decision.state);
+    assert_eq!(first.coverage_total, second.coverage_total);
+    assert_eq!(first.coverage_accounted, second.coverage_accounted);
+    assert_eq!(first.requirement_statuses.len(), second.requirement_statuses.len());
+    drop(root);
+}

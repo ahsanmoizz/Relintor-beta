@@ -5475,32 +5475,28 @@ fn missing_machine_requirement_ids(
         .collect()
 }
 
-fn unverified_machine_requirement_ids(
-    report: &relintor_evidence::VerificationReport,
-    store: &EvidenceStore,
-) -> BTreeSet<String> {
-    let mut requirements = deterministic_failed_requirement_ids(report, store);
-    requirements.extend(missing_machine_requirement_ids(report));
-    requirements
-}
-
 fn authorize_and_launch_verification_correction(
     app: &AppHandle,
     project_id: &str,
     report: &relintor_evidence::VerificationReport,
     store: &EvidenceStore,
 ) -> Result<bool, String> {
-    let unverified = unverified_machine_requirement_ids(report, store);
-    if unverified.is_empty() {
+    let failed = deterministic_failed_requirement_ids(report, store);
+    if failed.is_empty() {
         return Ok(false);
     }
     let project_id = canonical_project_id(project_id)?;
     with_execution_mutation_lock(|| {
         require_execution_not_active(&project_id)?;
         let (mut run, ledger_path, revision, _handoff) = load_execution_run(app, &project_id)?;
-        let affected = run
-            .authorize_verification_correction(&unverified, execution_now_ms())
-            .map_err(|error| error.to_string())?;
+        let affected = match run.authorize_verification_correction(&failed, execution_now_ms()) {
+            Ok(affected) => affected,
+            Err(ExecutionError::PolicyDenied(detail)) => {
+                eprintln!("Verification correction policy limit reached: {detail}");
+                return Ok(false);
+            }
+            Err(error) => return Err(error.to_string()),
+        };
         let recovery = recovery_store(app, &revision)?;
         persist_execution_boundary(
             &run,
@@ -5508,7 +5504,7 @@ fn authorize_and_launch_verification_correction(
             &recovery,
             &revision,
             &format!(
-                "machine verification evidence is failed or missing; bounded corrective execution authorized for {}",
+                "machine verification evidence failed deterministically; bounded corrective execution authorized for {}",
                 affected.join(",")
             ),
             CheckpointKind::AfterTaskPersistence,
@@ -5551,7 +5547,7 @@ fn automatic_verification_closure_inner(app: &AppHandle, project_id: &str) -> Re
                 Ok(false) => notify_user(
                     app,
                     "Relintor needs your attention",
-                    "Verification failed but no safe deterministic correction target was available.",
+                    "Verification found a failure, but correction was either already used or no safe target was available.",
                 ),
                 Err(error) => {
                     eprintln!("Relintor verification correction was not authorized: {error}");
@@ -5567,7 +5563,7 @@ fn automatic_verification_closure_inner(app: &AppHandle, project_id: &str) -> Re
         | relintor_evidence::CompletionState::RevalidationRequired
         | relintor_evidence::CompletionState::StoppedIncomplete
         | relintor_evidence::CompletionState::CompleteWithAcceptedRisks => {
-            if !missing_machine_requirement_ids(&report).is_empty()
+            if !deterministic_failed_requirement_ids(&report, &context.store).is_empty()
                 && human_decision_prompts(&context, &report).is_empty()
             {
                 match authorize_and_launch_verification_correction(
@@ -5580,14 +5576,14 @@ fn automatic_verification_closure_inner(app: &AppHandle, project_id: &str) -> Re
                     Ok(false) => notify_user(
                         app,
                         "Relintor needs your attention",
-                        "Verification is missing machine evidence, but no safe correction target was available.",
+                        "Verification is incomplete, and no automatic correction could be authorized.",
                     ),
                     Err(error) => {
                         eprintln!("Relintor missing-evidence correction was not authorized: {error}");
                         notify_user(
                             app,
                             "Relintor needs your attention",
-                            "Verification is missing machine evidence, but bounded automatic correction could not be authorized safely.",
+                            "Verification is incomplete, and bounded automatic correction could not be authorized safely.",
                         );
                     }
                 }
@@ -5619,15 +5615,20 @@ fn verification_start_inner(
     let certificate = ensure_verified_completion_certificate(&app, &context, &report, &manifest)?;
     let mut workflow_stage = None;
     if report.decision.state == relintor_evidence::CompletionState::FailedVerification
-        || (!missing_machine_requirement_ids(&report).is_empty()
+        || (!deterministic_failed_requirement_ids(&report, &context.store).is_empty()
             && human_decision_prompts(&context, &report).is_empty())
     {
-        // A failed or missing machine proof is not handed back to the user as
-        // "done". Relintor authorizes one bounded correction path for the
-        // exact affected requirement/dependents when policy still permits it.
-        if authorize_and_launch_verification_correction(&app, &project_id, &report, &context.store)?
-        {
-            workflow_stage = Some("CORRECTING_FAILED_REQUIREMENT");
+        // A failed machine proof is not handed back to the user as "done".
+        // Relintor authorizes one bounded correction path for the exact affected
+        // requirement/dependents when policy still permits it.
+        match authorize_and_launch_verification_correction(&app, &project_id, &report, &context.store) {
+            Ok(true) => {
+                workflow_stage = Some("CORRECTING_FAILED_REQUIREMENT");
+            }
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("Verification correction could not be launched: {error}");
+            }
         }
     }
     if !human_decision_prompts(&context, &report).is_empty() && workflow_stage.is_none() {

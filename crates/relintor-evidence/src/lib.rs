@@ -1719,17 +1719,25 @@ impl VerificationCollectorPlan {
             } else {
                 "npm"
             };
-            for (script, class) in [
-                ("build", EvidenceClass::BuildOutput),
+            let canonical_candidates = [
                 ("test", EvidenceClass::TestOutput),
                 ("lint", EvidenceClass::LintStaticAnalysis),
                 ("security-scan", EvidenceClass::SecurityScan),
+                ("security:scan", EvidenceClass::SecurityScan),
+                ("appsec:scan", EvidenceClass::SecurityScan),
+                ("appsec-scan", EvidenceClass::SecurityScan),
                 ("accessibility-audit", EvidenceClass::AccessibilityResult),
                 ("accessibility-check", EvidenceClass::AccessibilityResult),
+                ("accessibility-scan", EvidenceClass::AccessibilityResult),
+                ("accessibility:scan", EvidenceClass::AccessibilityResult),
+                ("a11y-scan", EvidenceClass::AccessibilityResult),
+                ("a11y:scan", EvidenceClass::AccessibilityResult),
                 ("performance-result", EvidenceClass::PerformanceResult),
                 ("performance-scan", EvidenceClass::PerformanceResult),
                 ("performance-budget", EvidenceClass::PerformanceResult),
-            ] {
+                ("build", EvidenceClass::BuildOutput),
+            ];
+            for (script, class) in canonical_candidates {
                 if scripts.is_some_and(|items| items.contains_key(script)) {
                     add_discovered_command(
                         &mut collectors,
@@ -1742,6 +1750,23 @@ impl VerificationCollectorPlan {
                         },
                         &format!("package.json scripts.{script}"),
                     );
+                }
+            }
+            if let Some(scripts_map) = scripts {
+                for (script_name, _) in scripts_map {
+                    if let Some(class) = match_package_script_class(script_name) {
+                        add_discovered_command(
+                            &mut collectors,
+                            class,
+                            CommandSpec {
+                                program: manager.into(),
+                                args: vec!["run".into(), script_name.clone()],
+                                working_directory: workspace_root.to_path_buf(),
+                                environment: BTreeMap::new(),
+                            },
+                            &format!("package.json scripts.{script_name}"),
+                        );
+                    }
                 }
             }
             if project_kind == "unknown" {
@@ -1849,6 +1874,19 @@ struct VerificationPlanFileEntry {
     adapter: Option<String>,
     route: Option<String>,
     threshold: Option<f64>,
+}
+
+fn match_package_script_class(name: &str) -> Option<EvidenceClass> {
+    let normalized = name.to_ascii_lowercase().replace([':', '_'], "-");
+    match normalized.as_str() {
+        "test" | "test-unit" | "test-all" | "tests" | "check-tests" => Some(EvidenceClass::TestOutput),
+        "lint" | "lint-check" | "check-lint" | "check" => Some(EvidenceClass::LintStaticAnalysis),
+        "security-scan" | "security" | "sec-scan" | "security-audit" | "audit" | "appsec" | "appsec-scan" | "application-security-scan" | "application-security" => Some(EvidenceClass::SecurityScan),
+        "accessibility-audit" | "accessibility-check" | "accessibility-scan" | "accessibility" | "a11y-audit" | "a11y-check" | "a11y-scan" | "a11y" => Some(EvidenceClass::AccessibilityResult),
+        "performance-result" | "performance-scan" | "performance-budget" | "performance" | "perf-scan" | "perf-budget" | "perf" => Some(EvidenceClass::PerformanceResult),
+        "build" | "build-prod" => Some(EvidenceClass::BuildOutput),
+        _ => None,
+    }
 }
 
 fn add_discovered_command(
