@@ -1879,12 +1879,12 @@ struct VerificationPlanFileEntry {
 fn match_package_script_class(name: &str) -> Option<EvidenceClass> {
     let normalized = name.to_ascii_lowercase().replace([':', '_'], "-");
     match normalized.as_str() {
-        "test" | "test-unit" | "test-all" | "tests" | "check-tests" => Some(EvidenceClass::TestOutput),
-        "lint" | "lint-check" | "check-lint" | "check" => Some(EvidenceClass::LintStaticAnalysis),
+        "test" | "test-unit" | "test-all" | "tests" | "check-tests" | "test-integration" | "test-e2e" | "test-int" | "test-ci" => Some(EvidenceClass::TestOutput),
+        "lint" | "lint-check" | "check-lint" | "check" | "lint-ci" => Some(EvidenceClass::LintStaticAnalysis),
         "security-scan" | "security" | "sec-scan" | "security-audit" | "audit" | "appsec" | "appsec-scan" | "application-security-scan" | "application-security" => Some(EvidenceClass::SecurityScan),
         "accessibility-audit" | "accessibility-check" | "accessibility-scan" | "accessibility" | "a11y-audit" | "a11y-check" | "a11y-scan" | "a11y" => Some(EvidenceClass::AccessibilityResult),
-        "performance-result" | "performance-scan" | "performance-budget" | "performance" | "perf-scan" | "perf-budget" | "perf" => Some(EvidenceClass::PerformanceResult),
-        "build" | "build-prod" => Some(EvidenceClass::BuildOutput),
+        "performance-result" | "performance-scan" | "performance-budget" | "performance" | "perf-scan" | "perf-budget" | "perf" | "perf-baseline" => Some(EvidenceClass::PerformanceResult),
+        "build" | "build-prod" | "build-web" => Some(EvidenceClass::BuildOutput),
         _ => None,
     }
 }

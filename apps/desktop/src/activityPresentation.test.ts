@@ -251,4 +251,144 @@ describe("user-visible mission state model", () => {
     expect(displayWindowsPath("\\\\?\\D:\\Projects\\Relintor Beta")).toBe("D:\\Projects\\Relintor Beta");
     expect(displayProjectName("\\\\?\\D:\\Projects\\Relintor Beta")).toBe("Relintor Beta");
   });
+
+  describe("UI/Backend Contradiction Matrix", () => {
+    it("never renders Verified Complete alongside Verification needs attention", () => {
+      const v = verificationPresentation(verification({
+        completion_state: "VerifiedComplete",
+        requirements_verified: 6,
+        requirements_total: 6,
+        evidence_count: 6,
+        certificate: { certificate_id: "c1", final_state: "VerifiedComplete", digest: "d1" },
+        missing_evidence: [],
+        failed_checks: [],
+      }));
+      expect(v.verifiedComplete).toBe(true);
+      expect(v.label).not.toContain("needs attention");
+      expect(v.label).toBe("Verified Complete");
+
+      const vContradiction = verificationPresentation(verification({
+        completion_state: "VerifiedComplete",
+        requirements_verified: 5,
+        requirements_total: 6,
+        evidence_count: 6,
+        certificate: { certificate_id: "c1", final_state: "VerifiedComplete", digest: "d1" },
+        missing_evidence: ["req_6: missing evidence"],
+      }));
+      expect(vContradiction.verifiedComplete).toBe(false);
+      expect(vContradiction.label).toBe("Verification needs attention");
+    });
+
+    it("never enables Verify work when mission is already Verified Complete", () => {
+      const m = missionPresentation(
+        execution({ state: "ExecutionTasksFinishedAwaitingVerification", execution_phase: "FINISHED_AWAITING_VERIFICATION" }),
+        verification({
+          completion_state: "VerifiedComplete",
+          requirements_verified: 6,
+          requirements_total: 6,
+          evidence_count: 6,
+          certificate: { certificate_id: "c1", final_state: "VerifiedComplete", digest: "d1" },
+        }),
+        true,
+      );
+      expect(m.primaryAction).toBe("view_verification");
+      expect(m.primaryAction).not.toBe("verify");
+      expect(m.verifiedComplete).toBe(true);
+    });
+
+    it("never enables Verify work while waiting for a human decision", () => {
+      const m = missionPresentation(
+        execution({ state: "ExecutionTasksFinishedAwaitingVerification", execution_phase: "FINISHED_AWAITING_VERIFICATION" }),
+        verification({
+          workflow_stage: "WAITING_FOR_USER_DECISION",
+          summary: "Human decision required.",
+          human_decisions: [{
+            requirement_id: "req_human",
+            title: "Decision Title",
+            question: "Is this correct?",
+            summary: "Decision summary",
+            criterion_ids: ["crit_human"],
+          }],
+        }),
+        true,
+      );
+      expect(m.primaryAction).toBe("none");
+      expect(m.headline).toBe("Your decision is needed");
+    });
+
+    it("never enables Verify work while correction is actively running", () => {
+      const m = missionPresentation(
+        execution({ state: "Running", execution_phase: "RUNNING", dispatch_active: true }),
+        verification({
+          workflow_stage: "CORRECTING_FAILED_REQUIREMENT",
+          summary: "Correcting failed requirement",
+        }),
+        true,
+      );
+      expect(m.primaryAction).toBe("none");
+      expect(m.badge).toBe("Running");
+    });
+
+    it("requires recovery review on terminal failure rather than generic blind retry", () => {
+      const m = missionPresentation(
+        execution({
+          state: "RevalidationRequired",
+          recovery_state: "REVALIDATION_REQUIRED",
+          recovery_detected: true,
+        }),
+        verification(),
+        true,
+      );
+      expect(m.primaryAction).toBe("recover");
+      expect(m.recoveryRequired).toBe(true);
+    });
+
+    it("never shows Verified Complete when 0 tasks are runnable but requirements are unverified", () => {
+      const m = missionPresentation(
+        execution({
+          state: "ExecutionTasksFinishedAwaitingVerification",
+          execution_phase: "FINISHED_AWAITING_VERIFICATION",
+          finished_tasks: 0,
+          total_tasks: 0,
+          runnable_tasks: [],
+        }),
+        verification({
+          completion_state: "StoppedIncomplete",
+          requirements_verified: 0,
+          requirements_total: 10,
+          evidence_count: 0,
+          certificate: null,
+        }),
+        true,
+      );
+      expect(m.verifiedComplete).toBe(false);
+      expect(m.headline).not.toBe("Verified Complete");
+      expect(m.badge).not.toBe("Verified");
+    });
+
+    it("shows truthful verification state and not completion certificate when 10/10 tasks complete but requirements unverified", () => {
+      const m = missionPresentation(
+        execution({
+          state: "ExecutionTasksFinishedAwaitingVerification",
+          execution_phase: "FINISHED_AWAITING_VERIFICATION",
+          finished_tasks: 10,
+          total_tasks: 10,
+          runnable_tasks: [],
+        }),
+        verification({
+          completion_state: "StoppedIncomplete",
+          requirements_verified: 9,
+          requirements_total: 10,
+          evidence_count: 9,
+          missing_evidence: ["requirement_10: missing AccessibilityResult"],
+          certificate: null,
+        }),
+        true,
+      );
+      expect(m.verifiedComplete).toBe(false);
+      expect(m.primaryAction).toBe("verify");
+      expect(m.headline).toBe("Verification needs attention");
+      expect(m.badge).not.toBe("Verified");
+    });
+  });
 });
