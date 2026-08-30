@@ -17,7 +17,7 @@ use relintor_evidence::{
     VerificationCollectorPlan, VerificationEngine,
 };
 use relintor_execution::{
-    CheckpointKind, ConservativeProcessInspector, ExecutionRun, ProcessInspector,
+    CheckpointKind, ConservativeProcessInspector, ExecutionError, ExecutionRun, ProcessInspector,
     ProcessObservation, ProcessOwnershipRecord, RecoveryAuthority, RecoveryCoordinator,
     RecoveryDisposition, RecoveryStore, SchedulerPolicy, SessionEndState,
 };
