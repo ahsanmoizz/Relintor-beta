@@ -5,7 +5,7 @@ use relintor_execution::{
     ExecutionRunState, ExecutionTask, ExecutionTaskState, GitWorktreeSnapshot, LeaseScope,
     LeaseStatus, ProcessInspector, ProcessObservation, ProcessOwnershipRecord, RecoveryAuthority,
     RecoveryCoordinator, RecoveryDisposition, RecoveryStore, RetryPolicy, SessionEndState,
-    SqliteTestDatabaseHook, TaskAttemptState, TestDatabaseCheckpointHook, UntrackedFileRecord,
+    SqliteTestDatabaseHook, TaskAttempt, TaskAttemptState, TestDatabaseCheckpointHook, UntrackedFileRecord,
     UntrackedFileSnapshot, UsageBudget, WorkspaceSnapshot,
 };
 use relintor_standards::RequirementPriority;
@@ -1449,5 +1449,103 @@ fn manual_recovery_retry_authorizes_fresh_attempt_and_passes_action_authorizatio
         65,
     )
     .expect("authorize action for attempt 3");
+}
+
+#[test]
+fn finished_mission_with_historical_recovery_attempts_reconciles_cleanly_and_disables_recovery() {
+    let path = root("finished-mission-recovery-resolution");
+    let mut run = empty_run(&path);
+    run.tasks.insert(
+        "task-1".into(),
+        ExecutionTask {
+            task_id: "task-1".into(),
+            objective: "task 1".into(),
+            requirement_ids: vec!["req-1".into()],
+            dependency_ids: Vec::new(),
+            priority: RequirementPriority::P1,
+            state: ExecutionTaskState::Pending,
+            scope: LeaseScope {
+                workspace: path.clone(),
+                file_scopes: vec![path.display().to_string()],
+                directory_scopes: vec![path.display().to_string()],
+                shared_resources: Vec::new(),
+                package_lockfiles: Vec::new(),
+                generated_files: Vec::new(),
+                allowed_tools: ["antigravity".into()].into_iter().collect(),
+                external_authority: Default::default(),
+                scope_known: true,
+            },
+            usage_budget: UsageBudget {
+                wall_clock_ms: 1_500_000,
+                execution_steps: 100,
+                tool_calls: 50,
+                retry_attempts: 2,
+                cost_micros: None,
+            },
+            retry_policy: RetryPolicy {
+                max_attempts: 2,
+                retryable: [relintor_execution::FailureClass::Transient].into_iter().collect(),
+                backoff_ms: 250,
+            },
+            evidence_obligations: Vec::new(),
+            attempt_number: 0,
+        },
+    );
+
+    // Attempt 1: start and mark stopped
+    let packet1 = run.start_task("task-1", 10).expect("start 1");
+    if let Some(attempt) = run.attempts.last_mut() {
+        attempt.execution_boundary =
+            relintor_execution::AttemptExecutionBoundary::ExternalProcessStarted;
+        attempt.state = TaskAttemptState::SafeBoundaryStopped;
+        attempt.ended_at_ms = Some(20);
+        attempt.failure_class = Some(relintor_execution::FailureClass::ProcessFailure);
+    }
+    for lease in &mut run.leases {
+        if lease.lease_id == packet1.lease_id {
+            lease.status = LeaseStatus::Consumed;
+        }
+    }
+    run.tasks.get_mut("task-1").unwrap().state = ExecutionTaskState::WaitingRetry;
+    run.state = ExecutionRunState::Ready;
+
+    // Attempt 2: start and mark stopped
+    let packet2 = run.start_task("task-1", 30).expect("start 2");
+    if let Some(attempt) = run.attempts.last_mut() {
+        attempt.execution_boundary =
+            relintor_execution::AttemptExecutionBoundary::ExternalProcessStarted;
+        attempt.state = TaskAttemptState::SafeBoundaryStopped;
+        attempt.ended_at_ms = Some(40);
+        attempt.failure_class = Some(relintor_execution::FailureClass::ProcessFailure);
+    }
+    for lease in &mut run.leases {
+        if lease.lease_id == packet2.lease_id {
+            lease.status = LeaseStatus::Consumed;
+        }
+    }
+    run.tasks.get_mut("task-1").unwrap().state = ExecutionTaskState::WaitingRetry;
+    run.tasks.get_mut("task-1").unwrap().usage_budget.retry_attempts = 3;
+    run.tasks.get_mut("task-1").unwrap().retry_policy.max_attempts = 3;
+    run.state = ExecutionRunState::Ready;
+
+    // Attempt 3: start and mark succeeded
+    let packet3 = run.start_task("task-1", 50).expect("start 3");
+    if let Some(attempt) = run.attempts.last_mut() {
+        attempt.execution_boundary =
+            relintor_execution::AttemptExecutionBoundary::ExternalProcessStarted;
+        attempt.state = TaskAttemptState::Succeeded;
+        attempt.ended_at_ms = Some(60);
+    }
+    for lease in &mut run.leases {
+        if lease.lease_id == packet3.lease_id {
+            lease.status = LeaseStatus::Consumed;
+        }
+    }
+    run.tasks.get_mut("task-1").unwrap().state = ExecutionTaskState::FinishedAwaitingVerification;
+    run.state = ExecutionRunState::ExecutionTasksFinishedAwaitingVerification;
+
+    assert!(run.all_tasks_finished());
+    assert_eq!(run.current_recovery_attempt(), None);
+    assert!(!run.recovery_status_requires_attention());
 }
 

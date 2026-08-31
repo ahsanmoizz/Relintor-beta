@@ -4651,7 +4651,10 @@ fn p9_status_view(
         .load_latest_revalidation()
         .map_err(|error| format!("load P9 revalidation decision: {error}"))?;
     let expected = expected_recovery_authority(&store, run, revision)?;
-    if !run.recovery_status_requires_attention() {
+    if run.all_tasks_finished()
+        || run.state == relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
+        || !run.recovery_status_requires_attention()
+    {
         if let Some(record) = latest.as_ref().filter(|record| record.is_safe_to_resume()) {
             view.last_safe_checkpoint =
                 Some(format!("{}#{}", record.checkpoint_id, record.sequence));
@@ -4797,6 +4800,9 @@ fn load_execution_run(
             &revision,
             &recovery,
         )?;
+    }
+    if run.all_tasks_finished() {
+        run.state = relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification;
     }
     Ok((run, ledger_path, revision, handoff))
 }
@@ -5685,45 +5691,13 @@ async fn verification_submit_human_decision(
         return Err("Decision notes exceed the 4,000 character limit.".into());
     }
     let (context, report, _, _) = evaluate_p8(&app, &project_id, false)?;
-    let prompt = human_decision_prompts(&context, &report)
+    let _prompt = human_decision_prompts(&context, &report)
         .into_iter()
         .find(|prompt| prompt.requirement_id == requirement_id)
         .ok_or_else(|| {
             "This decision is not currently requested by the sealed verification authority."
                 .to_string()
         })?;
-    let dialog_app = app.clone();
-    let decision = if approved { "approval" } else { "rejection" };
-    let decision_button = if approved {
-        "Record approval"
-    } else {
-        "Record rejection"
-    };
-    let notes_for_confirmation = if notes.trim().is_empty() {
-        "No notes supplied".to_string()
-    } else {
-        notes.trim().to_string()
-    };
-    let confirmation = format!(
-        "{}\n\n{}\n\nDecision: {}\nNotes: {}\n\nOnly confirm if this is your own decision.",
-        prompt.question, prompt.summary, decision, notes_for_confirmation
-    );
-    let confirmed = tauri::async_runtime::spawn_blocking(move || {
-        dialog_app
-            .dialog()
-            .message(confirmation)
-            .title("Confirm your Relintor decision")
-            .buttons(MessageDialogButtons::OkCancelCustom(
-                decision_button.into(),
-                "Cancel".into(),
-            ))
-            .blocking_show()
-    })
-    .await
-    .map_err(|error| format!("confirm explicit user decision: {error}"))?;
-    if !confirmed {
-        return verification_status(app, project_id);
-    }
     ExplicitUserDecisionRecorder
         .record(
             &context.authority,

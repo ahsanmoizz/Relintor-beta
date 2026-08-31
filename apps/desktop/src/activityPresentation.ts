@@ -169,9 +169,11 @@ export function missionPresentation(
   const recovery = token(status.recovery_state);
   const running = phase === "RUNNING";
   const dispatching = status.dispatch_active && !running;
+  const executionFinished = state === "EXECUTIONTASKSFINISHEDAWAITINGVERIFICATION";
   const recoveryRequired =
     !running &&
     !dispatching &&
+    !executionFinished &&
     (["BLOCKEDEXTERNAL", "REVALIDATIONREQUIRED", "STOPPEDINCOMPLETE"].includes(state) ||
       ["P9RECOVERYUNAVAILABLE", "REVALIDATIONREQUIRED", "RECOVERYNOTALLOWED", "BLOCKEDEXTERNAL"].includes(recovery));
   const verificationView = verificationPresentation(verification);

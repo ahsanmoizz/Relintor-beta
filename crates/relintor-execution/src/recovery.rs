@@ -2275,6 +2275,20 @@ impl RecoveryCoordinator {
         inspector: &dyn ProcessInspector,
         now_ms: u64,
     ) -> Result<ResumeIntegrityResult, RecoveryError> {
+        if run.all_tasks_finished()
+            || run.state == ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
+        {
+            return Ok(ResumeIntegrityResult {
+                disposition: RecoveryDisposition::SafeToResume,
+                classification: RecoveryClassification::InterruptedAtSafeCheckpoint,
+                reasons: Vec::new(),
+                changed_paths: Vec::new(),
+                checkpoint_id: None,
+                checkpoint_sequence: None,
+                process_observations: Vec::new(),
+                target: None,
+            });
+        }
         if run.run_id != expected.p7_run_id
             || run.mission_id != expected.mission_id
             || run.mission_revision != expected.mission_revision

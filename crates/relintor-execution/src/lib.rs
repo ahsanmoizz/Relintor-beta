@@ -3354,7 +3354,19 @@ impl ExecutionRun {
                 == Some("Antigravity adapter: Antigravity version is incompatible")
     }
 
+    pub fn all_tasks_finished(&self) -> bool {
+        !self.tasks.is_empty()
+            && self.tasks.values().all(|task| {
+                task.state == ExecutionTaskState::FinishedAwaitingVerification
+            })
+    }
+
     fn current_recovery_attempt_record(&self) -> Option<&TaskAttempt> {
+        if self.all_tasks_finished()
+            || self.state == ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
+        {
+            return None;
+        }
         self.attempts.iter().rev().find(|attempt| {
             matches!(
                 attempt.state,
@@ -3363,7 +3375,15 @@ impl ExecutionRun {
                     | TaskAttemptState::SafeBoundaryStopped
             ) && attempt.ended_at_ms.is_some()
                 && attempt.completion_authority.is_none()
-                && self.tasks.contains_key(&attempt.task_id)
+                && self.tasks.get(&attempt.task_id).is_some_and(|task| {
+                    task.state != ExecutionTaskState::FinishedAwaitingVerification
+                })
+                && !self.attempts.iter().any(|other| {
+                    other.task_id == attempt.task_id
+                        && other.attempt_number > attempt.attempt_number
+                        && (other.completion_authority.is_some()
+                            || other.state == TaskAttemptState::Succeeded)
+                })
         })
     }
 
@@ -3387,6 +3407,11 @@ impl ExecutionRun {
     /// and must not be represented as an interrupted run merely because no
     /// recovery checkpoint exists yet.
     pub fn recovery_status_requires_attention(&self) -> bool {
+        if self.all_tasks_finished()
+            || self.state == ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
+        {
+            return false;
+        }
         self.current_recovery_attempt().is_some()
             || matches!(
                 self.state,
