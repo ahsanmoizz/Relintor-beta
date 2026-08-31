@@ -1022,8 +1022,23 @@ fn classify_file(path: &str, binary: bool) -> FileClassification {
         || lower.ends_with(".yaml")
         || lower.ends_with(".yml")
         || lower.ends_with(".toml")
+        || lower.ends_with(".lock")
         || lower.ends_with(".ini")
         || lower.ends_with(".env")
+        || lower.ends_with(".gradle")
+        || lower.ends_with(".gradle.kts")
+        || lower.ends_with("gradle.properties")
+        || lower.ends_with("gradlew")
+        || lower.ends_with("gradlew.bat")
+        || lower.ends_with(".bat")
+        || lower.ends_with(".cmd")
+        || lower.ends_with(".sh")
+        || lower.ends_with(".ps1")
+        || lower.ends_with("makefile")
+        || lower.ends_with("cmakelists.txt")
+        || lower.ends_with("dockerfile")
+        || lower.ends_with(".properties")
+        || lower.ends_with(".pro")
     {
         return FileClassification::Configuration;
     }
@@ -1033,6 +1048,14 @@ fn classify_file(path: &str, binary: bool) -> FileClassification {
         || lower.ends_with(".gif")
         || lower.ends_with(".svg")
         || lower.ends_with(".ico")
+        || lower.ends_with(".webp")
+        || lower.ends_with(".ttf")
+        || lower.ends_with(".woff")
+        || lower.ends_with(".woff2")
+        || lower.contains("/res/")
+        || lower.contains("/assets/")
+        || lower.contains("/public/")
+        || (lower.ends_with(".xml") && !lower.contains("pom.xml"))
     {
         return FileClassification::Asset;
     }
@@ -1647,60 +1670,91 @@ fn discover_routes(files: &[RepositoryFile], text: &BTreeMap<String, String>) ->
                     || lower.contains(&format!("router.{}(", method.to_ascii_lowercase()))
                 {
                     if let Some(path) = first_quoted(trimmed) {
-                        let handler = trimmed
-                            .split(',')
-                            .nth(1)
-                            .map(|value| value.trim().trim_end_matches(')').to_string());
-                        result.push(route_record(
-                            file,
-                            method,
-                            path,
-                            handler,
-                            line_number + 1,
-                            RouteStatus::ReachabilityUnproven,
-                        ));
+                        if is_valid_route_path(path) {
+                            let handler = trimmed
+                                .split(',')
+                                .nth(1)
+                                .map(|value| value.trim().trim_end_matches(')').to_string());
+                            result.push(route_record(
+                                file,
+                                method,
+                                path,
+                                handler,
+                                line_number + 1,
+                                RouteStatus::ReachabilityUnproven,
+                            ));
+                        }
                     }
                 }
             }
             if let Some((method, path)) = python_route(trimmed) {
-                result.push(route_record(
-                    file,
-                    method,
-                    path,
-                    None,
-                    line_number + 1,
-                    RouteStatus::ReachabilityUnproven,
-                ));
-            }
-            if trimmed.contains(".route(") && trimmed.contains('"') {
-                if let Some(path) = first_quoted(trimmed) {
+                if is_valid_route_path(path) {
                     result.push(route_record(
                         file,
-                        "ROUTE",
+                        method,
                         path,
                         None,
                         line_number + 1,
-                        RouteStatus::Registered,
+                        RouteStatus::ReachabilityUnproven,
                     ));
                 }
             }
-            if (trimmed.contains("createBrowserRouter") || trimmed.contains("path:"))
-                && trimmed.contains('"')
+            if trimmed.contains(".route(") && trimmed.contains('"') {
+                if let Some(path) = first_quoted(trimmed) {
+                    if is_valid_route_path(path) {
+                        result.push(route_record(
+                            file,
+                            "ROUTE",
+                            path,
+                            None,
+                            line_number + 1,
+                            RouteStatus::Registered,
+                        ));
+                    }
+                }
+            }
+            if (trimmed.contains("createBrowserRouter")
+                || trimmed.contains("<Route ")
+                || trimmed.contains("composable(")
+                || trimmed.contains("path: \"/")
+                || trimmed.contains("path: '/"))
+                && (trimmed.contains('"') || trimmed.contains('\''))
             {
                 if let Some(path) = first_quoted(trimmed) {
-                    result.push(route_record(
-                        file,
-                        "UI",
-                        path,
-                        None,
-                        line_number + 1,
-                        RouteStatus::Declared,
-                    ));
+                    if is_valid_route_path(path) {
+                        result.push(route_record(
+                            file,
+                            "UI",
+                            path,
+                            None,
+                            line_number + 1,
+                            RouteStatus::Declared,
+                        ));
+                    }
                 }
             }
         }
     }
     dedupe_routes(result)
+}
+
+fn is_valid_route_path(path: &str) -> bool {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed.len() > 120 {
+        return false;
+    }
+    if trimmed.contains(' ')
+        || trimmed.contains('\n')
+        || trimmed.contains("{error}")
+        || trimmed.contains("error:")
+        || trimmed.contains("cannot read")
+        || trimmed.contains("failed")
+    {
+        return false;
+    }
+    trimmed.starts_with('/')
+        || trimmed.starts_with("tauri://")
+        || (trimmed.contains('/') && !trimmed.contains(':'))
 }
 
 fn route_record(
@@ -1849,25 +1903,42 @@ fn discover_database(
                 migration_files.push((identifier, file, raw.to_ascii_lowercase()));
             }
         }
-        for line in raw.lines() {
-            let lower_line = line.to_ascii_lowercase();
-            let object_type = if lower_line.contains("create table") {
-                Some("table")
-            } else if lower_line.contains("model ") && lower.ends_with("schema.prisma") {
-                Some("model")
-            } else {
-                None
-            };
-            if let Some(object_type) = object_type {
-                let name = schema_object_name(line, object_type);
-                schema_objects.push(SchemaObject {
-                    id: stable_id("schema-object", &[&name, &file.relative_path]),
-                    name,
-                    object_type: object_type.into(),
-                    source: file.source.clone(),
-                    migration_evidence: Vec::new(),
-                    migration_required: true,
-                });
+        let is_schema_file = lower.ends_with(".sql")
+            || lower.ends_with(".ddl")
+            || lower.ends_with(".prisma")
+            || lower.contains("/db/")
+            || lower.contains("/schema")
+            || lower.contains("/migration")
+            || lower.contains("/entities/")
+            || lower.contains("/models/");
+
+        if is_schema_file {
+            for line in raw.lines() {
+                let trimmed_line = line.trim();
+                if is_comment_line(trimmed_line) {
+                    continue;
+                }
+                let lower_line = trimmed_line.to_ascii_lowercase();
+                let object_type = if lower_line.contains("create table") {
+                    Some("table")
+                } else if lower_line.contains("model ") && lower.ends_with("schema.prisma") {
+                    Some("model")
+                } else {
+                    None
+                };
+                if let Some(object_type) = object_type {
+                    let name = schema_object_name(trimmed_line, object_type);
+                    if name != "unknown" && !name.is_empty() {
+                        schema_objects.push(SchemaObject {
+                            id: stable_id("schema-object", &[&name, &file.relative_path]),
+                            name,
+                            object_type: object_type.into(),
+                            source: file.source.clone(),
+                            migration_evidence: Vec::new(),
+                            migration_required: true,
+                        });
+                    }
+                }
             }
         }
     }
@@ -1929,15 +2000,28 @@ fn schema_object_name(line: &str, object_type: &str) -> String {
     } else {
         "model"
     };
-    lower
-        .find(marker)
-        .and_then(|index| line.get(index + marker.len()..))
-        .and_then(|rest| {
-            rest.split(|character: char| !character.is_alphanumeric() && character != '_')
-                .find(|token| !token.is_empty())
-        })
-        .unwrap_or("unknown")
-        .to_string()
+    let Some(index) = lower.find(marker) else {
+        return "unknown".into();
+    };
+    let Some(rest) = line.get(index + marker.len()..) else {
+        return "unknown".into();
+    };
+    let sql_keywords = [
+        "if", "not", "exists", "temp", "temporary", "unlogged", "table", "only", "schema",
+    ];
+    for token in rest.split(|character: char| !character.is_alphanumeric() && character != '_' && character != '.') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let token_lower = token.to_ascii_lowercase();
+        if sql_keywords.contains(&token_lower.as_str()) {
+            continue;
+        }
+        let clean_name = token.split('.').last().unwrap_or(token);
+        return clean_name.to_string();
+    }
+    "unknown".into()
 }
 
 fn migration_identifier(path: &str) -> Option<String> {
@@ -2036,31 +2120,64 @@ fn discover_ui(
     let mut surfaces = Vec::new();
     for file in files.iter().filter(|file| file.included) {
         let lower = file.relative_path.to_ascii_lowercase();
-        if !(lower.ends_with(".tsx")
-            || lower.ends_with(".jsx")
-            || lower.ends_with(".vue")
-            || lower.ends_with(".html"))
-        {
-            continue;
-        }
         let raw = text
             .get(&file.relative_path)
             .map(String::as_str)
             .unwrap_or_default();
-        let mut actions = Vec::new();
-        if raw.contains("<form") || raw.contains("onSubmit") {
-            actions.push("form submission".into());
+
+        let is_web_ui = lower.ends_with(".tsx")
+            || lower.ends_with(".jsx")
+            || lower.ends_with(".vue")
+            || lower.ends_with(".svelte")
+            || lower.ends_with(".html");
+
+        let is_compose_ui = (lower.ends_with(".kt") || lower.ends_with(".kts"))
+            && (raw.contains("@Composable")
+                || raw.contains("setContent {")
+                || raw.contains("NavHost")
+                || raw.contains("composable(")
+                || raw.contains("Scaffold(")
+                || lower.contains("screen")
+                || lower.contains("activity"));
+
+        let is_swift_ui = lower.ends_with(".swift")
+            && (raw.contains(": View") || raw.contains("some View"));
+
+        let is_flutter_ui = lower.ends_with(".dart")
+            && (raw.contains("Widget") || raw.contains("StatelessWidget") || raw.contains("StatefulWidget"));
+
+        let is_android_layout = lower.ends_with(".xml") && lower.contains("res/layout");
+
+        if !is_web_ui && !is_compose_ui && !is_swift_ui && !is_flutter_ui && !is_android_layout {
+            continue;
         }
-        if raw.contains("<button") || raw.contains("onClick") {
+
+        let mut actions = Vec::new();
+        if raw.contains("<form") || raw.contains("onSubmit") || raw.contains("TextField") || raw.contains("OutlinedTextField") {
+            actions.push("form input".into());
+        }
+        if raw.contains("<button")
+            || raw.contains("onClick")
+            || raw.contains("Button(")
+            || raw.contains("IconButton(")
+            || raw.contains(".clickable")
+            || raw.contains("Button")
+        {
             actions.push("primary action".into());
         }
-        if raw.to_ascii_lowercase().contains("nav") || raw.contains("<a ") {
+        if raw.to_ascii_lowercase().contains("nav")
+            || raw.contains("<a ")
+            || raw.contains("navigate(")
+            || raw.contains("NavigationLink")
+        {
             actions.push("navigation".into());
         }
         let surface_type = if lower.contains("admin") || lower.contains("settings") {
             "settings/admin"
-        } else if lower.contains("login") || lower.contains("sign-in") {
+        } else if lower.contains("login") || lower.contains("sign-in") || lower.contains("auth") {
             "auth entry"
+        } else if is_compose_ui {
+            "compose screen"
         } else {
             "screen/page"
         };
@@ -2393,7 +2510,20 @@ fn reconcile(mut report: TakeoverReport, text: &BTreeMap<String, String>) -> Tak
             confidence: route.confidence.clone(),
             source: vec![route.source.clone()],
         });
-        if !mentioned {
+        let is_diagnostic_or_internal = route.method == "TAURI_COMMAND"
+            || route.method == "UI"
+            || route.source.locator.contains("services/")
+            || route.source.locator.contains("crates/")
+            || route.source.locator.contains("internal/")
+            || route.source.locator.contains("pkg/")
+            || route.path.starts_with("/health")
+            || route.path.starts_with("/metrics")
+            || route.path.starts_with("/ping")
+            || route.path.starts_with("/live")
+            || route.path.starts_with("/ready")
+            || route.path.starts_with("/status");
+
+        if !mentioned && !is_diagnostic_or_internal {
             add_finding(
                 "hidden-route",
                 &format!(
@@ -2444,9 +2574,17 @@ fn reconcile(mut report: TakeoverReport, text: &BTreeMap<String, String>) -> Tak
                 )
             })
             .collect::<Vec<_>>();
+        let summary = if paths.len() >= 2 {
+            format!(
+                "Two source locations appear to implement the same capability: {} and {}.",
+                paths[0], paths[1]
+            )
+        } else {
+            "Two source locations appear to implement the same capability.".to_string()
+        };
         add_finding(
             "duplicate-implementation",
-            "Two source locations appear to implement the same capability.",
+            &summary,
             CapabilityClassification::Partial,
             "medium",
             evidence_items,
@@ -2589,6 +2727,16 @@ fn reconcile(mut report: TakeoverReport, text: &BTreeMap<String, String>) -> Tak
 }
 
 fn duplicate_stems(files: &[RepositoryFile]) -> Vec<Vec<String>> {
+    let ignored_stems = [
+        "main", "index", "app", "lib", "mod", "types", "type", "config", "configuration",
+        "error", "errors", "util", "utils", "constants", "constant", "theme", "colors",
+        "shape", "typography", "state", "model", "models", "events", "event", "service",
+        "client", "repository", "interface", "interfaces", "builder", "factory", "adapter",
+        "handler", "handlers", "controller", "view", "screen", "screens", "component",
+        "components", "common", "shared", "base", "core", "test", "tests", "spec",
+        "helper", "helpers", "worker", "job", "task", "entity", "entities", "schema",
+        "proto", "protocol", "codec", "routes", "route", "api", "impl", "setup", "gradlew", "gradle"
+    ];
     let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for file in files
         .iter()
@@ -2599,7 +2747,7 @@ fn duplicate_stems(files: &[RepositoryFile]) -> Vec<Vec<String>> {
             .and_then(|value| value.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if stem.len() > 2 && !["main", "index", "app", "lib"].contains(&stem.as_str()) {
+        if stem.len() > 3 && !ignored_stems.contains(&stem.as_str()) {
             grouped
                 .entry(stem)
                 .or_default()
