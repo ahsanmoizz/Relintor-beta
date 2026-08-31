@@ -5693,48 +5693,50 @@ async fn verification_submit_human_decision(
     if notes.trim().len() > 4_000 {
         return Err("Decision notes exceed the 4,000 character limit.".into());
     }
-    let (context, report, _, _) = evaluate_p8(&app, &project_id, false)?;
-    let _prompt = human_decision_prompts(&context, &report)
-        .into_iter()
-        .find(|prompt| prompt.requirement_id == requirement_id)
-        .ok_or_else(|| {
-            "This decision is not currently requested by the sealed verification authority."
-                .to_string()
-        })?;
-    ExplicitUserDecisionRecorder
-        .record(
-            &context.authority,
-            &context.current,
-            &context.store,
-            &context.p7_execution,
-            ExplicitUserDecisionInput {
-                requirement_id: &requirement_id,
-                approved,
-                notes: &notes,
-            },
-        )
-        .map_err(|error| format!("record explicit user decision: {error}"))?;
-    let continuation_app = app.clone();
-    let continuation_project_id = project_id.clone();
-    thread::Builder::new()
-        .name(format!("relintor-verification-{}", continuation_project_id))
-        .spawn(move || {
-            if let Err(error) = automatic_verification_closure(
-                &continuation_app,
-                &continuation_project_id,
-            ) {
-                eprintln!(
-                    "Relintor post-decision verification closure stopped: {error}"
-                );
-                notify_user(
+    with_verification_mutation_lock(|| {
+        let (context, report, _, _) = evaluate_p8(&app, &project_id, false)?;
+        let _prompt = human_decision_prompts(&context, &report)
+            .into_iter()
+            .find(|prompt| prompt.requirement_id == requirement_id)
+            .ok_or_else(|| {
+                "This decision is not currently requested by the sealed verification authority."
+                    .to_string()
+            })?;
+        ExplicitUserDecisionRecorder
+            .record(
+                &context.authority,
+                &context.current,
+                &context.store,
+                &context.p7_execution,
+                ExplicitUserDecisionInput {
+                    requirement_id: &requirement_id,
+                    approved,
+                    notes: &notes,
+                },
+            )
+            .map_err(|error| format!("record explicit user decision: {error}"))?;
+        let continuation_app = app.clone();
+        let continuation_project_id = project_id.clone();
+        thread::Builder::new()
+            .name(format!("relintor-verification-{}", continuation_project_id))
+            .spawn(move || {
+                if let Err(error) = automatic_verification_closure(
                     &continuation_app,
-                    "Relintor needs your attention",
-                    "Your decision was saved. Verification could not continue automatically; review the preserved mission before retrying.",
-                );
-            }
-        })
-        .map_err(|error| format!("launch post-decision verification closure: {error}"))?;
-    verification_status(app, project_id)
+                    &continuation_project_id,
+                ) {
+                    eprintln!(
+                        "Relintor post-decision verification closure stopped: {error}"
+                    );
+                    notify_user(
+                        &continuation_app,
+                        "Relintor needs your attention",
+                        "Your decision was saved. Verification could not continue automatically; review the preserved mission before retrying.",
+                    );
+                }
+            })
+            .map_err(|error| format!("launch post-decision verification closure: {error}"))?;
+        verification_status(app, project_id)
+    })
 }
 
 #[tauri::command]
