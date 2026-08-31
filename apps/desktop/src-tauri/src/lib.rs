@@ -4765,16 +4765,7 @@ fn load_execution_run(
             if ledger.run_id != recovery.run_id {
                 return Err("P7 ledger and P9 checkpoint belong to different runs".into());
             }
-            let recovery_is_newer = recovery.events.len() > ledger.events.len()
-                || matches!(
-                    recovery.state,
-                    relintor_execution::ExecutionRunState::StoppedIncomplete
-                        | relintor_execution::ExecutionRunState::RevalidationRequired
-                ) && !matches!(
-                    ledger.state,
-                    relintor_execution::ExecutionRunState::StoppedIncomplete
-                        | relintor_execution::ExecutionRunState::RevalidationRequired
-                );
+            let recovery_is_newer = recovery.events.len() > ledger.events.len();
             if recovery_is_newer {
                 recovery
             } else {
@@ -6062,13 +6053,13 @@ fn execution_continue_inner(
                     && record.mission_id == expected.mission_id
                     && record.mission_revision == expected.mission_revision
                     && record.p7_run_id == expected.p7_run_id
-                    && matches!(
+                    && (matches!(
                         record.disposition,
                         RecoveryDisposition::SafeToResume
                             | RecoveryDisposition::SafeToResumeAfterProcessReconciliation
                             | RecoveryDisposition::PreExecutionRetryAuthorized
                             | RecoveryDisposition::StoppedIncomplete
-                    )
+                    ) || record.decision == "MANUAL_RETRY_AUTHORIZED")
                     && revalidation_record_is_current(&record, latest_checkpoint.as_ref())
             })
         } else {
@@ -6182,7 +6173,8 @@ fn execution_revalidate_inner(
                 && record.mission_revision == expected.mission_revision
                 && record.p7_run_id == expected.p7_run_id
                 && record.target == run.current_recovery_attempt()
-                && record.disposition == RecoveryDisposition::PreExecutionRetryAuthorized
+                && (record.disposition == RecoveryDisposition::PreExecutionRetryAuthorized
+                    || record.decision == "MANUAL_RETRY_AUTHORIZED")
                 && revalidation_record_is_current(&record, latest_checkpoint.as_ref())
         });
         if retry_already_authorized {

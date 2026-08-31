@@ -1293,7 +1293,7 @@ impl ExecutionRun {
         action: &ActionRequest,
         now_ms: u64,
     ) -> Result<(), ExecutionError> {
-        let (lease_task_id, tool_call_budget, wall_clock_budget, retry_budget, scope) = {
+        let (lease_task_id, tool_call_budget, wall_clock_budget, _retry_budget, scope) = {
             let lease = self
                 .leases
                 .iter()
@@ -1311,11 +1311,18 @@ impl ExecutionRun {
         if lease_task_id != task_id {
             return Err(ExecutionError::LeaseBindingMismatch);
         }
-        let task = self
-            .tasks
-            .get(task_id)
-            .ok_or_else(|| ExecutionError::UnknownTask(task_id.into()))?;
-        if action.mutable && task.state != ExecutionTaskState::Running {
+        let (task_state, cost_limit, max_allowed_attempts) = {
+            let task = self
+                .tasks
+                .get(task_id)
+                .ok_or_else(|| ExecutionError::UnknownTask(task_id.into()))?;
+            (
+                task.state,
+                task.usage_budget.cost_micros,
+                task.retry_policy.max_attempts.max(task.usage_budget.retry_attempts),
+            )
+        };
+        if action.mutable && task_state != ExecutionTaskState::Running {
             return Err(ExecutionError::TaskNotRunning(task_id.into()));
         }
         if action.mutable && action.paths.is_empty() {
@@ -1354,11 +1361,7 @@ impl ExecutionRun {
         }
         if action.mutable {
             let used = self.task_usage(task_id)?;
-            if let Some(limit) = self
-                .tasks
-                .get(task_id)
-                .and_then(|task| task.usage_budget.cost_micros)
-            {
+            if let Some(limit) = cost_limit {
                 let cost = used
                     .estimated_cost_micros
                     .unwrap_or_default()
@@ -1372,7 +1375,7 @@ impl ExecutionRun {
             if attempt.usage.tool_calls >= tool_call_budget
                 || attempt.usage.execution_steps >= packet.step_budget
                 || attempt.usage.wall_time_ms >= wall_clock_budget
-                || attempt.usage.attempt_count > retry_budget + 1
+                || attempt.usage.attempt_count > max_allowed_attempts.saturating_add(1)
             {
                 self.watchdog_state = WatchdogState::BudgetExhausted;
                 return Err(ExecutionError::BudgetExhausted);
@@ -2476,6 +2479,8 @@ impl ExecutionRun {
             })?;
             if let Some(task) = self.tasks.get_mut(&task_id) {
                 task.state = ExecutionTaskState::WaitingRetry;
+                task.usage_budget.retry_attempts = task.attempt_number.saturating_add(1);
+                task.retry_policy.max_attempts = task.attempt_number.saturating_add(1);
             }
             self.emit(
                 now_ms,
@@ -2571,6 +2576,8 @@ impl ExecutionRun {
             ));
         }
         task.state = ExecutionTaskState::WaitingRetry;
+        task.usage_budget.retry_attempts = task.attempt_number.saturating_add(1);
+        task.retry_policy.max_attempts = task.attempt_number.saturating_add(1);
         self.safe_boundary = None;
         self.last_error = None;
         self.watchdog_state = WatchdogState::Healthy;

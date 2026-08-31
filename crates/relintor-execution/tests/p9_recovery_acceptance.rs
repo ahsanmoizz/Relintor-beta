@@ -1325,3 +1325,129 @@ fn process_restart_harness_detects_interrupted_mid_edit() {
         .iter()
         .any(|path| path == "mid-edit.txt"));
 }
+
+#[test]
+fn manual_recovery_retry_authorizes_fresh_attempt_and_passes_action_authorization() {
+    let path = root("manual-recovery-retry-allowance");
+    let mut run = empty_run(&path);
+    run.tasks.insert(
+        "task-recovery-test".into(),
+        ExecutionTask {
+            task_id: "task-recovery-test".into(),
+            objective: "test objective".into(),
+            requirement_ids: vec!["req-1".into()],
+            dependency_ids: Vec::new(),
+            priority: RequirementPriority::P1,
+            state: ExecutionTaskState::Pending,
+            scope: LeaseScope {
+                workspace: path.clone(),
+                file_scopes: vec![path.display().to_string()],
+                directory_scopes: vec![path.display().to_string()],
+                shared_resources: Vec::new(),
+                package_lockfiles: Vec::new(),
+                generated_files: Vec::new(),
+                allowed_tools: ["antigravity".into()].into_iter().collect(),
+                external_authority: Default::default(),
+                scope_known: true,
+            },
+            usage_budget: UsageBudget {
+                wall_clock_ms: 1_500_000,
+                execution_steps: 100,
+                tool_calls: 50,
+                retry_attempts: 2,
+                cost_micros: None,
+            },
+            retry_policy: RetryPolicy {
+                max_attempts: 2,
+                retryable: [
+                    relintor_execution::FailureClass::Transient,
+                    relintor_execution::FailureClass::ExternalUnavailable,
+                    relintor_execution::FailureClass::ProcessFailure,
+                ]
+                .into_iter()
+                .collect(),
+                backoff_ms: 250,
+            },
+            evidence_obligations: Vec::new(),
+            attempt_number: 0,
+        },
+    );
+
+    // Attempt 1: start and mark stopped
+    let packet1 = run.start_task("task-recovery-test", 10).expect("start 1");
+    if let Some(attempt) = run.attempts.last_mut() {
+        attempt.execution_boundary =
+            relintor_execution::AttemptExecutionBoundary::ExternalProcessStarted;
+        attempt.state = TaskAttemptState::SafeBoundaryStopped;
+        attempt.ended_at_ms = Some(20);
+        attempt.failure_class = Some(relintor_execution::FailureClass::ProcessFailure);
+    }
+    for lease in &mut run.leases {
+        if lease.lease_id == packet1.lease_id {
+            lease.status = LeaseStatus::Consumed;
+        }
+    }
+    run.tasks.get_mut("task-recovery-test").unwrap().state = ExecutionTaskState::WaitingRetry;
+    run.state = ExecutionRunState::Ready;
+
+    // Attempt 2: start and mark stopped with external process started
+    let packet2 = run.start_task("task-recovery-test", 30).expect("start 2");
+    let lease2 = packet2.lease_id.clone();
+    let attempt2_id = run.attempts.last().unwrap().attempt_id.clone();
+    if let Some(attempt) = run.attempts.last_mut() {
+        attempt.execution_boundary =
+            relintor_execution::AttemptExecutionBoundary::ExternalProcessStarted;
+        attempt.state = TaskAttemptState::SafeBoundaryStopped;
+        attempt.ended_at_ms = Some(40);
+        attempt.failure_class = Some(relintor_execution::FailureClass::ProcessFailure);
+    }
+    for lease in &mut run.leases {
+        if lease.lease_id == packet2.lease_id {
+            lease.status = LeaseStatus::Consumed;
+        }
+    }
+
+    // Now set run state to RevalidationRequired
+    run.state = ExecutionRunState::RevalidationRequired;
+    assert_eq!(run.tasks["task-recovery-test"].attempt_number, 2);
+
+    let target = run
+        .current_recovery_attempt()
+        .expect("recovery attempt target");
+    assert_eq!(target.attempt_id, attempt2_id);
+    assert_eq!(target.lease_id, lease2);
+
+    run.authorize_manual_recovery_retry(&target, 50)
+        .expect("authorize manual recovery retry");
+
+    assert_eq!(run.state, ExecutionRunState::Ready);
+    assert_eq!(
+        run.tasks["task-recovery-test"].state,
+        ExecutionTaskState::WaitingRetry
+    );
+    assert!(run.tasks["task-recovery-test"].usage_budget.retry_attempts >= 3);
+    assert!(run.tasks["task-recovery-test"].retry_policy.max_attempts >= 3);
+
+    // Attempt 3: fresh attempt must start and authorize action without BudgetExhausted
+    let packet3 = run.start_task("task-recovery-test", 60).expect("start 3");
+    let action = relintor_execution::ActionRequest {
+        tool: "antigravity".into(),
+        operation: "execute_task".into(),
+        arguments: vec!["task-recovery-test".into()],
+        working_scope: path.display().to_string(),
+        environment_identity: "test".into(),
+        mutable: true,
+        paths: vec![path.display().to_string()],
+        external_authority: None,
+    };
+
+    run.authorize_action(
+        "task-recovery-test",
+        &packet3.lease_id,
+        &packet3,
+        &action,
+        65,
+    )
+    .expect("authorize action for attempt 3");
+}
+
