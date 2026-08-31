@@ -4802,7 +4802,10 @@ fn load_execution_run(
         )?;
     }
     if run.all_tasks_finished() {
-        run.state = relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification;
+        if run.state != relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification {
+            run.state = relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification;
+            let _ = run.persist_snapshot(&ledger_path);
+        }
     }
     Ok((run, ledger_path, revision, handoff))
 }
@@ -5894,7 +5897,12 @@ fn execution_step_inner(app: AppHandle, project_id: String) -> Result<ExecutionS
     let cli_path = configured_antigravity_cli(&app).ok_or_else(|| {
         "ANTIGRAVITY_SETUP_REQUIRED: the verified Antigravity CLI path is unavailable".to_string()
     })?;
-    let (run, ledger_path, revision, _) = load_execution_run(&app, &project_id)?;
+    let (mut run, ledger_path, revision, _) = load_execution_run(&app, &project_id)?;
+    if run.all_tasks_finished()
+        || run.state == relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
+    {
+        return p9_status_view(&app, &project_id, &ledger_path, &run, &revision);
+    }
     if run.state == relintor_execution::ExecutionRunState::Running {
         return Err("EXECUTION_RUNNING: this mission already has a running task attempt".into());
     }
@@ -6127,6 +6135,14 @@ fn execution_revalidate_inner(
     let project_id = canonical_project_id(&project_id)?;
     require_execution_not_active(&project_id)?;
     let (mut run, ledger_path, revision, handoff) = load_execution_run(&app, &project_id)?;
+    if run.all_tasks_finished()
+        || run.state == relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
+    {
+        run.state = relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification;
+        run.persist_snapshot(&ledger_path)
+            .map_err(|error| error.to_string())?;
+        return p9_status_view(&app, &project_id, &ledger_path, &run, &revision);
+    }
     let now = execution_now_ms();
     run.validate_authority_identity(&revision, &handoff, now)
         .map_err(|error| error.to_string())?;

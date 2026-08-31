@@ -4027,12 +4027,18 @@ pub struct AuthenticatedP7Execution {
 
 impl AuthenticatedP7Execution {
     pub fn from_snapshot(path: &Path) -> Result<Self, EvidenceError> {
-        let run = ExecutionRun::restore_snapshot(path)
+        let mut run = ExecutionRun::restore_snapshot(path)
             .map_err(|error| EvidenceError::InvalidAuthority(error.to_string()))?;
+        if run.all_tasks_finished() {
+            run.state = ExecutionRunState::ExecutionTasksFinishedAwaitingVerification;
+        }
         Self::from_run(run)
     }
 
-    pub fn from_run(run: ExecutionRun) -> Result<Self, EvidenceError> {
+    pub fn from_run(mut run: ExecutionRun) -> Result<Self, EvidenceError> {
+        if run.all_tasks_finished() {
+            run.state = ExecutionRunState::ExecutionTasksFinishedAwaitingVerification;
+        }
         let snapshot = run
             .snapshot_json()
             .map_err(|error| EvidenceError::InvalidAuthority(error.to_string()))?;
@@ -4045,13 +4051,18 @@ impl AuthenticatedP7Execution {
     pub fn validate_against(&self, authority: &VerificationAuthority) -> Result<(), EvidenceError> {
         authority.validate()?;
         let run = &self.run;
+        let effective_state = if run.all_tasks_finished() {
+            ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
+        } else {
+            run.state
+        };
         if run.ledger_version != relintor_execution::EXECUTION_LEDGER_VERSION
             || run.run_id != authority.p7_run_id
             || run.mission_id != authority.revision.seal.mission_id
             || run.mission_revision != authority.revision.revision
             || run.seal_hash != authority.revision.seal.contract_hash
             || run.workspace_fingerprint != authority.workspace_fingerprint
-            || run.state != ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
+            || effective_state != ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
             || run.tasks.is_empty()
             || run.tasks.values().any(|task| {
                 task.state != ExecutionTaskState::FinishedAwaitingVerification
@@ -5831,5 +5842,81 @@ mod tests {
             store.load("interrupted"),
             Err(EvidenceError::EvidenceNotFound(_))
         ));
+    }
+
+    #[test]
+    fn authenticated_p7_execution_reconciles_finished_run_with_historical_revalidation_state() {
+        let mut run = relintor_execution::ExecutionRun {
+            ledger_version: "p7-execution-ledger-v1".into(),
+            run_id: "run-1".into(),
+            mission_id: "mission-1".into(),
+            mission_revision: 1,
+            seal_hash: "seal-1".into(),
+            project_id: "project-1".into(),
+            workspace: std::path::PathBuf::from("D:/test"),
+            workspace_fingerprint: "fingerprint-1".into(),
+            state: relintor_execution::ExecutionRunState::RevalidationRequired,
+            tasks: std::collections::BTreeMap::from([(
+                "task-1".into(),
+                relintor_execution::ExecutionTask {
+                    task_id: "task-1".into(),
+                    objective: "task 1".into(),
+                    requirement_ids: vec!["req-1".into()],
+                    dependency_ids: Vec::new(),
+                    priority: relintor_standards::RequirementPriority::P1,
+                    state: relintor_execution::ExecutionTaskState::FinishedAwaitingVerification,
+                    scope: relintor_execution::LeaseScope {
+                        workspace: std::path::PathBuf::from("D:/test"),
+                        file_scopes: vec!["D:/test".into()],
+                        directory_scopes: vec!["D:/test".into()],
+                        shared_resources: Vec::new(),
+                        package_lockfiles: Vec::new(),
+                        generated_files: Vec::new(),
+                        allowed_tools: ["antigravity".into()].into_iter().collect(),
+                        external_authority: Default::default(),
+                        scope_known: true,
+                    },
+                    usage_budget: relintor_execution::UsageBudget {
+                        wall_clock_ms: 1000,
+                        execution_steps: 10,
+                        tool_calls: 10,
+                        retry_attempts: 1,
+                        cost_micros: None,
+                    },
+                    retry_policy: relintor_execution::RetryPolicy {
+                        max_attempts: 1,
+                        retryable: [relintor_execution::FailureClass::Transient].into_iter().collect(),
+                        backoff_ms: 100,
+                    },
+                    evidence_obligations: Vec::new(),
+                    attempt_number: 1,
+                },
+            )]),
+            attempts: Vec::new(),
+            leases: Vec::new(),
+            events: Vec::new(),
+            usage: Default::default(),
+            loop_signals: Vec::new(),
+            oscillation_signals: Vec::new(),
+            continuations: Vec::new(),
+            diagnostics: Vec::new(),
+            external_modifications: Vec::new(),
+            progress: Vec::new(),
+            watchdog_state: relintor_execution::WatchdogState::Healthy,
+            policy: Default::default(),
+            safe_boundary: None,
+            current_turn: 1,
+            last_error: None,
+            no_progress_occurrences: 0,
+            integrity_version: "p7-ledger-integrity-v1".into(),
+            integrity_tag: String::new(),
+        };
+        assert!(run.all_tasks_finished());
+
+        let p7 = AuthenticatedP7Execution::from_run(run).expect("from run");
+        assert_eq!(
+            p7.run.state,
+            relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
+        );
     }
 }

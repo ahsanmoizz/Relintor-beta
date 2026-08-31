@@ -1542,10 +1542,15 @@ fn finished_mission_with_historical_recovery_attempts_reconciles_cleanly_and_dis
         }
     }
     run.tasks.get_mut("task-1").unwrap().state = ExecutionTaskState::FinishedAwaitingVerification;
-    run.state = ExecutionRunState::ExecutionTasksFinishedAwaitingVerification;
-
     assert!(run.all_tasks_finished());
     assert_eq!(run.current_recovery_attempt(), None);
     assert!(!run.recovery_status_requires_attention());
+
+    let initial_event_count = run.events.len();
+    for i in 0..10 {
+        run.record_recovery_decision(None, "RevalidationRequired", 70 + i)
+            .expect("record recovery decision on finished run");
+    }
+    assert_eq!(run.events.len(), initial_event_count);
 }
 

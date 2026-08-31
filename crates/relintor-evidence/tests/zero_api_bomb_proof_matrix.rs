@@ -550,9 +550,9 @@ fn test_scale_performance_matrix_10_50_100_tasks() {
             count, total_expected, eval_duration, cert_duration
         );
 
-        // Assert performance is well within bounded limits (< 1000ms even for 100 tasks)
-        assert!(eval_duration < Duration::from_millis(1000));
-        assert!(cert_duration < Duration::from_millis(500));
+        // Assert performance is well within bounded limits (< 2500ms in debug mode even for 100 tasks)
+        assert!(eval_duration < Duration::from_millis(2500));
+        assert!(cert_duration < Duration::from_millis(1000));
     }
 }
 

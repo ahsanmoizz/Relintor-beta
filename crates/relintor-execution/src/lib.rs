@@ -3463,6 +3463,11 @@ impl ExecutionRun {
         disposition: &str,
         now_ms: u64,
     ) -> Result<(), ExecutionError> {
+        if self.all_tasks_finished()
+            || self.state == ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
+        {
+            return Ok(());
+        }
         let detail = format!(
             "recovery decision {disposition} for {}",
             target

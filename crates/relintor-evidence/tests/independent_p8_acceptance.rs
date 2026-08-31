@@ -2148,3 +2148,4 @@ fn idempotent_repeated_verification_evaluation_produces_identical_reports() {
     assert_eq!(first.requirement_statuses.len(), second.requirement_statuses.len());
     drop(root);
 }
+
