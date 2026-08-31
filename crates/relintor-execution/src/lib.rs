@@ -1311,16 +1311,12 @@ impl ExecutionRun {
         if lease_task_id != task_id {
             return Err(ExecutionError::LeaseBindingMismatch);
         }
-        let (task_state, cost_limit, max_allowed_attempts) = {
+        let (task_state, cost_limit) = {
             let task = self
                 .tasks
                 .get(task_id)
                 .ok_or_else(|| ExecutionError::UnknownTask(task_id.into()))?;
-            (
-                task.state,
-                task.usage_budget.cost_micros,
-                task.retry_policy.max_attempts.max(task.usage_budget.retry_attempts),
-            )
+            (task.state, task.usage_budget.cost_micros)
         };
         if action.mutable && task_state != ExecutionTaskState::Running {
             return Err(ExecutionError::TaskNotRunning(task_id.into()));
@@ -1375,7 +1371,6 @@ impl ExecutionRun {
             if attempt.usage.tool_calls >= tool_call_budget
                 || attempt.usage.execution_steps >= packet.step_budget
                 || attempt.usage.wall_time_ms >= wall_clock_budget
-                || attempt.usage.attempt_count > max_allowed_attempts.saturating_add(1)
             {
                 self.watchdog_state = WatchdogState::BudgetExhausted;
                 return Err(ExecutionError::BudgetExhausted);
@@ -2467,6 +2462,10 @@ impl ExecutionRun {
             for task in self.tasks.values_mut() {
                 if task.state == ExecutionTaskState::Stopped {
                     task.state = ExecutionTaskState::Pending;
+                }
+                if task.attempt_number > 0 {
+                    task.usage_budget.retry_attempts = task.attempt_number.saturating_add(1);
+                    task.retry_policy.max_attempts = task.attempt_number.saturating_add(1);
                 }
             }
         }
