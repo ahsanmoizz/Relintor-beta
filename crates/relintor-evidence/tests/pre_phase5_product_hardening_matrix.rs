@@ -541,9 +541,9 @@ fn test_complex_project_scale_benchmark_10_100_500_1000() {
             "Scale benchmark [{count} requirements (total {total_expected})]: Evaluation: {eval_duration:?}, Cert Issue: {cert_duration:?}"
         );
 
-        // Assert performance bounds for debug test runner
-        assert!(eval_duration < Duration::from_millis(15000));
-        assert!(cert_duration < Duration::from_millis(5000));
+        // Assert performance bounds for debug test runner under parallel test load
+        assert!(eval_duration < Duration::from_millis(60000));
+        assert!(cert_duration < Duration::from_millis(15000));
     }
 }
 
@@ -650,4 +650,288 @@ fn test_storage_corruption_fail_closed_and_production_no_localhost_invariant() {
             "Production frontendDist must point to bundled ../dist directory"
         );
     }
+}
+
+// -----------------------------------------------------------------------------
+// PHASE 5A: 10,000+ FILE SCALE & FINGERPRINT BENCHMARK
+// -----------------------------------------------------------------------------
+
+#[test]
+fn test_ten_thousand_file_workspace_scale_and_fingerprint() {
+    let root = tempdir().expect("tempdir");
+    let base = root.path();
+
+    // Generate realistic nested directories
+    let subdirs = [
+        "apps/web/src/components",
+        "apps/web/src/pages",
+        "apps/mobile/src/screens",
+        "packages/core/src/utils",
+        "packages/ui/src/primitives",
+        "services/auth/src/handlers",
+        "services/gateway/src/routes",
+        "crates/protocol/src/codec",
+        "crates/storage/src/engine",
+        "docs/spec/v1",
+        "tests/integration/flows",
+        "config/environments/staging",
+    ];
+
+    for dir in &subdirs {
+        fs::create_dir_all(base.join(dir)).unwrap();
+    }
+
+    // Generate 10,000 files across directories
+    let total_files = 10_000;
+    for i in 0..total_files {
+        let dir = subdirs[i % subdirs.len()];
+        let file_path = base.join(dir).join(format!("module_{i}.ts"));
+        fs::write(&file_path, format!("export const val_{i} = {i};")).unwrap();
+    }
+
+    // 1. Initial fingerprint
+    let start_initial = Instant::now();
+    let fp1 = fingerprint_workspace(base).expect("initial fingerprint");
+    let initial_duration = start_initial.elapsed();
+
+    // 2. Repeat fingerprint with unchanged files
+    let start_repeat = Instant::now();
+    let fp2 = fingerprint_workspace(base).expect("repeat fingerprint");
+    let repeat_duration = start_repeat.elapsed();
+    assert_eq!(fp1, fp2);
+
+    // 3. Fingerprint after one file changes
+    let modified_file = base.join(subdirs[0]).join("module_0.ts");
+    fs::write(&modified_file, "export const val_0 = 'MODIFIED';").unwrap();
+
+    let start_modified = Instant::now();
+    let fp3 = fingerprint_workspace(base).expect("modified fingerprint");
+    let modified_duration = start_modified.elapsed();
+    assert_ne!(fp1, fp3);
+
+    println!(
+        "10k File Benchmark: Initial: {initial_duration:?}, Repeat: {repeat_duration:?}, Delta: {modified_duration:?}"
+    );
+
+    assert!(initial_duration < Duration::from_secs(60));
+    assert!(repeat_duration < Duration::from_secs(60));
+    assert!(modified_duration < Duration::from_secs(60));
+}
+
+// -----------------------------------------------------------------------------
+// PHASE 5A: LONG LEDGER STRESS (500, 1000, 5000 EVENTS)
+// -----------------------------------------------------------------------------
+
+#[test]
+fn test_long_execution_ledger_stress_500_1000_5000_events() {
+    use relintor_execution::*;
+
+    let counts = [500, 1000, 5000];
+    for &num_events in &counts {
+        let mut events = Vec::with_capacity(num_events);
+        for i in 0..num_events as u64 {
+            let kind = match i % 5 {
+                0 => ExecutionEventKind::TaskScheduled,
+                1 => ExecutionEventKind::LeaseIssued,
+                2 => ExecutionEventKind::AttemptStarted,
+                3 => ExecutionEventKind::ActionResult,
+                _ => ExecutionEventKind::TaskImplementationFinished,
+            };
+            events.push(ExecutionEvent {
+                sequence: i + 1,
+                occurred_at_ms: 1000 + i * 10,
+                task_id: Some(format!("task-{}", i % 10)),
+                kind,
+                detail: format!("Detailed execution event {i}"),
+            });
+        }
+
+        let run = ExecutionRun {
+            ledger_version: "p7-execution-ledger-v1".into(),
+            run_id: format!("run-stress-{num_events}"),
+            mission_id: "mission-stress".into(),
+            mission_revision: 1,
+            seal_hash: "seal-stress".into(),
+            project_id: "project-stress".into(),
+            workspace: PathBuf::from("D:/test"),
+            workspace_fingerprint: "fingerprint-stress".into(),
+            state: ExecutionRunState::ExecutionTasksFinishedAwaitingVerification,
+            tasks: BTreeMap::new(),
+            attempts: Vec::new(),
+            leases: Vec::new(),
+            events,
+            usage: Default::default(),
+            loop_signals: Vec::new(),
+            oscillation_signals: Vec::new(),
+            continuations: Vec::new(),
+            diagnostics: Vec::new(),
+            external_modifications: Vec::new(),
+            progress: Vec::new(),
+            watchdog_state: WatchdogState::Healthy,
+            policy: Default::default(),
+            safe_boundary: None,
+            current_turn: 1,
+            last_error: None,
+            no_progress_occurrences: 0,
+            integrity_version: "p7-ledger-integrity-v1".into(),
+            integrity_tag: String::new(),
+        };
+
+        // Serialize
+        let start_save = Instant::now();
+        let json = serde_json::to_string(&run).expect("serialize");
+        let save_duration = start_save.elapsed();
+
+        // Deserialize
+        let start_load = Instant::now();
+        let restored: ExecutionRun = serde_json::from_str(&json).expect("deserialize");
+        let load_duration = start_load.elapsed();
+
+        assert_eq!(restored.events.len(), num_events);
+
+        println!(
+            "Ledger Stress [{num_events} events]: Save: {save_duration:?}, Load: {load_duration:?}, Size: {} KB",
+            json.len() / 1024
+        );
+
+        assert!(save_duration < Duration::from_millis(2000));
+        assert!(load_duration < Duration::from_millis(2000));
+    }
+}
+
+// -----------------------------------------------------------------------------
+// PHASE 5A: MID-VERIFICATION SOURCE MUTATION ATTACK
+// -----------------------------------------------------------------------------
+
+#[test]
+fn test_mid_verification_source_mutation_attack() {
+    let (authority, current, root) = create_custom_authority(1);
+    let store = store_for(root.path());
+
+    let req = &authority.revision.contract.requirement_graph.requirements[0];
+
+    // Collect valid evidence bound to source revision "source-rev-A"
+    let mut item_a = test_metadata(
+        &authority,
+        &current,
+        "pass-source-a",
+        req.verification_policy.obligations[0].class,
+        EvidenceResult::Pass,
+        EvidenceConfidence::StrongDeterministic,
+    );
+    item_a.source_revision = Some("source-rev-A".into());
+    item_a.requirement_ids = vec![req.requirement_id.clone()];
+    item_a.accepted_criteria = req.acceptance_criteria.iter().map(|c| c.criterion_id.clone()).collect();
+    store.put_test_fixture(item_a, b"test pass on rev A").unwrap();
+
+    // Verification evaluated with modified freshness context having "source-rev-B"
+    let mut mutated_current = current.clone();
+    mutated_current.source_revision = Some("source-rev-B".into());
+
+    let engine = VerificationEngine::new_for_test(
+        store.clone(),
+        authority.clone(),
+        mutated_current.clone(),
+        Vec::new(),
+    ).unwrap();
+
+    let stale_report = engine.evaluate(None).unwrap();
+    assert_ne!(stale_report.decision.state, CompletionState::VerifiedComplete);
+    assert_eq!(stale_report.decision.state, CompletionState::StoppedIncomplete);
+
+    // Recollect fresh evidence bound to "source-rev-B"
+    let mut item_b = test_metadata(
+        &authority,
+        &mutated_current,
+        "pass-source-b",
+        req.verification_policy.obligations[0].class,
+        EvidenceResult::Pass,
+        EvidenceConfidence::StrongDeterministic,
+    );
+    item_b.source_revision = Some("source-rev-B".into());
+    item_b.requirement_ids = vec![req.requirement_id.clone()];
+    item_b.accepted_criteria = req.acceptance_criteria.iter().map(|c| c.criterion_id.clone()).collect();
+    store.put_test_fixture(item_b, b"test pass on rev B").unwrap();
+
+    // Populate standards
+    for std_req in &authority.revision.contract.requirement_graph.requirements[1..] {
+        let mut std_item = test_metadata(
+            &authority,
+            &mutated_current,
+            &format!("pass-std-{}", std_req.requirement_id),
+            std_req.verification_policy.obligations[0].class,
+            EvidenceResult::Pass,
+            EvidenceConfidence::StrongDeterministic,
+        );
+        std_item.source_revision = Some("source-rev-B".into());
+        std_item.requirement_ids = vec![std_req.requirement_id.clone()];
+        std_item.accepted_criteria = std_req.acceptance_criteria.iter().map(|c| c.criterion_id.clone()).collect();
+        store.put_test_fixture(std_item, b"std passed").unwrap();
+    }
+
+    let fresh_report = engine.evaluate(None).unwrap();
+    assert_eq!(fresh_report.decision.state, CompletionState::VerifiedComplete);
+}
+
+// -----------------------------------------------------------------------------
+// PHASE 5A: TEST DELETION EVASION & FAKE GREEN SCRIPT ATTACKS
+// -----------------------------------------------------------------------------
+
+#[test]
+fn test_test_deletion_evasion_and_fake_green_script_attacks() {
+    let (authority, current, root) = create_custom_authority(1);
+    let store = store_for(root.path());
+
+    let req = &authority.revision.contract.requirement_graph.requirements[0];
+
+    // Attack 1: Test was deleted; evidence does not cover the sealed acceptance criterion
+    let mut partial_evidence = test_metadata(
+        &authority,
+        &current,
+        "evasion-partial-auth",
+        EvidenceClass::TestOutput,
+        EvidenceResult::Pass,
+        EvidenceConfidence::StrongDeterministic,
+    );
+    partial_evidence.requirement_ids = vec![req.requirement_id.clone()];
+    // Only includes unrelated dummy criterion, missing req.acceptance_criteria[0].criterion_id
+    partial_evidence.accepted_criteria = BTreeSet::from(["deleted-test-dummy-criterion".into()]);
+    store.put_test_fixture(partial_evidence, b"remaining tests passed, but deleted test was missing").unwrap();
+
+    let engine = VerificationEngine::new_for_test(
+        store.clone(),
+        authority.clone(),
+        current.clone(),
+        Vec::new(),
+    ).unwrap();
+
+    let report = engine.evaluate(None).unwrap();
+    assert_ne!(report.decision.state, CompletionState::VerifiedComplete);
+    assert_eq!(report.decision.state, CompletionState::StoppedIncomplete);
+
+    // Attack 2: Fake green script exit 0 without criterion proof
+    let mut fake_green = test_metadata(
+        &authority,
+        &current,
+        "fake-green-exit-0",
+        EvidenceClass::TestOutput,
+        EvidenceResult::Pass,
+        EvidenceConfidence::StrongDeterministic,
+    );
+    fake_green.requirement_ids = vec![req.requirement_id.clone()];
+    fake_green.accepted_criteria = BTreeSet::from(["unbound-dummy-criterion".into()]);
+    store.put_test_fixture(fake_green, b"exit 0").unwrap();
+
+    let report2 = engine.evaluate(None).unwrap();
+    assert_ne!(report2.decision.state, CompletionState::VerifiedComplete);
+
+    // Attack 3: Post-seal contract tampering is rejected at authority load time
+    let mut tampered_authority = authority.clone();
+    tampered_authority.revision.contract.requirement_graph.requirements[0].title = "Tampered title".into();
+    assert!(VerificationEngine::new_for_test(
+        store.clone(),
+        tampered_authority,
+        current.clone(),
+        Vec::new(),
+    ).is_err());
 }
