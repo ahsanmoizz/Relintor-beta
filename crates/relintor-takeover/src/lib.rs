@@ -17,8 +17,8 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-pub const TAKEOVER_SCANNER_VERSION: &str = "p5-takeover-scanner-1";
-pub const TAKEOVER_PROTOCOL_VERSION: &str = "p5-takeover-1";
+pub const TAKEOVER_SCANNER_VERSION: &str = "p5-takeover-scanner-2";
+pub const TAKEOVER_PROTOCOL_VERSION: &str = "p5-takeover-2";
 
 pub use relintor_investigator::Provenance as InvestigatorProvenance;
 
@@ -623,7 +623,14 @@ impl TakeoverScanner {
             "Canonical read-only takeover root.",
         );
         let takeover = ProjectTakeover {
-            id: stable_id("takeover", &[&canonical_root.to_string_lossy()]),
+            id: stable_id(
+                "takeover",
+                &[
+                    &canonical_root.to_string_lossy(),
+                    &fingerprint.value,
+                    TAKEOVER_SCANNER_VERSION,
+                ],
+            ),
             root: canonical_root.to_string_lossy().into_owned(),
             source: root_provenance.clone(),
             created_at: now_ms(),
@@ -3193,7 +3200,45 @@ fn persist_takeover_with_project(
     let transaction = connection
         .transaction()
         .map_err(|error| TakeoverError::Persistence(error.to_string()))?;
+    // 1. Delete previous findings, capabilities, recommendations, probes, inventory for this exact takeover_id
+    transaction.execute("DELETE FROM takeover_findings WHERE takeover_id = ?1", params![report.takeover.id])
+        .map_err(|error| TakeoverError::Persistence(error.to_string()))?;
+    transaction.execute("DELETE FROM takeover_capabilities WHERE takeover_id = ?1", params![report.takeover.id])
+        .map_err(|error| TakeoverError::Persistence(error.to_string()))?;
+    transaction.execute("DELETE FROM takeover_recommendations WHERE takeover_id = ?1", params![report.takeover.id])
+        .map_err(|error| TakeoverError::Persistence(error.to_string()))?;
+    transaction.execute("DELETE FROM takeover_runtime_probes WHERE takeover_id = ?1", params![report.takeover.id])
+        .map_err(|error| TakeoverError::Persistence(error.to_string()))?;
+    transaction.execute("DELETE FROM takeover_inventory WHERE snapshot_id = ?1", params![report.snapshot.id])
+        .map_err(|error| TakeoverError::Persistence(error.to_string()))?;
+    transaction.execute("DELETE FROM repository_snapshots WHERE id = ?1", params![report.snapshot.id])
+        .map_err(|error| TakeoverError::Persistence(error.to_string()))?;
+
     if let Some(project_id) = project_id {
+        // If an unsealed project is being re-scanned, purge any orphaned/superseded takeover findings from previous scans of this unsealed project
+        transaction.execute(
+            "DELETE FROM takeover_findings WHERE takeover_id IN (
+                SELECT id FROM project_takeovers WHERE project_id = ?1 AND id != ?2
+            )",
+            params![project_id, report.takeover.id],
+        ).map_err(|error| TakeoverError::Persistence(error.to_string()))?;
+        transaction.execute(
+            "DELETE FROM takeover_capabilities WHERE takeover_id IN (
+                SELECT id FROM project_takeovers WHERE project_id = ?1 AND id != ?2
+            )",
+            params![project_id, report.takeover.id],
+        ).map_err(|error| TakeoverError::Persistence(error.to_string()))?;
+        transaction.execute(
+            "DELETE FROM takeover_recommendations WHERE takeover_id IN (
+                SELECT id FROM project_takeovers WHERE project_id = ?1 AND id != ?2
+            )",
+            params![project_id, report.takeover.id],
+        ).map_err(|error| TakeoverError::Persistence(error.to_string()))?;
+        transaction.execute(
+            "DELETE FROM project_takeovers WHERE project_id = ?1 AND id != ?2",
+            params![project_id, report.takeover.id],
+        ).map_err(|error| TakeoverError::Persistence(error.to_string()))?;
+
         transaction.execute("INSERT INTO project_takeovers(id, project_id, root, fingerprint, scanner_version, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, root=excluded.root, fingerprint=excluded.fingerprint, scanner_version=excluded.scanner_version, created_at=excluded.created_at", params![report.takeover.id, project_id, report.takeover.root, report.fingerprint, report.takeover.scanner_version, report.takeover.created_at as i64]).map_err(|error| TakeoverError::Persistence(error.to_string()))?;
     } else {
         transaction.execute("INSERT INTO project_takeovers(id, root, fingerprint, scanner_version, created_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(id) DO UPDATE SET root=excluded.root, fingerprint=excluded.fingerprint, scanner_version=excluded.scanner_version, created_at=excluded.created_at", params![report.takeover.id, report.takeover.root, report.fingerprint, report.takeover.scanner_version, report.takeover.created_at as i64]).map_err(|error| TakeoverError::Persistence(error.to_string()))?;

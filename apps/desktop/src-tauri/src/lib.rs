@@ -2697,6 +2697,20 @@ fn takeover_scan(app: AppHandle, root: String) -> Result<TakeoverScanResult, Str
         Connection::open(&path).map_err(|error| format!("open project database: {error}"))?;
     connection
         .execute(
+            "DELETE FROM takeover_findings WHERE takeover_id IN (
+                SELECT id FROM project_takeovers WHERE root = ?1 AND id != ?2
+            )",
+            params![report.takeover.root.as_str(), report.takeover.id.as_str()],
+        )
+        .ok();
+    connection
+        .execute(
+            "DELETE FROM project_takeovers WHERE root = ?1 AND id != ?2",
+            params![report.takeover.root.as_str(), report.takeover.id.as_str()],
+        )
+        .ok();
+    connection
+        .execute(
             "INSERT INTO projects(id, name, root_path, created_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(id) DO UPDATE SET name=excluded.name, root_path=excluded.root_path",
             params![
@@ -6384,6 +6398,41 @@ fn seal_project_mission_at_path(
     if expected_review_digest != review_digest || review_digest != recomputed_review_digest {
         return Err("STALE_AUTHORITY_REVIEW: reviewed authority changed before sealing".into());
     }
+
+    // Seal-Time Lineage Guard: verify that every requirement originating from a takeover finding
+    // belongs to the current authoritative takeover snapshot.
+    if let Some((authoritative_takeover_id, _)) = connection
+        .query_row(
+            "SELECT id, fingerprint FROM project_takeovers WHERE project_id = ?1 ORDER BY created_at DESC LIMIT 1",
+            params![&project_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| format!("verify takeover lineage: {error}"))?
+    {
+        let mut valid_finding_ids = BTreeSet::new();
+        let mut stmt = connection
+            .prepare("SELECT id FROM takeover_findings WHERE takeover_id = ?1")
+            .map_err(|error| format!("query valid takeover findings: {error}"))?;
+        let rows = stmt
+            .query_map(params![&authoritative_takeover_id], |row| row.get::<_, String>(0))
+            .map_err(|error| format!("read valid takeover findings: {error}"))?;
+        for row in rows {
+            valid_finding_ids.insert(row.map_err(|e| e.to_string())?);
+        }
+
+        for req in &draft.requirement_graph.requirements {
+            if let RequirementSource::TakeoverFinding { reference } = &req.source {
+                let finding_id = reference.trim_start_matches("takeover://");
+                if !valid_finding_ids.contains(finding_id) {
+                    return Err(format!(
+                        "SEAL_DENIED_STALE_DERIVED_STATE: Requirement {} references non-authoritative or superseded takeover finding {}",
+                        req.requirement_id, reference
+                    ));
+                }
+            }
+        }
+    }
     let previous_revision: u64 = connection
         .query_row(
             "SELECT COALESCE(MAX(revision), 0) FROM mission_revisions WHERE mission_id = ?1",
@@ -7326,6 +7375,66 @@ mod tests {
         assert!(stale.contains("STALE_AUTHORITY_REVIEW"), "{stale}");
         seal_project_mission_at_path(&path, "stale-project", &review_b.review_digest)
             .expect("current review B seals");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn seal_denied_when_requirement_references_stale_takeover_finding() {
+        let path = test_path("stale-finding-seal");
+        migrate_database(&path).expect("migrate");
+        let connection = Connection::open(&path).expect("open");
+        let project_id = "takeover-stale-test";
+        connection
+            .execute(
+                "INSERT INTO projects(id, name, root_path, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![project_id, "Takeover Test", "D:/test-ws", 1000],
+            )
+            .expect("insert project");
+        // Insert an initial takeover snapshot with an old finding
+        connection
+            .execute(
+                "INSERT INTO project_takeovers(id, project_id, root, fingerprint, scanner_version, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params!["takeover-1", project_id, "D:/test-ws", "fp1", "v1", 1000],
+            )
+            .expect("insert takeover 1");
+        connection
+            .execute(
+                "INSERT INTO takeover_findings(id, takeover_id, finding_type, summary, severity, evidence)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params!["finding-old", "takeover-1", "hidden-route", "old finding", "medium", "{}"],
+            )
+            .expect("insert finding old");
+        drop(connection);
+
+        // Build review from takeover-1
+        let review = review_authority_at_path(&path, project_id, &reviewed_facts(&["backend"]))
+            .expect("review");
+
+        // Now a new scan occurs: takeover-2 is created with no findings, superseding takeover-1
+        let connection = Connection::open(&path).expect("open 2");
+        connection
+            .execute(
+                "INSERT INTO project_takeovers(id, project_id, root, fingerprint, scanner_version, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params!["takeover-2", project_id, "D:/test-ws", "fp2", "v2", 2000],
+            )
+            .expect("insert takeover 2");
+        connection
+            .execute(
+                "DELETE FROM takeover_findings WHERE takeover_id = 'takeover-1'",
+                [],
+            )
+            .expect("delete old findings");
+        drop(connection);
+
+        // Attempting to seal using the old review (which contained finding-old) must fail closed with SEAL_DENIED_STALE_DERIVED_STATE or STALE_AUTHORITY_REVIEW
+        let seal_err = seal_project_mission_at_path(&path, project_id, &review.review_digest)
+            .expect_err("seal must be denied when findings are superseded");
+        assert!(
+            seal_err.contains("STALE_AUTHORITY_REVIEW") || seal_err.contains("SEAL_DENIED_STALE_DERIVED_STATE"),
+            "Unexpected error: {seal_err}"
+        );
         let _ = fs::remove_file(path);
     }
 
