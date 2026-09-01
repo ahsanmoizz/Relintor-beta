@@ -33,9 +33,10 @@ pub const WINDOWS_CREATE_NO_WINDOW: u32 = 0;
 
 pub const PRODUCTION_PROCESS_TIMEOUT: Duration = Duration::from_secs(45 * 60);
 /// A healthy long-running executor may be quiet for a while (for example while
-/// compiling or reasoning). Five minutes remains a finite no-output safety
-/// boundary while avoiding the old 90-second false-stop behavior.
-pub const PRODUCTION_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// compiling, running tests, or performing complex multi-step reasoning).
+/// 15 minutes is a bounded safety ceiling against hung processes without
+/// interrupting legitimate engineering tasks.
+pub const PRODUCTION_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
     let command = Command::new(program);

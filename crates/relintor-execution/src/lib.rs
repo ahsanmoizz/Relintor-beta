@@ -264,23 +264,32 @@ impl LeaseScope {
     }
 
     fn allows_path(&self, path: &str) -> bool {
-        let candidate = Path::new(path);
-        if !candidate.is_absolute() {
-            return false;
-        }
-        if !safe_path_within(candidate, &self.workspace) {
+        let candidate_path = Path::new(path);
+        let candidate = if candidate_path.is_absolute() {
+            candidate_path.to_path_buf()
+        } else {
+            self.workspace.join(candidate_path)
+        };
+        if !safe_path_within(&candidate, &self.workspace) {
             return false;
         }
         let scopes = self
             .file_scopes
             .iter()
             .chain(self.directory_scopes.iter())
-            .map(PathBuf::from)
+            .map(|s| {
+                let p = Path::new(s);
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    self.workspace.join(p)
+                }
+            })
             .collect::<Vec<_>>();
         scopes.is_empty()
             || scopes
                 .iter()
-                .any(|scope| safe_path_within(candidate, scope))
+                .any(|scope| safe_path_within(&candidate, scope))
     }
 }
 
@@ -586,6 +595,8 @@ pub struct TaskAttempt {
     #[serde(default, skip_serializing_if = "is_unknown_execution_boundary")]
     pub execution_boundary: AttemptExecutionBoundary,
     #[serde(default)]
+    pub extensions_granted: u32,
+    #[serde(default)]
     completion_authority: Option<ExecutionCompletionAuthority>,
     /// Authenticated pre/post inventories make artifact attribution explicit.
     /// Historical ledgers omit these fields and therefore cannot authorize
@@ -761,6 +772,17 @@ pub struct ActionResult {
     pub estimated_cost_micros: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ProgressQuality {
+    MeaningfulForwardProgress,
+    NoProgress,
+    DuplicateActivity,
+    Oscillation,
+    ScopeDrift,
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE", tag = "kind")]
 pub enum ExecutionEventKind {
@@ -787,6 +809,11 @@ pub enum ExecutionEventKind {
     RetryAuthorized,
     VerificationCorrectionAuthorized,
     ProgressRenewalAuthorized,
+    SoftWindowReached,
+    MeaningfulProgressValidated,
+    AuthorityExtensionGranted,
+    AuthorityExtensionDenied,
+    HardCeilingReached,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -811,11 +838,35 @@ pub struct SchedulerPolicy {
     pub execution_time_policy: ExecutionTimePolicy,
 }
 
+fn default_soft_window_ms() -> u64 {
+    15 * 60 * 1_000
+}
+
+fn default_extension_duration_ms() -> u64 {
+    10 * 60 * 1_000
+}
+
+fn default_max_extensions() -> u32 {
+    3
+}
+
+fn default_hard_ceiling_ms() -> u64 {
+    ADAPTER_PROCESS_SAFETY_TIMEOUT_MS
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionTimePolicy {
     pub task_wall_clock_ms: u64,
     pub lease_duration_ms: u64,
     pub adapter_safety_timeout_ms: u64,
+    #[serde(default = "default_soft_window_ms")]
+    pub soft_window_ms: u64,
+    #[serde(default = "default_extension_duration_ms")]
+    pub extension_duration_ms: u64,
+    #[serde(default = "default_max_extensions")]
+    pub max_extensions: u32,
+    #[serde(default = "default_hard_ceiling_ms")]
+    pub hard_ceiling_ms: u64,
 }
 
 impl Default for ExecutionTimePolicy {
@@ -824,6 +875,10 @@ impl Default for ExecutionTimePolicy {
             task_wall_clock_ms: BETA_TASK_EXECUTION_BUDGET_MS,
             lease_duration_ms: BETA_TASK_EXECUTION_BUDGET_MS,
             adapter_safety_timeout_ms: ADAPTER_PROCESS_SAFETY_TIMEOUT_MS,
+            soft_window_ms: default_soft_window_ms(),
+            extension_duration_ms: default_extension_duration_ms(),
+            max_extensions: default_max_extensions(),
+            hard_ceiling_ms: default_hard_ceiling_ms(),
         }
     }
 }
@@ -833,6 +888,9 @@ impl ExecutionTimePolicy {
         if self.task_wall_clock_ms == 0
             || self.lease_duration_ms != self.task_wall_clock_ms
             || self.adapter_safety_timeout_ms < self.task_wall_clock_ms
+            || self.soft_window_ms == 0
+            || self.hard_ceiling_ms < self.soft_window_ms
+            || self.adapter_safety_timeout_ms < self.hard_ceiling_ms
         {
             return Err(ExecutionError::PolicyDenied(
                 "execution time policy must be finite, lease-aligned, and bounded by the adapter safety timeout".into(),
@@ -1262,6 +1320,7 @@ impl ExecutionRun {
             },
             termination_reason: None,
             execution_boundary: AttemptExecutionBoundary::NotStarted,
+            extensions_granted: 0,
             completion_authority: None,
             workspace_before: Some(workspace_before),
             workspace_after: None,
@@ -1966,6 +2025,204 @@ impl ExecutionRun {
             .count() as u32
     }
 
+    pub fn evaluate_progress_quality(
+        &self,
+        task_id: &str,
+        snapshot: &ProgressSnapshot,
+    ) -> ProgressQuality {
+        if matches!(self.watchdog_state, WatchdogState::OscillationDetected) {
+            return ProgressQuality::Oscillation;
+        }
+        if matches!(self.watchdog_state, WatchdogState::DriftDetected) {
+            return ProgressQuality::ScopeDrift;
+        }
+        if matches!(self.watchdog_state, WatchdogState::RepeatedCommand) {
+            return ProgressQuality::DuplicateActivity;
+        }
+
+        let Some(task) = self.tasks.get(task_id) else {
+            return ProgressQuality::Unknown;
+        };
+
+        for path in &snapshot.changed_paths {
+            if !task.scope.allows_path(path) {
+                return ProgressQuality::ScopeDrift;
+            }
+        }
+
+        let prior = self.progress.last();
+        let prior_passing_tests = prior
+            .filter(|item| item.passing_tests_observed)
+            .map(|item| item.passing_tests)
+            .unwrap_or_default();
+        let prior_artifacts = prior
+            .filter(|item| item.artifacts_observed)
+            .map(|item| item.useful_artifacts)
+            .unwrap_or_default();
+        let prior_resolved_blockers = prior.map(|item| item.resolved_blockers).unwrap_or_default();
+        let prior_dependency_completions = prior
+            .map(|item| item.dependency_completions)
+            .unwrap_or_default();
+        let prior_diagnostics = prior
+            .map(|item| item.diagnostic_information)
+            .unwrap_or_default();
+        let prior_fingerprint = prior.map(|item| &item.workspace_fingerprint);
+
+        let tests_advanced =
+            snapshot.passing_tests_observed && snapshot.passing_tests > prior_passing_tests;
+        let evidence_advanced =
+            snapshot.artifacts_observed && snapshot.useful_artifacts > prior_artifacts;
+        let blocker_advanced = snapshot.resolved_blockers > prior_resolved_blockers;
+        let requirement_advanced = snapshot.dependency_completions > prior_dependency_completions;
+        let diagnostic_advanced = snapshot.diagnostic_information != 0
+            && snapshot.diagnostic_information != prior_diagnostics;
+        let workspace_advanced = !snapshot.changed_paths.is_empty()
+            && prior_fingerprint.map(|fp| fp != &snapshot.workspace_fingerprint).unwrap_or(true);
+
+        if tests_advanced
+            || evidence_advanced
+            || blocker_advanced
+            || requirement_advanced
+            || diagnostic_advanced
+            || workspace_advanced
+        {
+            ProgressQuality::MeaningfulForwardProgress
+        } else {
+            ProgressQuality::NoProgress
+        }
+    }
+
+    pub fn can_grant_authority_extension(
+        &self,
+        task_id: &str,
+        snapshot: &ProgressSnapshot,
+        now_ms: u64,
+    ) -> Result<bool, ExecutionError> {
+        let attempt = self
+            .attempts
+            .iter()
+            .rev()
+            .find(|attempt| attempt.task_id == task_id && attempt.state == TaskAttemptState::Running)
+            .ok_or_else(|| ExecutionError::AttemptMissing(task_id.into()))?;
+
+        if attempt.extensions_granted >= self.policy.execution_time_policy.max_extensions {
+            return Ok(false);
+        }
+
+        let elapsed = now_ms.saturating_sub(attempt.started_at_ms);
+        if elapsed >= self.policy.execution_time_policy.hard_ceiling_ms {
+            return Ok(false);
+        }
+
+        if self.evaluate_progress_quality(task_id, snapshot) != ProgressQuality::MeaningfulForwardProgress {
+            return Ok(false);
+        }
+
+        Ok(true)
+    }
+
+    pub fn grant_authority_extension(
+        &mut self,
+        task_id: &str,
+        snapshot: &ProgressSnapshot,
+        now_ms: u64,
+    ) -> Result<u64, ExecutionError> {
+        self.emit(
+            now_ms,
+            Some(task_id.into()),
+            ExecutionEventKind::SoftWindowReached,
+            "task execution soft window reached; evaluating progress for authority extension",
+        )?;
+
+        let attempt_idx = self
+            .attempts
+            .iter()
+            .rposition(|attempt| attempt.task_id == task_id && attempt.state == TaskAttemptState::Running)
+            .ok_or_else(|| ExecutionError::AttemptMissing(task_id.into()))?;
+
+        let attempt = &self.attempts[attempt_idx];
+        let elapsed = now_ms.saturating_sub(attempt.started_at_ms);
+        let hard_ceiling = self.policy.execution_time_policy.hard_ceiling_ms;
+        let max_extensions = self.policy.execution_time_policy.max_extensions;
+
+        if elapsed >= hard_ceiling || attempt.extensions_granted >= max_extensions {
+            self.emit(
+                now_ms,
+                Some(task_id.into()),
+                ExecutionEventKind::HardCeilingReached,
+                "task execution reached absolute hard authority ceiling; extension denied",
+            )?;
+            return Err(ExecutionError::PolicyDenied(
+                "task execution reached absolute hard authority ceiling".into(),
+            ));
+        }
+
+        let quality = self.evaluate_progress_quality(task_id, snapshot);
+        if quality != ProgressQuality::MeaningfulForwardProgress {
+            let reason = match quality {
+                ProgressQuality::Oscillation => "oscillation detected",
+                ProgressQuality::ScopeDrift => "scope drift detected",
+                ProgressQuality::DuplicateActivity => "duplicate activity detected",
+                ProgressQuality::NoProgress => "no meaningful forward progress",
+                _ => "insufficient forward progress",
+            };
+            self.emit(
+                now_ms,
+                Some(task_id.into()),
+                ExecutionEventKind::AuthorityExtensionDenied,
+                format!("authority extension denied: {reason}"),
+            )?;
+            return Err(ExecutionError::PolicyDenied(
+                format!("authority extension denied: {reason}"),
+            ));
+        }
+
+        self.emit(
+            now_ms,
+            Some(task_id.into()),
+            ExecutionEventKind::MeaningfulProgressValidated,
+            "meaningful forward progress confirmed against task scope",
+        )?;
+
+        let extension_duration = self.policy.execution_time_policy.extension_duration_ms;
+        let attempt_started = self.attempts[attempt_idx].started_at_ms;
+        let max_allowed_expiry = attempt_started.saturating_add(hard_ceiling);
+
+        let lease = self
+            .leases
+            .iter_mut()
+            .find(|l| l.task_id == task_id && l.status == LeaseStatus::Active)
+            .ok_or(ExecutionError::LeaseInactive)?;
+
+        lease.expires_at_ms = lease
+            .expires_at_ms
+            .saturating_add(extension_duration)
+            .min(max_allowed_expiry);
+        lease.usage_budget.wall_clock_ms = lease.expires_at_ms.saturating_sub(lease.issued_at_ms);
+        let new_expires_at = lease.expires_at_ms;
+        let new_wall_budget = lease.usage_budget.wall_clock_ms;
+        lease.lease_digest = lease.compute_digest()?;
+
+        if let Some(task) = self.tasks.get_mut(task_id) {
+            task.usage_budget.wall_clock_ms = task.usage_budget.wall_clock_ms.max(new_wall_budget);
+        }
+
+        self.attempts[attempt_idx].extensions_granted = self.attempts[attempt_idx].extensions_granted.saturating_add(1);
+        self.progress.push(snapshot.clone());
+
+        self.emit(
+            now_ms,
+            Some(task_id.into()),
+            ExecutionEventKind::AuthorityExtensionGranted,
+            format!(
+                "granted bounded authority extension #{} until {}ms",
+                self.attempts[attempt_idx].extensions_granted, new_expires_at
+            ),
+        )?;
+
+        Ok(new_expires_at)
+    }
+
     fn progress_supports_renewal(&self, snapshot: &ProgressSnapshot) -> bool {
         let prior = self.progress.last();
         let prior_passing_tests = prior
@@ -1984,9 +2241,6 @@ impl ExecutionRun {
             .map(|item| item.diagnostic_information)
             .unwrap_or_default();
 
-        // Locked spec 06 defines progress as requirement/evidence/test/diagnostic
-        // advancement. Arbitrary source edits are intentionally not authority:
-        // edit churn must never buy another execution lease on its own.
         let tests_advanced =
             snapshot.passing_tests_observed && snapshot.passing_tests > prior_passing_tests;
         let evidence_advanced =
@@ -4375,6 +4629,7 @@ mod recovery_boundary_tests {
                     "Antigravity adapter: Antigravity version is incompatible".into(),
                 ),
                 execution_boundary: boundary,
+                extensions_granted: 0,
                 completion_authority: None,
                 workspace_before: None,
                 workspace_after: None,
@@ -4848,6 +5103,7 @@ mod recovery_boundary_tests {
             },
             termination_reason: Some("historical budget boundary".into()),
             execution_boundary: AttemptExecutionBoundary::ExternalProcessStarted,
+            extensions_granted: 0,
             completion_authority: None,
             workspace_before: None,
             workspace_after: None,
