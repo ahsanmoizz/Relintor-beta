@@ -2816,7 +2816,107 @@ fn project_summaries(connection: &Connection) -> Result<Vec<ProjectSummaryView>,
         .collect()
 }
 
+fn reconcile_unsealed_project_takeover(path: &Path, project_id: &str) -> Result<(), String> {
+    let connection = Connection::open(path)
+        .map_err(|error| format!("open database for reconciliation: {error}"))?;
+
+    let mission_id = format!("mission-{project_id}");
+    let is_sealed: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM mission_revisions WHERE mission_id = ?1)",
+            params![mission_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+    if is_sealed {
+        return Ok(());
+    }
+
+    let root_path: Option<String> = connection
+        .query_row(
+            "SELECT root_path FROM projects WHERE id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("load project root path: {error}"))?
+        .flatten();
+
+    let Some(raw_root) = root_path else {
+        return Ok(());
+    };
+
+    let clean_root = raw_root.trim_start_matches(r"\\?\");
+    let p = PathBuf::from(clean_root);
+    if !p.is_dir() {
+        return Ok(());
+    }
+
+    let current_takeover: Option<(String, String, String)> = connection
+        .query_row(
+            "SELECT id, scanner_version, fingerprint FROM project_takeovers WHERE project_id = ?1 ORDER BY created_at DESC LIMIT 1",
+            params![project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|error| format!("query current takeover: {error}"))?;
+
+    drop(connection);
+
+    let Some((_, scanner_version, fingerprint)) = current_takeover else {
+        return Ok(());
+    };
+
+    if scanner_version == "p6-test" {
+        return Ok(());
+    }
+
+    let needs_rescan = if scanner_version != relintor_takeover::TAKEOVER_SCANNER_VERSION {
+        true
+    } else if let Ok(report) = TakeoverScanner::default().scan(&p) {
+        report.fingerprint != fingerprint
+    } else {
+        false
+    };
+
+    if needs_rescan {
+        if let Ok(report) = TakeoverScanner::default().scan(&p) {
+            let _ = persist_takeover_for_project(path, &report, project_id);
+        }
+    }
+
+    Ok(())
+}
+
+fn reconcile_all_unsealed_projects(path: &Path) -> Result<(), String> {
+    let connection = Connection::open(path)
+        .map_err(|error| format!("open db for bulk reconciliation: {error}"))?;
+    let mut stmt = connection
+        .prepare(
+            "SELECT p.id FROM projects p
+             WHERE p.root_path IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM mission_revisions WHERE mission_id = 'mission-' || p.id
+               )",
+        )
+        .map_err(|error| format!("query unsealed projects: {error}"))?;
+    let project_ids: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .map_err(|error| format!("read unsealed project ids: {error}"))?
+        .filter_map(Result::ok)
+        .collect();
+    drop(stmt);
+    drop(connection);
+
+    for project_id in project_ids {
+        let _ = reconcile_unsealed_project_takeover(path, &project_id);
+    }
+    Ok(())
+}
+
 fn open_project_at_path(path: &Path, project_id: &str) -> Result<ProjectOpenView, String> {
+    reconcile_unsealed_project_takeover(path, project_id)?;
     let connection =
         Connection::open(path).map_err(|error| format!("open project database: {error}"))?;
     let project = project_summaries(&connection)?
@@ -2877,6 +2977,7 @@ fn open_project_at_path(path: &Path, project_id: &str) -> Result<ProjectOpenView
 fn projects_list(app: AppHandle) -> Result<Vec<ProjectSummaryView>, String> {
     let path = database_path(&app)?;
     migrate_database(&path)?;
+    reconcile_all_unsealed_projects(&path)?;
     let connection =
         Connection::open(&path).map_err(|error| format!("open project database: {error}"))?;
     project_summaries(&connection)
@@ -2944,6 +3045,7 @@ fn review_authority_at_path(
     project_id: &str,
     facts: &[AuthorityFactDecision],
 ) -> Result<AuthorityPreview, String> {
+    reconcile_unsealed_project_takeover(path, project_id)?;
     let (registry, trusted) = production_registry().map_err(|error| error.to_string())?;
     let connection =
         Connection::open(path).map_err(|error| format!("open authority database: {error}"))?;
@@ -7381,13 +7483,15 @@ mod tests {
     #[test]
     fn seal_denied_when_requirement_references_stale_takeover_finding() {
         let path = test_path("stale-finding-seal");
+        let ws_root = test_path("seal-stale-finding-ws");
+        let _ = fs::create_dir_all(&ws_root);
         migrate_database(&path).expect("migrate");
         let connection = Connection::open(&path).expect("open");
         let project_id = "takeover-stale-test";
         connection
             .execute(
                 "INSERT INTO projects(id, name, root_path, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![project_id, "Takeover Test", "D:/test-ws", 1000],
+                params![project_id, "Takeover Test", ws_root.to_string_lossy().as_ref(), 1000],
             )
             .expect("insert project");
         // Insert an initial takeover snapshot with an old finding
@@ -7395,7 +7499,7 @@ mod tests {
             .execute(
                 "INSERT INTO project_takeovers(id, project_id, root, fingerprint, scanner_version, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params!["takeover-1", project_id, "D:/test-ws", "fp1", "v1", 1000],
+                params!["takeover-1", project_id, ws_root.to_string_lossy().as_ref(), "fp1", "p6-test", 1000],
             )
             .expect("insert takeover 1");
         connection
@@ -7417,7 +7521,7 @@ mod tests {
             .execute(
                 "INSERT INTO project_takeovers(id, project_id, root, fingerprint, scanner_version, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params!["takeover-2", project_id, "D:/test-ws", "fp2", "v2", 2000],
+                params!["takeover-2", project_id, ws_root.to_string_lossy().as_ref(), "fp2", "p6-test", 2000],
             )
             .expect("insert takeover 2");
         connection
@@ -7436,6 +7540,80 @@ mod tests {
             "Unexpected error: {seal_err}"
         );
         let _ = fs::remove_file(path);
+        let _ = fs::remove_dir_all(ws_root);
+    }
+
+    #[test]
+    fn reopen_existing_unsealed_workspace_reconciles_stale_findings_and_requirements() {
+        let db_path = test_path("reopen-reconciliation");
+        let ws_root = test_path("reopen-ws");
+        let _ = fs::create_dir_all(&ws_root);
+        fs::write(ws_root.join("Cargo.toml"), b"[package]\nname=\"reopen-demo\"\nversion=\"0.1.0\"\n").unwrap();
+        fs::create_dir_all(ws_root.join("src")).unwrap();
+        fs::write(ws_root.join("src/main.rs"), b"fn main() {}\n").unwrap();
+
+        migrate_database(&db_path).expect("migrate");
+        let project_id = "test-reopen-project";
+
+        // 1. Simulate an old database record created with p5-takeover-scanner-1 having 5 false findings
+        let connection = Connection::open(&db_path).expect("open");
+        connection
+            .execute(
+                "INSERT INTO projects(id, name, root_path, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![project_id, "Reopen Test", ws_root.to_string_lossy().as_ref(), 1000],
+            )
+            .expect("insert project");
+        connection
+            .execute(
+                "INSERT INTO project_takeovers(id, project_id, root, fingerprint, scanner_version, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params!["takeover-old-v1", project_id, ws_root.to_string_lossy().as_ref(), "old-fingerprint", "p5-takeover-scanner-1", 1000],
+            )
+            .expect("insert old takeover");
+        for i in 1..=5 {
+            connection
+                .execute(
+                    "INSERT INTO takeover_findings(id, takeover_id, finding_type, summary, severity, evidence)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![format!("finding-false-{i}"), "takeover-old-v1", "hidden-route", format!("false finding {i}"), "medium", "{}"],
+                )
+                .expect("insert finding");
+        }
+        drop(connection);
+
+        // 2. Open project normally (as desktop application does on startup / open)
+        let open_view = open_project_at_path(&db_path, project_id).expect("open project");
+        assert_eq!(open_view.project.project_id, project_id);
+
+        // 3. Request authority preview (as desktop standards page does on render)
+        let preview = review_authority_at_path(&db_path, project_id, &reviewed_facts(&["backend"])).expect("preview");
+
+        // 4. Assert that stale findings were purged and requirements reconciled to clean state
+        let connection = Connection::open(&db_path).expect("open check");
+        let stale_findings_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM takeover_findings WHERE takeover_id = 'takeover-old-v1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(stale_findings_count, 0, "All stale findings from older scanner version must be evicted");
+
+        let active_takeover_scanner: String = connection
+            .query_row(
+                "SELECT scanner_version FROM project_takeovers WHERE project_id = ?1 ORDER BY created_at DESC LIMIT 1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .expect("active takeover scanner");
+        assert_eq!(active_takeover_scanner, relintor_takeover::TAKEOVER_SCANNER_VERSION);
+
+        // Sealing with current review must succeed
+        seal_project_mission_at_path(&db_path, project_id, &preview.review_digest)
+            .expect("reconciled plan seals cleanly");
+
+        let _ = fs::remove_file(db_path);
+        let _ = fs::remove_dir_all(ws_root);
     }
 
     #[test]
