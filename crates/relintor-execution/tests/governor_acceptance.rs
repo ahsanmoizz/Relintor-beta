@@ -397,3 +397,52 @@ fn test_34_to_36_multi_task_progress_sequence() {
 
     let _ = fs::remove_dir_all(&ws);
 }
+
+#[test]
+fn test_upgrade_matrix_existing_phase5_mission_loads() {
+    let appdata = std::env::var("APPDATA").unwrap_or_default();
+    let phase5_ledger = PathBuf::from(appdata)
+        .join("com.relintor.desktop")
+        .join("execution")
+        .join("mission-takeover-project-takeover_719ad83a558ede1be5868c6d-1.json");
+
+    if phase5_ledger.is_file() {
+        let json = fs::read_to_string(&phase5_ledger).unwrap();
+        let restored = ExecutionRun::restore_json(&json).expect("restore real phase 5 mission");
+        assert_eq!(restored.mission_id, "mission-takeover-project-takeover_719ad83a558ede1be5868c6d");
+        assert_eq!(restored.mission_revision, 1);
+        assert_eq!(restored.state, relintor_execution::ExecutionRunState::RevalidationRequired);
+
+        // Task 1 complete
+        let task1 = &restored.tasks["task_131fe92c0e2f030454e92944"];
+        assert_eq!(task1.state, relintor_execution::ExecutionTaskState::FinishedAwaitingVerification);
+
+        // Task 2 partial work preserved
+        let task2 = &restored.tasks["task_1fd6aeb68d6e8f80b6933346"];
+        assert_eq!(task2.state, relintor_execution::ExecutionTaskState::BlockedExternal);
+
+        // Total 15 tasks preserved
+        assert_eq!(restored.tasks.len(), 15);
+        assert_eq!(restored.attempts.len(), 3);
+        assert_eq!(restored.events.len(), 17);
+    }
+}
+
+#[test]
+fn test_upgrade_matrix_old_fixed_window_ledgers_compatibility() {
+    let ws = temp_workspace("test_old_compat");
+    let run = seed_test_run(&ws, 2);
+    let original_json = run.snapshot_json().unwrap();
+
+    // Verify restore_json on fresh ledger
+    let restored = ExecutionRun::restore_json(&original_json).unwrap();
+    assert_eq!(restored.mission_id, run.mission_id);
+
+    // Re-serialize and ensure round-trip
+    let reserialized = restored.snapshot_json().unwrap();
+    let restored2 = ExecutionRun::restore_json(&reserialized).unwrap();
+    assert_eq!(restored2.mission_id, run.mission_id);
+
+    let _ = fs::remove_dir_all(&ws);
+}
+

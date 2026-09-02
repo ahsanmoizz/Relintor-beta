@@ -575,6 +575,10 @@ pub struct ExecutionTask {
     pub attempt_number: u32,
 }
 
+fn is_zero_u32(val: &u32) -> bool {
+    *val == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskAttempt {
     pub attempt_id: String,
@@ -594,7 +598,7 @@ pub struct TaskAttempt {
     // persisting every explicit boundary in new ledgers.
     #[serde(default, skip_serializing_if = "is_unknown_execution_boundary")]
     pub execution_boundary: AttemptExecutionBoundary,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub extensions_granted: u32,
     #[serde(default)]
     completion_authority: Option<ExecutionCompletionAuthority>,
@@ -3883,7 +3887,7 @@ impl ExecutionRun {
                         "execution ledger integrity version is unsupported".into(),
                     ));
                 }
-                if !current_record_authenticates(&run, &expected)? {
+                if !current_record_authenticates(&run, json, &expected)? {
                     return Err(ExecutionError::Ledger(
                         "execution ledger integrity verification failed".into(),
                     ));
@@ -3904,6 +3908,16 @@ impl ExecutionRun {
                 ));
             }
         }
+        run.policy.execution_time_policy.hard_ceiling_ms = run
+            .policy
+            .execution_time_policy
+            .hard_ceiling_ms
+            .min(run.policy.execution_time_policy.adapter_safety_timeout_ms);
+        run.policy.execution_time_policy.soft_window_ms = run
+            .policy
+            .execution_time_policy
+            .soft_window_ms
+            .min(run.policy.execution_time_policy.task_wall_clock_ms);
         run.normalize_historical_budget_boundary();
         run.validate_invariants()?;
         Ok(run)
@@ -5373,8 +5387,10 @@ mod recovery_boundary_tests {
         let expected = current_record_tag_with_key(&unsigned, &legacy_key)
             .expect("sign current-format record with old Beta key");
 
+        let json = serde_json::to_string(&unsigned).expect("serialize unsigned");
         assert!(current_record_authenticates_with_keys(
             &unsigned,
+            &json,
             &expected,
             &[0x99; 32],
             std::slice::from_ref(&legacy_key),
@@ -5382,6 +5398,7 @@ mod recovery_boundary_tests {
         .expect("legacy key authenticates"));
         assert!(!current_record_authenticates_with_keys(
             &unsigned,
+            &json,
             &expected,
             &[0x99; 32],
             &[vec![0x55; 32]],
@@ -5651,8 +5668,22 @@ fn legacy_record_tag_with_key(
     Ok(ledger_hmac_with_key(unsigned.as_bytes(), key))
 }
 
+fn raw_record_tag_with_key(
+    json: &str,
+    supplied: &str,
+    key: &[u8],
+) -> Result<String, ExecutionError> {
+    let marker = format!("\"integrity_tag\":\"{supplied}\"");
+    if supplied.is_empty() || json.matches(&marker).count() != 1 {
+        return Ok(String::new());
+    }
+    let unsigned = json.replacen(&marker, "\"integrity_tag\":\"\"", 1);
+    Ok(ledger_hmac_with_key(unsigned.as_bytes(), key))
+}
+
 fn current_record_authenticates_with_keys(
     run: &ExecutionRun,
+    json: &str,
     expected: &str,
     current_key: &[u8],
     legacy_keys: &[Vec<u8>],
@@ -5660,12 +5691,16 @@ fn current_record_authenticates_with_keys(
     let mut unsigned = run.clone();
     unsigned.integrity_tag.clear();
 
-    if current_record_tag_with_key(&unsigned, current_key)? == expected {
+    if current_record_tag_with_key(&unsigned, current_key)? == expected
+        || raw_record_tag_with_key(json, expected, current_key)? == expected
+    {
         return Ok(true);
     }
 
     for key in legacy_keys {
-        if current_record_tag_with_key(&unsigned, key)? == expected {
+        if current_record_tag_with_key(&unsigned, key)? == expected
+            || raw_record_tag_with_key(json, expected, key)? == expected
+        {
             return Ok(true);
         }
     }
@@ -5674,11 +5709,12 @@ fn current_record_authenticates_with_keys(
 
 fn current_record_authenticates(
     run: &ExecutionRun,
+    json: &str,
     expected: &str,
 ) -> Result<bool, ExecutionError> {
     let current = ledger_key()?;
     let legacy = legacy_ledger_keys();
-    current_record_authenticates_with_keys(run, expected, &current, &legacy)
+    current_record_authenticates_with_keys(run, json, expected, &current, &legacy)
 }
 
 fn legacy_record_authenticates_with_keys(
