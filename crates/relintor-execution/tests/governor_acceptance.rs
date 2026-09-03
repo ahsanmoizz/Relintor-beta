@@ -1,8 +1,8 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use ed25519_dalek::SigningKey;
 use relintor_execution::{
-    ExecutionEventKind, ExecutionRun, ExecutionRunState, LeaseStatus,
-    ProgressQuality, ProgressSnapshot, SchedulerPolicy, WatchdogState,
+    AttemptExecutionBoundary, ExecutionEventKind, ExecutionRun, ExecutionRunState, LeaseStatus,
+    ProgressQuality, ProgressSnapshot, SchedulerPolicy, TaskAttemptState, WatchdogState,
 };
 use relintor_standards::{
     builtin_registry, scope_fingerprint, AcceptanceCriterion, ApplicabilityContext,
@@ -408,23 +408,110 @@ fn test_upgrade_matrix_existing_phase5_mission_loads() {
 
     if phase5_ledger.is_file() {
         let json = fs::read_to_string(&phase5_ledger).unwrap();
-        let restored = ExecutionRun::restore_json(&json).expect("restore real phase 5 mission");
+        let mut restored = ExecutionRun::restore_json(&json).expect("restore real phase 5 mission");
         assert_eq!(restored.mission_id, "mission-takeover-project-takeover_719ad83a558ede1be5868c6d");
         assert_eq!(restored.mission_revision, 1);
         assert_eq!(restored.state, relintor_execution::ExecutionRunState::RevalidationRequired);
 
-        // Task 1 complete
-        let task1 = &restored.tasks["task_131fe92c0e2f030454e92944"];
-        assert_eq!(task1.state, relintor_execution::ExecutionTaskState::FinishedAwaitingVerification);
+        // Tasks 1, 2, 3 complete
+        assert_eq!(
+            restored.tasks["task_131fe92c0e2f030454e92944"].state,
+            relintor_execution::ExecutionTaskState::FinishedAwaitingVerification
+        );
+        assert_eq!(
+            restored.tasks["task_1fd6aeb68d6e8f80b6933346"].state,
+            relintor_execution::ExecutionTaskState::FinishedAwaitingVerification
+        );
+        assert_eq!(
+            restored.tasks["task_4668629d91981c737abc6cf6"].state,
+            relintor_execution::ExecutionTaskState::FinishedAwaitingVerification
+        );
 
-        // Task 2 partial work preserved
-        let task2 = &restored.tasks["task_1fd6aeb68d6e8f80b6933346"];
-        assert_eq!(task2.state, relintor_execution::ExecutionTaskState::BlockedExternal);
+        // Task 4 is the current interrupted task
+        let task4_id = "task_49e600b4755e559c6ce2af1f";
+        assert_ne!(
+            restored.tasks[task4_id].state,
+            relintor_execution::ExecutionTaskState::FinishedAwaitingVerification
+        );
 
-        // Total 15 tasks preserved
-        assert_eq!(restored.tasks.len(), 15);
-        assert_eq!(restored.attempts.len(), 3);
-        assert_eq!(restored.events.len(), 17);
+        // Pinpoint recovery target selection identifies Task 4
+        let target = restored.current_recovery_attempt().expect("recovery target for Task 4");
+        assert_eq!(target.task_id, task4_id);
+        assert_eq!(
+            target.attempt_id,
+            "30c138f9f12e891fb8e27c26d5243c015264feba9ce246f0e330bf9f3903f7a6"
+        );
+        assert_eq!(
+            target.execution_boundary,
+            AttemptExecutionBoundary::ExternalProcessStarted
+        );
+
+        // Test manual recovery retry authorization transitions cleanly
+        let now = 1_788_380_000_000;
+        restored
+            .authorize_manual_recovery_retry(&target, now)
+            .expect("authorize manual recovery retry for Task 4");
+
+        assert_eq!(restored.state, relintor_execution::ExecutionRunState::Ready);
+        assert_eq!(
+            restored.tasks[task4_id].state,
+            relintor_execution::ExecutionTaskState::WaitingRetry
+        );
+        assert_eq!(
+            restored.attempts.last().unwrap().state,
+            TaskAttemptState::WaitingRetry
+        );
+
+        // Verify event emission
+        let events = &restored.events;
+        let last_two = &events[events.len() - 2..];
+        assert_eq!(last_two[0].kind, ExecutionEventKind::RecoveryRevalidated);
+        assert_eq!(last_two[1].kind, ExecutionEventKind::RetryAuthorized);
+
+        // Tasks 1, 2, 3 remain complete
+        assert_eq!(
+            restored.tasks["task_131fe92c0e2f030454e92944"].state,
+            relintor_execution::ExecutionTaskState::FinishedAwaitingVerification
+        );
+        assert_eq!(
+            restored.tasks["task_1fd6aeb68d6e8f80b6933346"].state,
+            relintor_execution::ExecutionTaskState::FinishedAwaitingVerification
+        );
+        assert_eq!(
+            restored.tasks["task_4668629d91981c737abc6cf6"].state,
+            relintor_execution::ExecutionTaskState::FinishedAwaitingVerification
+        );
+    }
+}
+
+#[test]
+fn test_task4_recovery_revalidation_state_advancement_and_idempotence() {
+    let forensic_path = PathBuf::from(r"D:\Relintor-forensics\phase5-task4-before-recovery-fix\mission-takeover-project-takeover_719ad83a558ede1be5868c6d-1.json");
+    if forensic_path.is_file() {
+        let json = fs::read_to_string(&forensic_path).unwrap();
+        let mut run = ExecutionRun::restore_json(&json).expect("restore forensic ledger");
+
+        // Step 1: recovery target selection
+        let target = run.current_recovery_attempt().expect("target exists for Task 4");
+        assert_eq!(target.task_id, "task_49e600b4755e559c6ce2af1f");
+        assert_eq!(target.execution_boundary, AttemptExecutionBoundary::ExternalProcessStarted);
+
+        // Record recovery decision with target is idempotent
+        let events_before = run.events.len();
+        run.record_recovery_decision(Some(&target), "RevalidationRequired", 1_788_380_100_000).unwrap();
+        assert_eq!(run.events.len(), events_before + 1);
+
+        // Second click does not duplicate event
+        run.record_recovery_decision(Some(&target), "RevalidationRequired", 1_788_380_200_000).unwrap();
+        assert_eq!(run.events.len(), events_before + 1);
+
+        // Step 2: manual retry authorization
+        run.authorize_manual_recovery_retry(&target, 1_788_380_300_000).unwrap();
+        assert_eq!(run.state, relintor_execution::ExecutionRunState::Ready);
+        assert_eq!(run.tasks["task_49e600b4755e559c6ce2af1f"].state, relintor_execution::ExecutionTaskState::WaitingRetry);
+
+        // Double authorize fails closed
+        assert!(run.authorize_manual_recovery_retry(&target, 1_788_380_400_000).is_err());
     }
 }
 

@@ -2800,7 +2800,6 @@ impl ExecutionRun {
         if attempt.task_id != target.task_id
             || attempt.lease_id != target.lease_id
             || attempt.execution_boundary != target.execution_boundary
-            || attempt.completion_authority.is_some()
             || attempt.ended_at_ms.is_none()
             || !matches!(
                 attempt.state,
@@ -3632,7 +3631,6 @@ impl ExecutionRun {
                     | TaskAttemptState::TurnEndedIncomplete
                     | TaskAttemptState::SafeBoundaryStopped
             ) && attempt.ended_at_ms.is_some()
-                && attempt.completion_authority.is_none()
                 && self.tasks.get(&attempt.task_id).is_some_and(|task| {
                     task.state != ExecutionTaskState::FinishedAwaitingVerification
                 })
