@@ -114,6 +114,7 @@ fn empty_run(root: &Path) -> ExecutionRun {
         current_turn: 1,
         last_error: None,
         no_progress_occurrences: 0,
+        reviewed_recovery_deltas: Vec::new(),
         integrity_version: "p7-ledger-integrity-v1".into(),
         integrity_tag: String::new(),
     }

@@ -2367,11 +2367,35 @@ impl RecoveryCoordinator {
                     }
                 }
             }
-            result.disposition = RecoveryDisposition::RevalidationRequired;
-            result.classification = RecoveryClassification::ExternalStateUncertain;
-            let reason = "an external process started for the selected attempt; Relintor cannot prove that it left no workspace or external side effects";
-            if !result.reasons.iter().any(|existing| existing == reason) {
-                result.reasons.push(reason.into());
+            let retry_already_bound = if let Some(target) = result.target.as_ref() {
+                run.reviewed_recovery_deltas
+                    .iter()
+                    .rev()
+                    .any(|delta| delta.attempt_id == target.attempt_id && delta.task_id == target.task_id)
+            } else {
+                false
+            };
+            if retry_already_bound {
+                let current = WorkspaceSnapshot::capture(root, now_ms)?;
+                if current.fingerprint == run.workspace_fingerprint {
+                    result.disposition = RecoveryDisposition::PreExecutionRetryAuthorized;
+                    result.classification = RecoveryClassification::PreExecutionPrevented;
+                    result.reasons.retain(|r| !r.contains("external process started"));
+                } else {
+                    result.disposition = RecoveryDisposition::RevalidationRequired;
+                    result.classification = RecoveryClassification::ExternalStateUncertain;
+                    let reason = "unreviewed workspace drift detected after retry authorization";
+                    if !result.reasons.iter().any(|existing| existing == reason) {
+                        result.reasons.push(reason.into());
+                    }
+                }
+            } else {
+                result.disposition = RecoveryDisposition::RevalidationRequired;
+                result.classification = RecoveryClassification::ExternalStateUncertain;
+                let reason = "an external process started for the selected attempt; Relintor cannot prove that it left no workspace or external side effects";
+                if !result.reasons.iter().any(|existing| existing == reason) {
+                    result.reasons.push(reason.into());
+                }
             }
         }
         Ok(result)

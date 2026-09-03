@@ -128,6 +128,21 @@ pub struct RecoveryAttemptTarget {
     pub termination_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewedRecoveryDelta {
+    pub mission_id: String,
+    pub mission_revision: u64,
+    pub seal_hash: String,
+    pub task_id: String,
+    pub attempt_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
+    pub affected_paths: Vec<String>,
+    pub baseline_fingerprint: String,
+    pub authorized_starting_fingerprint: String,
+    pub authorized_at_ms: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RetryDecision {
@@ -553,7 +568,7 @@ impl ExecutionLease {
         Ok(())
     }
 
-    fn revoke(&mut self) -> Result<(), ExecutionError> {
+    pub fn revoke(&mut self) -> Result<(), ExecutionError> {
         self.status = LeaseStatus::Revoked;
         self.lease_digest = self.compute_digest()?;
         Ok(())
@@ -947,6 +962,8 @@ pub struct ExecutionRun {
     pub current_turn: u32,
     pub last_error: Option<String>,
     pub no_progress_occurrences: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviewed_recovery_deltas: Vec<ReviewedRecoveryDelta>,
     #[serde(default)]
     pub integrity_version: String,
     #[serde(default)]
@@ -1107,6 +1124,7 @@ impl ExecutionRun {
             current_turn: 1,
             last_error: None,
             no_progress_occurrences: 0,
+            reviewed_recovery_deltas: vec![],
             integrity_version: "p7-ledger-integrity-v1".into(),
             integrity_tag: String::new(),
         };
@@ -1225,6 +1243,24 @@ impl ExecutionRun {
             ));
         }
         let workspace_before = workspace_inventory(&self.workspace)?;
+        if self
+            .reviewed_recovery_deltas
+            .iter()
+            .rev()
+            .any(|delta| delta.task_id == task_id)
+        {
+            let current_fp = inventory_fingerprint(&workspace_before)?;
+            if current_fp != self.workspace_fingerprint {
+                self.watchdog_state = WatchdogState::DriftDetected;
+                self.emit(
+                    now_ms,
+                    Some(task_id.into()),
+                    ExecutionEventKind::TaskDriftDenied,
+                    "workspace drifted from authorized reviewed baseline before task start",
+                )?;
+                return Err(ExecutionError::TaskDrift);
+            }
+        }
         let remaining_budget = self.remaining_budget(task_id)?;
         if remaining_budget.wall_clock_ms
             > self.policy.execution_time_policy.adapter_safety_timeout_ms
@@ -2781,6 +2817,20 @@ impl ExecutionRun {
         target: &RecoveryAttemptTarget,
         now_ms: u64,
     ) -> Result<(), ExecutionError> {
+        self.authorize_manual_recovery_retry_with_delta(target, None, now_ms)
+    }
+
+    /// Authorize a retry only after P9 has revalidated the exact interrupted
+    /// external attempt and a user has explicitly reviewed the resulting
+    /// workspace changes. Binds the exact reviewed recovery delta so that:
+    /// SEALED TASK STARTING AUTHORITY + EXACT USER-REVIEWED RECOVERY DELTA
+    /// = AUTHORIZED FRESH-RETRY STARTING BASELINE.
+    pub fn authorize_manual_recovery_retry_with_delta(
+        &mut self,
+        target: &RecoveryAttemptTarget,
+        delta: Option<&ReviewedRecoveryDelta>,
+        now_ms: u64,
+    ) -> Result<(), ExecutionError> {
         if !matches!(
             self.state,
             ExecutionRunState::RevalidationRequired | ExecutionRunState::BlockedExternal
@@ -2824,7 +2874,6 @@ impl ExecutionRun {
                 "the interrupted attempt still has an active lease".into(),
             ));
         }
-        attempt.state = TaskAttemptState::WaitingRetry;
         let task = self
             .tasks
             .get_mut(&target.task_id)
@@ -2834,6 +2883,96 @@ impl ExecutionRun {
                 "a completed task cannot be retried".into(),
             ));
         }
+
+        if let Some(delta) = delta {
+            if delta.mission_id != self.mission_id {
+                return Err(ExecutionError::PolicyDenied(
+                    "recovery delta mission mismatch".into(),
+                ));
+            }
+            if delta.mission_revision != self.mission_revision {
+                return Err(ExecutionError::PolicyDenied(
+                    "recovery delta mission revision mismatch".into(),
+                ));
+            }
+            if delta.seal_hash != self.seal_hash {
+                return Err(ExecutionError::PolicyDenied(
+                    "recovery delta seal authority mismatch".into(),
+                ));
+            }
+            if delta.task_id != target.task_id {
+                return Err(ExecutionError::PolicyDenied(
+                    "recovery delta task mismatch".into(),
+                ));
+            }
+            if delta.attempt_id != target.attempt_id {
+                return Err(ExecutionError::PolicyDenied(
+                    "recovery delta attempt mismatch".into(),
+                ));
+            }
+            if self
+                .reviewed_recovery_deltas
+                .iter()
+                .any(|d| d.attempt_id == delta.attempt_id)
+            {
+                return Err(ExecutionError::PolicyDenied(
+                    "recovery delta is stale: attempt already retried".into(),
+                ));
+            }
+            for path in &delta.affected_paths {
+                if !task.scope.allows_path(path) {
+                    self.watchdog_state = WatchdogState::DriftDetected;
+                    self.emit(
+                        now_ms,
+                        Some(target.task_id.clone()),
+                        ExecutionEventKind::TaskDriftDenied,
+                        "recovery delta contains path outside leased scope",
+                    )?;
+                    return Err(ExecutionError::TaskDrift);
+                }
+            }
+            let current_inventory = workspace_inventory(&self.workspace)?;
+            if let Some(before) = attempt.workspace_before.as_ref() {
+                let actual_changes = workspace_changes(before, &current_inventory);
+                let reviewed_set: BTreeSet<String> = delta
+                    .affected_paths
+                    .iter()
+                    .map(|p| normalize_relative_path(p))
+                    .collect();
+                for change in &actual_changes {
+                    let norm = normalize_relative_path(&change.path);
+                    if !reviewed_set.contains(&norm) {
+                        self.watchdog_state = WatchdogState::DriftDetected;
+                        self.emit(
+                            now_ms,
+                            Some(target.task_id.clone()),
+                            ExecutionEventKind::TaskDriftDenied,
+                            "unreviewed workspace drift detected outside recovery delta",
+                        )?;
+                        return Err(ExecutionError::TaskDrift);
+                    }
+                }
+            }
+            let authorized_starting_fingerprint = inventory_fingerprint(&current_inventory)?;
+            if !delta.authorized_starting_fingerprint.is_empty()
+                && delta.authorized_starting_fingerprint != authorized_starting_fingerprint
+            {
+                self.watchdog_state = WatchdogState::DriftDetected;
+                self.emit(
+                    now_ms,
+                    Some(target.task_id.clone()),
+                    ExecutionEventKind::TaskDriftDenied,
+                    "workspace fingerprint does not match reviewed recovery delta",
+                )?;
+                return Err(ExecutionError::TaskDrift);
+            }
+            let mut bound_delta = delta.clone();
+            bound_delta.authorized_starting_fingerprint = authorized_starting_fingerprint.clone();
+            self.reviewed_recovery_deltas.push(bound_delta);
+            self.workspace_fingerprint = authorized_starting_fingerprint;
+        }
+
+        attempt.state = TaskAttemptState::WaitingRetry;
         task.state = ExecutionTaskState::WaitingRetry;
         task.usage_budget.retry_attempts = task.attempt_number.saturating_add(1);
         task.retry_policy.max_attempts = task.attempt_number.saturating_add(1);
@@ -2853,6 +2992,55 @@ impl ExecutionRun {
             ExecutionEventKind::RetryAuthorized,
             "manual retry authorized for the exact interrupted task",
         )?;
+        Ok(())
+    }
+
+    /// Detect unauthorized workspace mutations against current accepted baseline.
+    /// If no active lease exists and files changed, or if files changed outside
+    /// the leased scope of an active task, denies execution as TaskDrift.
+    pub fn detect_workspace_drift(&mut self, now_ms: u64) -> Result<(), ExecutionError> {
+        let current = workspace_inventory(&self.workspace)?;
+        let current_fp = inventory_fingerprint(&current)?;
+        if current_fp == self.workspace_fingerprint {
+            return Ok(());
+        }
+        let active_lease = self
+            .leases
+            .iter()
+            .rev()
+            .find(|lease| lease.status == LeaseStatus::Active)
+            .cloned();
+        let Some(active_lease) = active_lease else {
+            self.watchdog_state = WatchdogState::DriftDetected;
+            self.emit(
+                now_ms,
+                None,
+                ExecutionEventKind::TaskDriftDenied,
+                "workspace modification detected without an active execution lease",
+            )?;
+            return Err(ExecutionError::TaskDrift);
+        };
+        let active_task_id = active_lease.task_id.clone();
+        let attempt = self
+            .attempts
+            .iter()
+            .rev()
+            .find(|attempt| attempt.task_id == active_task_id && attempt.state == TaskAttemptState::Running);
+        if let Some(before) = attempt.and_then(|attempt| attempt.workspace_before.as_ref()) {
+            let changes = workspace_changes(before, &current);
+            for change in &changes {
+                if !active_lease.scope.allows_path(&change.path) {
+                    self.watchdog_state = WatchdogState::DriftDetected;
+                    self.emit(
+                        now_ms,
+                        Some(active_task_id),
+                        ExecutionEventKind::TaskDriftDenied,
+                        "workspace modification outside leased scope detected",
+                    )?;
+                    return Err(ExecutionError::TaskDrift);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -3597,7 +3785,7 @@ impl ExecutionRun {
         Ok(())
     }
 
-    fn mark_external_process_started(&mut self, task_id: &str) -> Result<(), ExecutionError> {
+    pub fn mark_external_process_started(&mut self, task_id: &str) -> Result<(), ExecutionError> {
         self.current_attempt_mut(task_id)?.execution_boundary =
             AttemptExecutionBoundary::ExternalProcessStarted;
         Ok(())
@@ -4306,7 +4494,7 @@ fn excluded_workspace_path(path: &Path) -> bool {
     })
 }
 
-fn workspace_inventory(root: &Path) -> Result<BTreeMap<String, String>, ExecutionError> {
+pub fn workspace_inventory(root: &Path) -> Result<BTreeMap<String, String>, ExecutionError> {
     if !root.is_dir() {
         return Err(ExecutionError::PolicyDenied(format!(
             "workspace is not a directory: {}",
@@ -4341,7 +4529,7 @@ fn workspace_inventory(root: &Path) -> Result<BTreeMap<String, String>, Executio
     Ok(inventory)
 }
 
-fn inventory_fingerprint(inventory: &BTreeMap<String, String>) -> Result<String, ExecutionError> {
+pub fn inventory_fingerprint(inventory: &BTreeMap<String, String>) -> Result<String, ExecutionError> {
     canonical_hash(
         &inventory
             .iter()
@@ -4546,6 +4734,11 @@ fn normalize_path(value: &str) -> String {
         .to_ascii_lowercase()
 }
 
+pub fn normalize_relative_path(value: &str) -> String {
+    let clean = value.trim_start_matches(r"\\?\").replace('\\', "/");
+    clean.trim_start_matches('/').to_string()
+}
+
 fn normalize_arguments(arguments: &[String]) -> Vec<String> {
     arguments
         .iter()
@@ -4665,6 +4858,7 @@ mod recovery_boundary_tests {
             current_turn: 1,
             last_error: Some("adapter failed before execution".into()),
             no_progress_occurrences: 0,
+            reviewed_recovery_deltas: Vec::new(),
             integrity_version: "p7-ledger-integrity-v1".into(),
             integrity_tag: String::new(),
         };

@@ -4653,6 +4653,7 @@ fn expected_recovery_authority(
         .map_err(|error| format!("load P9 authority checkpoint: {error}"))?
     {
         authority.workspace_identity = record.content.authority.workspace_identity;
+        authority.source_identity = record.content.authority.source_identity;
     }
     Ok(authority)
 }
@@ -6414,10 +6415,22 @@ fn execution_retry_recovered_task_inner(
     let target = integrity.target.clone().ok_or_else(|| {
         "RECOVERY_REVIEW_REQUIRED: the interrupted task identity is unavailable".to_string()
     })?;
-    recovery
+    let reval_record = recovery
         .authorize_manual_retry(&expected, &integrity, now)
         .map_err(|error| error.to_string())?;
-    run.authorize_manual_recovery_retry(&target, now)
+    let delta = relintor_execution::ReviewedRecoveryDelta {
+        mission_id: run.mission_id.clone(),
+        mission_revision: run.mission_revision,
+        seal_hash: run.seal_hash.clone(),
+        task_id: target.task_id.clone(),
+        attempt_id: target.attempt_id.clone(),
+        checkpoint_id: latest.as_ref().map(|c| c.checkpoint_id.clone()),
+        affected_paths: reval_record.affected_paths.clone(),
+        baseline_fingerprint: run.workspace_fingerprint.clone(),
+        authorized_starting_fingerprint: String::new(),
+        authorized_at_ms: now,
+    };
+    run.authorize_manual_recovery_retry_with_delta(&target, Some(&delta), now)
         .map_err(|error| format!("authorize reviewed recovery retry: {error}"))?;
     run.persist_snapshot(&ledger_path)
         .map_err(|error| error.to_string())?;
