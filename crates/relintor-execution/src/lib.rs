@@ -2781,9 +2781,12 @@ impl ExecutionRun {
         target: &RecoveryAttemptTarget,
         now_ms: u64,
     ) -> Result<(), ExecutionError> {
-        if self.state != ExecutionRunState::RevalidationRequired {
+        if !matches!(
+            self.state,
+            ExecutionRunState::RevalidationRequired | ExecutionRunState::BlockedExternal
+        ) {
             return Err(ExecutionError::RevalidationRequired(
-                "manual recovery retry requires an explicit revalidation state".into(),
+                "manual recovery retry requires an explicit revalidation or blocked external state".into(),
             ));
         }
         if target.execution_boundary != AttemptExecutionBoundary::ExternalProcessStarted {
@@ -3730,6 +3733,7 @@ impl ExecutionRun {
                 .map(|value| value.attempt_id.as_str())
                 .unwrap_or("unbound-attempt")
         );
+        self.state = ExecutionRunState::RevalidationRequired;
         if self.events.iter().any(|event| {
             event.kind == ExecutionEventKind::AuthorityRevalidationRequired
                 && event.detail == detail

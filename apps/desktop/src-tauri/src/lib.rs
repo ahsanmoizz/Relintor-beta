@@ -4826,12 +4826,22 @@ fn p9_status_view(
     } else {
         "CHECK_SAFETY".into()
     };
+    let failure_detail = integrity
+        .target
+        .as_ref()
+        .and_then(|target| {
+            run.attempts
+                .iter()
+                .find(|attempt| attempt.attempt_id == target.attempt_id)
+                .and_then(|attempt| attempt.termination_reason.clone())
+        })
+        .or_else(|| run.last_error.clone());
     if let Some(record) = latest_revalidation.filter(|_| revalidation_is_current) {
         view.recovery_state = format!("{:?}", record.disposition);
         view.resume_disposition = Some(format!("{:?}", record.disposition));
         view.resume_blocker = (record.disposition
             != RecoveryDisposition::PreExecutionRetryAuthorized)
-            .then(|| record.reasons.first().cloned())
+            .then(|| failure_detail.clone().or_else(|| record.reasons.first().cloned()))
             .flatten();
         view.external_changes = record.affected_paths;
         view.recovery_detected = true;
@@ -4842,7 +4852,7 @@ fn p9_status_view(
         }
         view.recovery_state = format!("{:?}", integrity.disposition);
         view.resume_disposition = Some(format!("{:?}", integrity.disposition));
-        view.resume_blocker = integrity.reasons.first().cloned();
+        view.resume_blocker = failure_detail.or_else(|| integrity.reasons.first().cloned());
         view.external_changes = integrity.changed_paths;
         view.recovery_detected = !integrity.reasons.is_empty();
     } else {
@@ -4850,7 +4860,7 @@ fn p9_status_view(
         view.resume_disposition = Some(format!("{:?}", integrity.disposition));
         view.resume_blocker = (integrity.disposition
             != RecoveryDisposition::PreExecutionRetryAuthorized)
-            .then(|| integrity.reasons.first().cloned())
+            .then(|| failure_detail.or_else(|| integrity.reasons.first().cloned()))
             .flatten();
         view.external_changes = integrity.changed_paths;
         view.recovery_detected = !integrity.reasons.is_empty();

@@ -23,7 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const RECOVERY_VERSION: &str = "p9-recovery-v2";
 const LEGACY_RECOVERY_VERSION: &str = "p9-recovery-v1";
-pub const MAX_CHECKPOINT_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_CHECKPOINT_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_SNAPSHOT_FILES: usize = 4096;
 pub const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_UNTRACKED_FILE_BYTES: u64 = 2 * 1024 * 1024;
