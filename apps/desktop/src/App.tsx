@@ -991,6 +991,77 @@ function ResultPanel({ title, items, empty }: { title: string; items: string[]; 
   return <section className="panel result-panel"><span className="panel-kicker">{title}</span>{items.length ? <ul>{items.map((item) => <li key={item}>{item}</li>)}</ul> : <p className="muted-copy">{empty}</p>}</section>;
 }
 
+function areStatusesEquivalent(a: ExecutionStatus, b: ExecutionStatus): boolean {
+  if (a === b) return true;
+  return (
+    a.state === b.state &&
+    a.current_turn === b.current_turn &&
+    a.active_task === b.active_task &&
+    a.finished_tasks === b.finished_tasks &&
+    a.total_tasks === b.total_tasks &&
+    a.tool_calls === b.tool_calls &&
+    a.execution_steps === b.execution_steps &&
+    a.watchdog_state === b.watchdog_state &&
+    a.dispatch_active === b.dispatch_active &&
+    a.execution_phase === b.execution_phase &&
+    a.recovery_state === b.recovery_state &&
+    a.recovery_detected === b.recovery_detected &&
+    a.recovery_action === b.recovery_action &&
+    a.resume_disposition === b.resume_disposition &&
+    a.resume_blocker === b.resume_blocker &&
+    a.safe_boundary_reached === b.safe_boundary_reached &&
+    a.last_event === b.last_event &&
+    a.events.length === b.events.length &&
+    a.external_changes.length === b.external_changes.length
+  );
+}
+
+function FullTimeline({ events }: { events: ExecutionStatus["events"] }) {
+  const [open, setOpen] = useState(false);
+  const [limit, setLimit] = useState(50);
+  if (events.length <= 5) return null;
+  return (
+    <details
+      className="technical-details"
+      onToggle={(e) => setOpen(e.currentTarget.open)}
+    >
+      <summary>View full authority timeline ({events.length} events)</summary>
+      {open && (
+        <>
+          <ol className="event-timeline full-timeline">
+            {events.slice(-limit).reverse().map((event) => {
+              const copy = eventPresentation(event.kind, event.detail);
+              return (
+                <li key={`full-${event.sequence}-${event.kind}`}>
+                  <div>
+                    <strong>{copy.title}</strong>
+                    <span>Sequence {event.sequence}</span>
+                  </div>
+                  <p>{copy.detail}</p>
+                  <small>
+                    {event.kind}
+                    {event.task_id ? ` · ${event.task_id}` : ""}
+                  </small>
+                </li>
+              );
+            })}
+          </ol>
+          {limit < events.length && (
+            <button
+              type="button"
+              className="secondary-button"
+              style={{ margin: "8px 0" }}
+              onClick={() => setLimit((l) => l + 100)}
+            >
+              Load more events ({events.length - limit} remaining)
+            </button>
+          )}
+        </>
+      )}
+    </details>
+  );
+}
+
 export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
   const [status, setStatus] = useState<ExecutionStatus | null>(null);
   const [verification, setVerification] = useState<VerificationStatus | null>(null);
@@ -1083,7 +1154,7 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
       try {
         const current = await readExecutionStatus(projectId);
         if (active) {
-          setStatus(current);
+          setStatus((previous) => (previous && areStatusesEquivalent(previous, current) ? previous : current));
           // Verification becomes meaningful only after the authenticated P7
           // run reaches its terminal evidence boundary. Poll it from the same
           // single-flight loop so the user never has to refresh by hand.
@@ -1472,7 +1543,7 @@ export function MissionCockpit({ status, verification, antigravity, busy, revali
     <section className="panel activity-log" aria-labelledby="activity-log-title">
       <div className="section-heading"><div><span className="panel-kicker">RECENT ACTIVITY</span><h2 id="activity-log-title">What happened</h2></div><span className="auto-updated">Updates automatically</span></div>
       {recentEvents.length ? <ol className="event-timeline">{recentEvents.map((event) => { const copy = eventPresentation(event.kind, event.detail); return <li key={`${event.sequence}-${event.kind}`}><div><strong>{copy.title}</strong><span>{new Date(event.occurred_at_ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span></div><p>{copy.detail}</p></li>; })}</ol> : <div className="empty-inline"><strong>No activity yet</strong><span>Run the first task when you are ready.</span></div>}
-      {status.events.length > 5 && <details className="technical-details"><summary>View full authority timeline</summary><ol className="event-timeline full-timeline">{status.events.slice().reverse().map((event) => { const copy = eventPresentation(event.kind, event.detail); return <li key={`full-${event.sequence}-${event.kind}`}><div><strong>{copy.title}</strong><span>Sequence {event.sequence}</span></div><p>{copy.detail}</p><small>{event.kind}{event.task_id ? ` · ${event.task_id}` : ""}</small></li>; })}</ol></details>}
+      <FullTimeline events={status.events} />
     </section>
 
     <details id="mission-verification-details" className="panel technical-details mission-details"><summary>Mission details</summary><div className="mission-detail-grid"><div><span>Revision</span><strong>{status.revision}</strong></div><div><span>Execution state</span><strong>{humanStatus(status.state)}</strong></div><div><span>Safe boundary</span><strong>{status.safe_boundary_reached ? "Reached" : "Not reached"}</strong></div><div><span>Verification</span><strong>{verificationView.label}</strong></div></div><dl className="technical-list"><div><dt>Mission ID</dt><dd><code>{status.mission_id}</code></dd></div>{currentTaskId && <div><dt>Task ID</dt><dd><code>{currentTaskId}</code></dd></div>}<div><dt>Project ID</dt><dd><code>{status.project_id}</code></dd></div><div><dt>Ledger path</dt><dd><code>{displayWindowsPath(status.ledger_path)}</code></dd></div><div><dt>Recovery state</dt><dd>{status.recovery_state}</dd></div><div><dt>Turn / steps / tool calls</dt><dd>{status.current_turn} / {status.execution_steps} / {status.tool_calls}</dd></div></dl></details>

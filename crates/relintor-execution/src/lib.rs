@@ -2976,6 +2976,37 @@ impl ExecutionRun {
         task.state = ExecutionTaskState::WaitingRetry;
         task.usage_budget.retry_attempts = task.attempt_number.saturating_add(1);
         task.retry_policy.max_attempts = task.attempt_number.saturating_add(1);
+        let u_wall: u64 = self
+            .attempts
+            .iter()
+            .filter(|a| a.task_id == target.task_id)
+            .map(|a| a.usage.wall_time_ms)
+            .sum();
+        let u_steps: u64 = self
+            .attempts
+            .iter()
+            .filter(|a| a.task_id == target.task_id)
+            .map(|a| a.usage.execution_steps)
+            .sum();
+        let u_tools: u64 = self
+            .attempts
+            .iter()
+            .filter(|a| a.task_id == target.task_id)
+            .map(|a| a.usage.tool_calls)
+            .sum();
+        let fresh_wall = self
+            .policy
+            .execution_time_policy
+            .task_wall_clock_ms
+            .min(self.policy.execution_time_policy.adapter_safety_timeout_ms);
+        let default_steps = self.policy.default_budget.execution_steps;
+        let default_tools = self.policy.default_budget.tool_calls;
+        task.usage_budget.wall_clock_ms =
+            task.usage_budget.wall_clock_ms.max(u_wall.saturating_add(fresh_wall));
+        task.usage_budget.execution_steps =
+            task.usage_budget.execution_steps.max(u_steps.saturating_add(default_steps));
+        task.usage_budget.tool_calls =
+            task.usage_budget.tool_calls.max(u_tools.saturating_add(default_tools));
         self.safe_boundary = None;
         self.last_error = None;
         self.watchdog_state = WatchdogState::Healthy;
@@ -4245,6 +4276,7 @@ impl ExecutionRun {
                 ExecutionTaskState::BlockedExternal
                     | ExecutionTaskState::Failed
                     | ExecutionTaskState::Stopped
+                    | ExecutionTaskState::WaitingRetry
             )
         });
         let no_active_lease = self
@@ -4260,6 +4292,8 @@ impl ExecutionRun {
                     | ExecutionRunState::Failed
                     | ExecutionRunState::StoppedIncomplete
                     | ExecutionRunState::RevalidationRequired
+                    | ExecutionRunState::Ready
+                    | ExecutionRunState::WaitingRetry
             )
             && self.events.iter().any(|event| {
                 event.kind == ExecutionEventKind::BudgetWarning
@@ -4301,6 +4335,41 @@ impl ExecutionRun {
                     "historical budget boundary was durably recorded; execution requires recovery"
                         .into(),
                 );
+            }
+        }
+        let fresh_wall = self
+            .policy
+            .execution_time_policy
+            .task_wall_clock_ms
+            .min(self.policy.execution_time_policy.adapter_safety_timeout_ms);
+        let default_steps = self.policy.default_budget.execution_steps;
+        let default_tools = self.policy.default_budget.tool_calls;
+        for task in self.tasks.values_mut() {
+            if task.state == ExecutionTaskState::WaitingRetry {
+                let u_wall: u64 = self
+                    .attempts
+                    .iter()
+                    .filter(|a| a.task_id == task.task_id)
+                    .map(|a| a.usage.wall_time_ms)
+                    .sum();
+                let u_steps: u64 = self
+                    .attempts
+                    .iter()
+                    .filter(|a| a.task_id == task.task_id)
+                    .map(|a| a.usage.execution_steps)
+                    .sum();
+                let u_tools: u64 = self
+                    .attempts
+                    .iter()
+                    .filter(|a| a.task_id == task.task_id)
+                    .map(|a| a.usage.tool_calls)
+                    .sum();
+                task.usage_budget.wall_clock_ms =
+                    task.usage_budget.wall_clock_ms.max(u_wall.saturating_add(fresh_wall));
+                task.usage_budget.execution_steps =
+                    task.usage_budget.execution_steps.max(u_steps.saturating_add(default_steps));
+                task.usage_budget.tool_calls =
+                    task.usage_budget.tool_calls.max(u_tools.saturating_add(default_tools));
             }
         }
     }

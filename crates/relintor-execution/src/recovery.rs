@@ -19,6 +19,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const RECOVERY_VERSION: &str = "p9-recovery-v2";
@@ -1494,10 +1495,22 @@ fn hidden_command(program: &str) -> Command {
     command
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ValidatedChainEntry {
+    sequence: u64,
+    checkpoint_id: String,
+    content_digest: String,
+    parent_digest: Option<String>,
+    mtime: SystemTime,
+    len: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct RecoveryStore {
     root: PathBuf,
     key: Vec<u8>,
+    chain_cache: Arc<Mutex<BTreeMap<u64, ValidatedChainEntry>>>,
+    latest_cache: Arc<Mutex<Option<(u64, SystemTime, u64, CheckpointRecord)>>>,
 }
 
 impl RecoveryStore {
@@ -1512,7 +1525,21 @@ impl RecoveryStore {
         }
         let root = root.into();
         fs::create_dir_all(&root).map_err(io_error)?;
-        Ok(Self { root, key })
+        // Clean up any stale orphan .*.tmp files in root left by prior interrupted writes
+        if let Ok(entries) = fs::read_dir(&root) {
+            for entry in entries.filter_map(Result::ok) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') && name.ends_with(".tmp") {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+        Ok(Self {
+            root,
+            key,
+            chain_cache: Arc::new(Mutex::new(BTreeMap::new())),
+            latest_cache: Arc::new(Mutex::new(None)),
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -1591,6 +1618,7 @@ impl RecoveryStore {
         let integrity_tag = hmac_json(&self.key, &index_without_tag(&new_index))?;
         new_index.integrity_tag = integrity_tag;
         atomic_write_json(&self.root.join("checkpoint-index.json"), &new_index)?;
+        *self.latest_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
         Ok(record)
     }
 
@@ -1642,24 +1670,103 @@ impl RecoveryStore {
             }
             return Ok(None);
         };
+
+        let mut checkpoint_files = BTreeMap::new();
+        for entry in fs::read_dir(&self.root).map_err(io_error)?.filter_map(Result::ok) {
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with("checkpoint-") && name.ends_with(".json") {
+                    if let Some(seq_part) = name.strip_prefix("checkpoint-").and_then(|s| s.split('-').next()) {
+                        if let Ok(seq) = seq_part.parse::<u64>() {
+                            if checkpoint_files.contains_key(&seq) {
+                                return Err(RecoveryError::Chain(format!(
+                                    "checkpoint sequence {seq} has duplicate artifacts"
+                                )));
+                            }
+                            checkpoint_files.insert(seq, path);
+                        }
+                    }
+                }
+            }
+        }
+
         let mut previous: Option<String> = None;
-        let mut validated_records = Vec::with_capacity(index.latest_sequence as usize);
+        let mut latest_record: Option<CheckpointRecord> = None;
+        let mut cache = self.chain_cache.lock().unwrap_or_else(|e| e.into_inner());
+
         for sequence in 1..=index.latest_sequence {
-            let path = self.find_checkpoint(sequence)?;
-            let record: CheckpointRecord = read_json(&path)?;
+            let path = checkpoint_files.get(&sequence).ok_or_else(|| {
+                RecoveryError::Chain(format!("checkpoint sequence {sequence} is missing"))
+            })?;
+            let meta = fs::metadata(path).map_err(io_error)?;
+            let mtime = meta.modified().unwrap_or(UNIX_EPOCH);
+            let len = meta.len();
+
+            let is_latest = sequence == index.latest_sequence;
+
+            if is_latest {
+                let latest_cache_guard = self.latest_cache.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some((cached_seq, cached_mtime, cached_len, cached_rec)) = latest_cache_guard.as_ref() {
+                    if *cached_seq == sequence && *cached_mtime == mtime && *cached_len == len {
+                        if cached_rec.parent_digest != previous {
+                            return Err(RecoveryError::Chain("checkpoint parent chain is broken".into()));
+                        }
+                        if cached_rec.checkpoint_id != index.latest_checkpoint_id
+                            || cached_rec.content_digest != index.latest_digest
+                        {
+                            return Err(RecoveryError::Chain(
+                                "checkpoint index does not match the newest artifact".into(),
+                            ));
+                        }
+                        latest_record = Some(cached_rec.clone());
+                        continue;
+                    }
+                }
+            } else if let Some(cached) = cache.get(&sequence) {
+                if cached.mtime == mtime && cached.len == len {
+                    if cached.sequence != sequence || cached.parent_digest != previous {
+                        return Err(RecoveryError::Chain("checkpoint parent chain is broken".into()));
+                    }
+                    previous = Some(cached.content_digest.clone());
+                    continue;
+                }
+            }
+
+            let mut record: CheckpointRecord = read_json(path)?;
             self.validate_record(&record)?;
             if record.sequence != sequence || record.parent_digest != previous {
-                return Err(RecoveryError::Chain(
-                    "checkpoint parent chain is broken".into(),
-                ));
+                return Err(RecoveryError::Chain("checkpoint parent chain is broken".into()));
             }
             previous = Some(record.content_digest.clone());
-            validated_records.push((path, record));
-            if sequence == index.latest_sequence {
-                let record = &validated_records
-                    .last()
-                    .expect("the newest checkpoint was just validated")
-                    .1;
+
+            if record.recovery_version == LEGACY_RECOVERY_VERSION {
+                let legacy_version = record.recovery_version.clone();
+                let legacy_tag = record.integrity_tag.clone();
+                record.recovery_version = RECOVERY_VERSION.into();
+                let tag = hmac_json(&self.key, &record_without_tag(&record))?;
+                record.integrity_tag = tag;
+                if let Err(error) = atomic_write_json(path, &record) {
+                    if !is_low_storage_error(&error) {
+                        return Err(error);
+                    }
+                    record.recovery_version = legacy_version;
+                    record.integrity_tag = legacy_tag;
+                }
+            }
+
+            cache.insert(
+                sequence,
+                ValidatedChainEntry {
+                    sequence,
+                    checkpoint_id: record.checkpoint_id.clone(),
+                    content_digest: record.content_digest.clone(),
+                    parent_digest: record.parent_digest.clone(),
+                    mtime,
+                    len,
+                },
+            );
+
+            if is_latest {
                 if record.checkpoint_id != index.latest_checkpoint_id
                     || record.content_digest != index.latest_digest
                 {
@@ -1667,31 +1774,16 @@ impl RecoveryStore {
                         "checkpoint index does not match the newest artifact".into(),
                     ));
                 }
+                let mut latest_cache_guard = self.latest_cache.lock().unwrap_or_else(|e| e.into_inner());
+                *latest_cache_guard = Some((sequence, mtime, len, record.clone()));
+                latest_record = Some(record);
             }
         }
-        let mut current_index = index;
-        let mut migration_deferred = false;
-        for (path, record) in &mut validated_records {
-            if record.recovery_version == LEGACY_RECOVERY_VERSION {
-                let legacy_version = record.recovery_version.clone();
-                let legacy_tag = record.integrity_tag.clone();
-                record.recovery_version = RECOVERY_VERSION.into();
-                let tag = hmac_json(&self.key, &record_without_tag(record))?;
-                record.integrity_tag = tag;
-                if let Err(error) = atomic_write_json(path, record) {
-                    if !is_low_storage_error(&error) {
-                        return Err(error);
-                    }
-                    record.recovery_version = legacy_version;
-                    record.integrity_tag = legacy_tag;
-                    migration_deferred = true;
-                    break;
-                }
-            }
-        }
-        if !migration_deferred && current_index.recovery_version == LEGACY_RECOVERY_VERSION {
-            let legacy_version = current_index.recovery_version.clone();
-            let legacy_tag = current_index.integrity_tag.clone();
+
+        if index.recovery_version == LEGACY_RECOVERY_VERSION {
+            let mut current_index = index;
+            let _legacy_version = current_index.recovery_version.clone();
+            let _legacy_tag = current_index.integrity_tag.clone();
             current_index.recovery_version = RECOVERY_VERSION.into();
             let tag = hmac_json(&self.key, &index_without_tag(&current_index))?;
             current_index.integrity_tag = tag;
@@ -1701,16 +1793,16 @@ impl RecoveryStore {
                 if !is_low_storage_error(&error) {
                     return Err(error);
                 }
-                current_index.recovery_version = legacy_version;
-                current_index.integrity_tag = legacy_tag;
             }
         }
-        validated_records
-            .pop()
-            .map(|(_, record)| Some(record))
-            .ok_or_else(|| {
-                RecoveryError::Chain("checkpoint index has no valid newest checkpoint".into())
-            })
+
+        if let Some(record) = latest_record {
+            Ok(Some(record))
+        } else {
+            Err(RecoveryError::Chain(
+                "checkpoint index has no valid newest checkpoint".into(),
+            ))
+        }
     }
 
     pub fn load_run(&self) -> Result<Option<ExecutionRun>, RecoveryError> {
@@ -1984,6 +2076,7 @@ impl RecoveryStore {
             .join(format!("checkpoint-{sequence:020}-{id}.json"))
     }
 
+    #[allow(dead_code)]
     fn find_checkpoint(&self, sequence: u64) -> Result<PathBuf, RecoveryError> {
         let mut matches = fs::read_dir(&self.root)
             .map_err(io_error)?
@@ -3162,11 +3255,69 @@ fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Recover
     atomic_write(path, &bytes)
 }
 
+#[cfg(windows)]
+fn get_available_disk_space(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let dir = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()?.to_path_buf()
+    };
+    let mut wide: Vec<u16> = dir.as_os_str().encode_wide().collect();
+    wide.push(0);
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetDiskFreeSpaceExW(
+            lpDirectoryName: *const u16,
+            lpFreeBytesAvailableToCaller: *mut u64,
+            lpTotalNumberOfBytes: *mut u64,
+            lpTotalNumberOfFreeBytes: *mut u64,
+        ) -> i32;
+    }
+    let mut free_bytes: u64 = 0;
+    let ret = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free_bytes,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ret != 0 {
+        Some(free_bytes)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(windows))]
+fn get_available_disk_space(_path: &Path) -> Option<u64> {
+    None
+}
+
+const MIN_SAFE_HEADROOM_BYTES: u64 = 50 * 1024 * 1024; // 50 MB safe operational headroom
+
+pub fn check_low_disk_headroom(path: &Path, needed_bytes: u64) -> Result<(), RecoveryError> {
+    if let Some(free_bytes) = get_available_disk_space(path) {
+        if free_bytes < needed_bytes.saturating_add(MIN_SAFE_HEADROOM_BYTES) {
+            return Err(RecoveryError::Storage(format!(
+                "INSUFFICIENT_RUNTIME_STORAGE: destination volume has only {} MB free space, but {} MB + 50 MB headroom is required",
+                free_bytes / (1024 * 1024),
+                needed_bytes / (1024 * 1024),
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn is_low_storage_error(error: &RecoveryError) -> bool {
     let detail = error.to_string().to_ascii_lowercase();
     detail.contains("os error 112")
         || detail.contains("not enough space")
         || detail.contains("disk full")
+        || detail.contains("insufficient_runtime_storage")
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), RecoveryError> {
@@ -3178,20 +3329,28 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), RecoveryError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(io_error)?;
     }
+    check_low_disk_headroom(path, bytes.len() as u64)?;
     let temp = path.with_file_name(format!(
         ".{}.tmp",
         path.file_name().unwrap_or_default().to_string_lossy()
     ));
     let _ = fs::remove_file(&temp);
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temp)
-        .map_err(io_error)?;
-    file.write_all(bytes).map_err(io_error)?;
-    file.sync_all().map_err(io_error)?;
-    drop(file);
-    atomic_replace(&temp, path)?;
+    let res = (|| -> Result<(), RecoveryError> {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp)
+            .map_err(io_error)?;
+        file.write_all(bytes).map_err(io_error)?;
+        file.sync_all().map_err(io_error)?;
+        drop(file);
+        atomic_replace(&temp, path)?;
+        Ok(())
+    })();
+    if res.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    res?;
     #[cfg(not(windows))]
     if let Some(parent) = path.parent() {
         if let Ok(directory) = File::open(parent) {

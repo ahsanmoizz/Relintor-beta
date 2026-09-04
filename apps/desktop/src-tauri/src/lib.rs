@@ -4578,17 +4578,23 @@ fn execution_status_view_base(
             .as_ref()
             .is_some_and(|boundary| boundary.reached),
         last_event: run.events.last().map(|event| event.detail.clone()),
-        events: run
-            .events
-            .iter()
-            .map(|event| ExecutionEventView {
-                sequence: event.sequence,
-                occurred_at_ms: event.occurred_at_ms,
-                task_id: event.task_id.clone(),
-                kind: format!("{:?}", event.kind),
-                detail: event.detail.clone(),
-            })
-            .collect(),
+        events: {
+            let event_slice = if run.events.len() > 100 {
+                &run.events[run.events.len() - 100..]
+            } else {
+                &run.events[..]
+            };
+            event_slice
+                .iter()
+                .map(|event| ExecutionEventView {
+                    sequence: event.sequence,
+                    occurred_at_ms: event.occurred_at_ms,
+                    task_id: event.task_id.clone(),
+                    kind: format!("{:?}", event.kind),
+                    detail: event.detail.clone(),
+                })
+                .collect()
+        },
         ledger_path: ledger_path.display().to_string(),
         recovery_state: "P9_RECOVERY_NOT_EVALUATED".into(),
         last_safe_checkpoint: None,

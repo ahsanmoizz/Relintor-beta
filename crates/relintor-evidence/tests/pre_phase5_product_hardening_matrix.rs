@@ -775,6 +775,7 @@ fn test_long_execution_ledger_stress_500_1000_5000_events() {
             no_progress_occurrences: 0,
             integrity_version: "p7-ledger-integrity-v1".into(),
             integrity_tag: String::new(),
+            reviewed_recovery_deltas: Vec::new(),
         };
 
         // Serialize
