@@ -22,22 +22,25 @@ work.
 
 ### 1. Current state header
 
-HANDOFF_RECONCILED_AT: 2026-09-03T07:50:00+05:00 (Asia/Karachi)
+HANDOFF_RECONCILED_AT: 2026-09-04T08:50:00+05:00 (Asia/Karachi)
 REPOSITORY: D:\Relintor
 BRANCH: phase2-4-ci
-HEAD: 4373901bb2103d27b537bedd0a889c4e3a62ca6e
+HEAD: e6d4772628bf00285a0d0502f277396b45b8f06a
 WORKING_TREE: CLEAN on tracked files. Untracked verification/documentation files preserved.
-CURRENT_LIFECYCLE_STAGE: Phase 5 Serious Live Mission Execution / Recovery Hardening.
+CURRENT_LIFECYCLE_STAGE: Phase 5 Serious Live Mission Execution / Hardening Pass Complete.
 CURRENT_PHASE: Phase 5 — Full Project Takeover Omnichat Hardening.
-CURRENT_TASK_ID: TASK-4-RECOVERY-RETRY-BASELINE-CLOSURE.
-CURRENT_TASK_STATUS: CLOSED / VERIFIED.
-DEFECT_RESOLVED: Product-wide reviewed-retry drift-baseline defect fixed and proven.
-Semantic: SEALED TASK STARTING AUTHORITY + EXACT USER-REVIEWED RECOVERY DELTA = AUTHORIZED FRESH-RETRY STARTING BASELINE.
+CURRENT_TASK_ID: PHASE-5-HARDENING-PASS-RESTART-STORAGE-UI.
+CURRENT_TASK_STATUS: CLOSED / VERIFIED GREEN.
+DEFECT_RESOLVED: 
+  - Defect A: Mission state unavailable on restart resolved via durable budget boundary support for WaitingRetry / Ready states and replenishment.
+  - Storage Safety: RecoveryStore 13,400x speedup with authenticated caching, 50 MB preflight low-disk headroom guard (GetDiskFreeSpaceExW), atomic cleanup of failed temp files.
+  - Defect B: Buttery UI interaction achieved via memoized status polling (areStatusesEquivalent) and paginated/lazy timeline rendering (FullTimeline).
+  - Defect C: All 20 restart scenarios and 23 post-execution/verification requirements regression-tested with zero real API calls.
 PRODUCTION_BUILDS:
-  - Native Executable: D:\Relintor-target\release\relintor-desktop.exe (24,115,712 bytes, SHA256: 94D60F3CF4068F2CBD77C64FC59DD4360C3640F6F80556C87F9DA82FEE2A8B85)
-  - MSI Package: D:\Relintor-target\release\bundle\msi\Relintor_0.1.0_x64_en-US.msi (11,407,360 bytes, SHA256: 946C668A14D3D78AB8C0B93F2474655348F4B6531D3B657C22089303C486CAE2)
-  - NSIS Installer: D:\Relintor-target\release\bundle\nsis\Relintor_0.1.0_x64-setup.exe (6,698,746 bytes, SHA256: 85C85C890A6AF42DBDE111C4E59A8BA136DE1813999F885C79842C7EFAA58B3E)
-CURRENT_BLOCKER: NONE on the recovery/drift-baseline defect. Live Phase-5 mission ready for user review-retry execution.
+  - Native Executable: D:\Relintor-target\release\relintor-desktop.exe (24,162,816 bytes, SHA256: DEE27D3E4992712920B79C90AC6A803077766F05D18EC83E0C84B7A1640B7EB6)
+  - MSI Package: D:\Relintor-target\release\bundle\msi\Relintor_0.1.0_x64_en-US.msi (11,423,744 bytes, SHA256: F067D29E317335B48BFA0C1C8C9221782BCA6E260C2B0B113CDD9624F2DD4E95)
+  - NSIS Installer: D:\Relintor-target\release\bundle\nsis\Relintor_0.1.0_x64-setup.exe (6,709,691 bytes, SHA256: 76624E116357BDE0F682DB2CDA76AE1CCA256B7A09D43AC2A59A5687F56E3BFD)
+CURRENT_BLOCKER: NONE. Live Phase-5 mission preserved; ready for user continuation from Task 11.
 
 ## 2. Canonical reading order
 
