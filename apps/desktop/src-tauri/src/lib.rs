@@ -4112,7 +4112,7 @@ fn run_execution_step_worker(
                     )
                     .map_err(|error| error.to_string())?;
                 }
-                Ok(None) => break,
+                Ok(None) | Err(relintor_execution::ExecutionError::ContinuationNotAvailable) => break,
                 Err(error) => {
                     run.state = relintor_execution::ExecutionRunState::RevalidationRequired;
                     run.last_error = Some(error.to_string());
@@ -4789,6 +4789,7 @@ fn p9_status_view(
     if run.all_tasks_finished()
         || run.state == relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
         || !run.recovery_status_requires_attention()
+        || run.current_recovery_attempt().is_none()
     {
         if let Some(record) = latest.as_ref().filter(|record| record.is_safe_to_resume()) {
             view.last_safe_checkpoint =
@@ -4956,6 +4957,19 @@ fn load_execution_run(
         if run.state != relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification {
             run.state = relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification;
             let _ = run.persist_snapshot(&ledger_path);
+        }
+    } else if run.state == relintor_execution::ExecutionRunState::Ready
+        && active_execution(project_id)?.is_none()
+        && run.current_recovery_attempt().is_none()
+        && !run.recovery_status_requires_attention()
+        && !run.runnable_tasks().is_empty()
+    {
+        // Clean task boundary: auto-dispatch next task backend-driven
+        let readiness = health_antigravity_for_app(Some(app));
+        if readiness.adapter_ready {
+            if let Some(cli_path) = configured_antigravity_cli(app) {
+                let _ = launch_execution_worker(app.clone(), project_id.to_string(), cli_path);
+            }
         }
     }
     Ok((run, ledger_path, revision, handoff))
@@ -5596,6 +5610,7 @@ fn deterministic_failed_requirement_ids(
         .collect()
 }
 
+#[allow(dead_code)]
 fn machine_evidence_class(class: EvidenceClass) -> bool {
     !matches!(
         class,
@@ -5605,6 +5620,7 @@ fn machine_evidence_class(class: EvidenceClass) -> bool {
     )
 }
 
+#[allow(dead_code)]
 fn missing_machine_requirement_ids(
     report: &relintor_evidence::VerificationReport,
 ) -> BTreeSet<String> {
@@ -5969,6 +5985,10 @@ fn execution_start_inner(
     project_id: String,
 ) -> Result<ExecutionStatusView, String> {
     let project_id = canonical_project_id(&project_id)?;
+    if active_execution(&project_id)?.is_some() {
+        let (run, ledger_path, revision, _) = load_execution_run(&app, &project_id)?;
+        return p9_status_view(&app, &project_id, &ledger_path, &run, &revision);
+    }
     require_execution_not_active(&project_id)?;
     let (mut run, ledger_path, revision, handoff) = load_execution_run(&app, &project_id)?;
     let now = execution_now_ms();
@@ -6042,6 +6062,10 @@ fn execution_step(app: AppHandle, project_id: String) -> Result<ExecutionStatusV
 
 fn execution_step_inner(app: AppHandle, project_id: String) -> Result<ExecutionStatusView, String> {
     let project_id = canonical_project_id(&project_id)?;
+    if active_execution(&project_id)?.is_some() {
+        let (run, ledger_path, revision, _) = load_execution_run(&app, &project_id)?;
+        return p9_status_view(&app, &project_id, &ledger_path, &run, &revision);
+    }
     require_execution_not_active(&project_id)?;
     let readiness = health_antigravity_for_app(Some(&app));
     if !readiness.adapter_ready {
@@ -6050,7 +6074,7 @@ fn execution_step_inner(app: AppHandle, project_id: String) -> Result<ExecutionS
     let cli_path = configured_antigravity_cli(&app).ok_or_else(|| {
         "ANTIGRAVITY_SETUP_REQUIRED: the verified Antigravity CLI path is unavailable".to_string()
     })?;
-    let (mut run, ledger_path, revision, _) = load_execution_run(&app, &project_id)?;
+    let (run, ledger_path, revision, _) = load_execution_run(&app, &project_id)?;
     if run.all_tasks_finished()
         || run.state == relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
     {

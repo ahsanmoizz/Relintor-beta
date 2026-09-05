@@ -3189,13 +3189,22 @@ impl ExecutionRun {
                 "continuation requires a terminal attempt and no active lease".into(),
             ));
         }
-        let previous_task = self.events.last().and_then(|event| {
-            (event.kind == ExecutionEventKind::TaskImplementationFinished)
-                .then(|| event.task_id.clone())
-                .flatten()
-        });
-        if previous_task.is_none() {
-            return Err(ExecutionError::ContinuationNotAvailable);
+        if self.current_recovery_attempt().is_some() {
+            return Err(ExecutionError::PolicyDenied(
+                "cannot authorize continuation while a task requires recovery review".into(),
+            ));
+        }
+        let has_finished_tasks = self
+            .tasks
+            .values()
+            .any(|task| task.state == ExecutionTaskState::FinishedAwaitingVerification);
+        if has_finished_tasks {
+            let previous_finished = self.events.iter().rev().any(|event| {
+                event.kind == ExecutionEventKind::TaskImplementationFinished
+            });
+            if !previous_finished {
+                return Err(ExecutionError::ContinuationNotAvailable);
+            }
         }
         let Some(next_task) = self.runnable_tasks().into_iter().next() else {
             self.update_run_state();
@@ -3847,21 +3856,17 @@ impl ExecutionRun {
             return None;
         }
         self.attempts.iter().rev().find(|attempt| {
+            if let Some(task) = self.tasks.get(&attempt.task_id) {
+                if task.state == ExecutionTaskState::FinishedAwaitingVerification {
+                    return false;
+                }
+            }
             matches!(
                 attempt.state,
                 TaskAttemptState::Failed
                     | TaskAttemptState::TurnEndedIncomplete
                     | TaskAttemptState::SafeBoundaryStopped
             ) && attempt.ended_at_ms.is_some()
-                && self.tasks.get(&attempt.task_id).is_some_and(|task| {
-                    task.state != ExecutionTaskState::FinishedAwaitingVerification
-                })
-                && !self.attempts.iter().any(|other| {
-                    other.task_id == attempt.task_id
-                        && other.attempt_number > attempt.attempt_number
-                        && (other.completion_authority.is_some()
-                            || other.state == TaskAttemptState::Succeeded)
-                })
         })
     }
 
@@ -3891,15 +3896,6 @@ impl ExecutionRun {
             return false;
         }
         self.current_recovery_attempt().is_some()
-            || matches!(
-                self.state,
-                ExecutionRunState::BlockedExternal
-                    | ExecutionRunState::SafeBoundaryReached
-                    | ExecutionRunState::TurnEndedIncomplete
-                    | ExecutionRunState::StoppedIncomplete
-                    | ExecutionRunState::Failed
-                    | ExecutionRunState::RevalidationRequired
-            )
     }
 
     pub fn current_recovery_attempt_is_pre_execution(&self) -> bool {

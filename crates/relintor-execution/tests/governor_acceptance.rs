@@ -486,11 +486,12 @@ fn test_upgrade_matrix_existing_phase5_mission_loads() {
                     relintor_execution::ExecutionTaskState::FinishedAwaitingVerification
                 );
             }
-            // Task 11 is current (BlockedExternal / WaitingRetry)
+            // Task 11 is current or completed in real Phase 5 progression
             assert!(matches!(
                 restored.tasks["task_846bce015de304ff032e2908"].state,
                 relintor_execution::ExecutionTaskState::WaitingRetry
                     | relintor_execution::ExecutionTaskState::BlockedExternal
+                    | relintor_execution::ExecutionTaskState::FinishedAwaitingVerification
             ));
         }
     }

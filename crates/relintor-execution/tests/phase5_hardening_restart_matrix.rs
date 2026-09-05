@@ -25,6 +25,7 @@
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use ed25519_dalek::SigningKey;
+use relintor_antigravity::MockAdapter;
 use relintor_execution::{
     check_low_disk_headroom, inventory_fingerprint, workspace_inventory, ActionRequest,
     ActionResult, CheckpointContent, CheckpointKind, ExecutionEvent,
@@ -161,10 +162,21 @@ fn temp_workspace(name: &str) -> PathBuf {
 }
 
 fn seed_run(ws: &Path, req_count: usize) -> ExecutionRun {
+    seed_run_with_context(ws, req_count).0
+}
+
+fn seed_run_with_context(
+    ws: &Path,
+    req_count: usize,
+) -> (
+    ExecutionRun,
+    MissionRevision,
+    relintor_standards::ExecutionHandoff,
+) {
     let (revision, handoff, registry, trusted) = sealed_fixture(req_count);
     let inv = workspace_inventory(ws).unwrap();
     let fp = inventory_fingerprint(&inv).unwrap();
-    ExecutionRun::from_p6_handoff_with_registry(
+    let run = ExecutionRun::from_p6_handoff_with_registry(
         &revision,
         &handoff,
         &registry,
@@ -174,7 +186,8 @@ fn seed_run(ws: &Path, req_count: usize) -> ExecutionRun {
         SchedulerPolicy::default(),
         1_000_000,
     )
-    .expect("create execution run")
+    .expect("create execution run");
+    (run, revision, handoff)
 }
 
 fn test_action(root: &Path, operation: &str) -> ActionRequest {
@@ -767,3 +780,259 @@ fn test_scale_fixture_10000_events() {
 
     let _ = fs::remove_dir_all(ws);
 }
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_millis() as u64
+}
+
+// -----------------------------------------------------------------------------
+// 21. CLEAN BOUNDARY AUTO-CONTINUATION: TASK 1 -> TASK 2
+// -----------------------------------------------------------------------------
+#[test]
+fn test_21_clean_boundary_auto_continuation_task1_to_task2() {
+    let ws = temp_workspace("auto-cont-t1-t2");
+    let (mut run, revision, handoff) = seed_run_with_context(&ws, 2);
+    let mut adapter = MockAdapter::supported();
+
+    let runnable = run.runnable_tasks();
+    assert!(!runnable.is_empty());
+    let t1_id = runnable[0].clone();
+
+    // Execute Task 1 to completion
+    run.execute_next_with_adapter(&mut adapter, &revision, &handoff, &ws, now_ms())
+        .expect("execute task 1");
+    assert_eq!(
+        run.tasks[&t1_id].state,
+        ExecutionTaskState::FinishedAwaitingVerification
+    );
+    assert_eq!(run.state, ExecutionRunState::Ready);
+    assert!(run.current_recovery_attempt().is_none());
+    assert!(!run.recovery_status_requires_attention());
+
+    // Clean boundary: auto-continuation authorizes task 2
+    let next_task = run
+        .authorize_next_task_continuation(&revision, &handoff, now_ms())
+        .expect("clean continuation authorizes next task")
+        .expect("next task is available");
+    assert_ne!(next_task, t1_id);
+    assert!(run.runnable_tasks().contains(&next_task));
+
+    let _ = fs::remove_dir_all(ws);
+}
+
+// -----------------------------------------------------------------------------
+// 22. COMPLETED TASK RECOVERY IMMUNITY (INTERRUPTED THEN COMPLETED ATTEMPT)
+// -----------------------------------------------------------------------------
+#[test]
+fn test_22_completed_task_recovery_immunity() {
+    let ws = temp_workspace("recovery-immunity");
+    let (mut run, revision, handoff) = seed_run_with_context(&ws, 2);
+    let t1_id = run.runnable_tasks()[0].clone();
+
+    let now = now_ms();
+    // Attempt 1: interrupted
+    let target = interrupt_attempt(&mut run, &t1_id, now.saturating_sub(10_000));
+    assert_eq!(target.task_id, t1_id);
+    assert!(run.current_recovery_attempt().is_some());
+    assert!(run.recovery_status_requires_attention());
+
+    // Authorize manual retry to clear the failure state and allow attempt 2
+    let delta = ReviewedRecoveryDelta {
+        mission_id: run.mission_id.clone(),
+        mission_revision: run.mission_revision,
+        seal_hash: run.seal_hash.clone(),
+        task_id: t1_id.clone(),
+        attempt_id: target.attempt_id.clone(),
+        checkpoint_id: None,
+        affected_paths: vec![],
+        baseline_fingerprint: run.workspace_fingerprint.clone(),
+        authorized_starting_fingerprint: String::new(),
+        authorized_at_ms: now.saturating_sub(5_000),
+    };
+    run.authorize_manual_recovery_retry_with_delta(&target, Some(&delta), now.saturating_sub(5_000))
+        .expect("authorize retry");
+    assert_eq!(run.tasks[&t1_id].state, ExecutionTaskState::WaitingRetry);
+
+    // Attempt 2: executes and completes successfully
+    let mut adapter = MockAdapter::supported();
+    run.execute_next_with_adapter(&mut adapter, &revision, &handoff, &ws, now_ms())
+        .expect("execute attempt 2");
+    assert_eq!(
+        run.tasks[&t1_id].state,
+        ExecutionTaskState::FinishedAwaitingVerification
+    );
+    assert_eq!(run.attempts.len(), 2);
+    assert_eq!(run.attempts[0].state, TaskAttemptState::WaitingRetry);
+    assert_eq!(run.attempts[1].state, TaskAttemptState::Succeeded);
+
+    // CRUCIAL INVARIANT: Completed tasks are IMMUNE to recovery.
+    // Even though attempt 1 was Failed, current_recovery_attempt MUST be None.
+    assert!(
+        run.current_recovery_attempt().is_none(),
+        "Completed task must not be a recovery target despite historical failed attempt"
+    );
+    assert!(
+        !run.recovery_status_requires_attention(),
+        "Recovery status must not require attention when completed task has historical failed attempt"
+    );
+
+    // Auto-continuation must proceed cleanly to Task 2
+    let next_task = run
+        .authorize_next_task_continuation(&revision, &handoff, now_ms())
+        .expect("clean continuation authorizes next task")
+        .expect("next task available");
+    assert_ne!(next_task, t1_id);
+
+    let _ = fs::remove_dir_all(ws);
+}
+
+// -----------------------------------------------------------------------------
+// 23. 20-TASK CLEAN CHAIN AUTO-CONTINUATION
+// -----------------------------------------------------------------------------
+#[test]
+fn test_23_20_task_clean_chain_auto_continuation() {
+    let ws = temp_workspace("20-task-clean-chain");
+    let (mut run, revision, handoff) = seed_run_with_context(&ws, 20);
+    let mut adapter = MockAdapter::supported();
+
+    let mut step = 0;
+    while !run.all_tasks_finished() {
+        if step > 0 {
+            let next = run
+                .authorize_next_task_continuation(&revision, &handoff, now_ms())
+                .expect("authorize continuation")
+                .expect("next task present");
+            assert!(run.runnable_tasks().contains(&next));
+        }
+        assert!(run.current_recovery_attempt().is_none());
+        assert!(!run.recovery_status_requires_attention());
+
+        fs::write(ws.join(format!("task_{step}.txt")), format!("content {step}")).unwrap();
+        run.execute_next_with_adapter(&mut adapter, &revision, &handoff, &ws, now_ms())
+            .unwrap_or_else(|e| panic!("failed at step {step}: {e:?}"));
+
+        if !run.all_tasks_finished() {
+            assert_eq!(run.state, ExecutionRunState::Ready);
+        }
+        assert!(run.current_recovery_attempt().is_none());
+        assert!(!run.recovery_status_requires_attention());
+        step += 1;
+    }
+
+    assert_eq!(
+        run.state,
+        ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
+    );
+    assert!(run.all_tasks_finished());
+    assert_eq!(run.runnable_tasks().len(), 0);
+
+    let _ = fs::remove_dir_all(ws);
+}
+
+// -----------------------------------------------------------------------------
+// 24. 100-TASK CLEAN CHAIN AUTO-CONTINUATION (SCALE VERIFICATION)
+// -----------------------------------------------------------------------------
+#[test]
+fn test_24_100_task_clean_chain_auto_continuation() {
+    let ws = temp_workspace("100-task-clean-chain");
+    let (mut run, revision, handoff) = seed_run_with_context(&ws, 100);
+    let mut adapter = MockAdapter::supported();
+
+    let mut step = 0;
+    let t0 = Instant::now();
+    while !run.all_tasks_finished() {
+        if step > 0 {
+            let next = run
+                .authorize_next_task_continuation(&revision, &handoff, now_ms())
+                .expect("authorize continuation")
+                .expect("next task present");
+            assert!(run.runnable_tasks().contains(&next));
+        }
+        fs::write(ws.join(format!("task_{step}.txt")), format!("content {step}")).unwrap();
+        run.execute_next_with_adapter(&mut adapter, &revision, &handoff, &ws, now_ms())
+            .unwrap_or_else(|e| panic!("failed at step {step}: {e:?}"));
+        step += 1;
+    }
+    let elapsed = t0.elapsed();
+    println!("100-task clean chain completed in {elapsed:?} across {step} tasks");
+
+    assert_eq!(
+        run.state,
+        ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
+    );
+    assert!(run.all_tasks_finished());
+    assert!(run.current_recovery_attempt().is_none());
+    assert!(!run.recovery_status_requires_attention());
+
+    let _ = fs::remove_dir_all(ws);
+}
+
+// -----------------------------------------------------------------------------
+// 25. GENUINE RECOVERY BLOCKER STOPS AUTO-CONTINUATION
+// -----------------------------------------------------------------------------
+#[test]
+fn test_25_genuine_recovery_blocker_stops_auto_continuation() {
+    let ws = temp_workspace("genuine-blocker");
+    let (mut run, revision, handoff) = seed_run_with_context(&ws, 3);
+    let t1_id = run.runnable_tasks()[0].clone();
+
+    // Interrupt uncompleted Task 1
+    let now = now_ms();
+    let target = interrupt_attempt(&mut run, &t1_id, now.saturating_sub(1000));
+    assert_eq!(target.task_id, t1_id);
+
+    // Invariants: genuine recovery blocker MUST require attention and block continuation
+    assert!(run.current_recovery_attempt().is_some());
+    assert!(run.recovery_status_requires_attention());
+
+    // Attempting auto-continuation must be rejected
+    let cont_err = run.authorize_next_task_continuation(&revision, &handoff, now_ms());
+    assert!(
+        cont_err.is_err(),
+        "Continuation must be denied when genuine recovery blocker is present"
+    );
+
+    let _ = fs::remove_dir_all(ws);
+}
+
+// -----------------------------------------------------------------------------
+// 26. RESTART AFTER COMPLETION PRESERVES CLEAN AUTO-CONTINUATION
+// -----------------------------------------------------------------------------
+#[test]
+fn test_26_restart_after_completion_preserves_clean_auto_continuation() {
+    let ws = temp_workspace("restart-clean-continuation");
+    let (mut run, revision, handoff) = seed_run_with_context(&ws, 3);
+    let mut adapter = MockAdapter::supported();
+
+    let t1_id = run.runnable_tasks()[0].clone();
+    run.execute_next_with_adapter(&mut adapter, &revision, &handoff, &ws, now_ms())
+        .expect("execute task 1");
+    assert_eq!(
+        run.tasks[&t1_id].state,
+        ExecutionTaskState::FinishedAwaitingVerification
+    );
+    assert_eq!(run.state, ExecutionRunState::Ready);
+
+    // System restart: serialize to JSON and restore
+    let json = run.snapshot_json().expect("snapshot run");
+    let mut restored = ExecutionRun::restore_json(&json).expect("restore run");
+
+    // Restored state must be Ready, with NO recovery required
+    assert_eq!(restored.state, ExecutionRunState::Ready);
+    assert!(restored.current_recovery_attempt().is_none());
+    assert!(!restored.recovery_status_requires_attention());
+
+    // Restored run must cleanly authorize Task 2
+    let next_task = restored
+        .authorize_next_task_continuation(&revision, &handoff, now_ms())
+        .expect("restored run authorizes next task continuation")
+        .expect("next task is available");
+    assert_ne!(next_task, t1_id);
+    assert!(restored.runnable_tasks().contains(&next_task));
+
+    let _ = fs::remove_dir_all(ws);
+}
+
