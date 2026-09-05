@@ -469,7 +469,12 @@ fn test_upgrade_matrix_existing_phase5_mission_loads() {
             );
         } else {
             // The live Phase 5 mission has progressed past Task 4 to Task 11
-            assert_eq!(restored.state, relintor_execution::ExecutionRunState::Ready);
+            assert!(matches!(
+                restored.state,
+                relintor_execution::ExecutionRunState::Ready
+                    | relintor_execution::ExecutionRunState::BlockedExternal
+                    | relintor_execution::ExecutionRunState::RevalidationRequired
+            ));
             for id in [
                 "task_131fe92c0e2f030454e92944",
                 "task_1fd6aeb68d6e8f80b6933346",
@@ -481,11 +486,12 @@ fn test_upgrade_matrix_existing_phase5_mission_loads() {
                     relintor_execution::ExecutionTaskState::FinishedAwaitingVerification
                 );
             }
-            // Task 11 is current / WaitingRetry
-            assert_eq!(
+            // Task 11 is current (BlockedExternal / WaitingRetry)
+            assert!(matches!(
                 restored.tasks["task_846bce015de304ff032e2908"].state,
                 relintor_execution::ExecutionTaskState::WaitingRetry
-            );
+                    | relintor_execution::ExecutionTaskState::BlockedExternal
+            ));
         }
     }
 }

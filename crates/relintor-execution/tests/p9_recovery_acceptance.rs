@@ -1555,3 +1555,162 @@ fn finished_mission_with_historical_recovery_attempts_reconciles_cleanly_and_dis
     assert_eq!(run.events.len(), initial_event_count);
 }
 
+#[test]
+fn test_recovery_store_shared_cache_hits_across_instances() {
+    let path = root("shared-cache");
+    let store1 = store(&path);
+    let _first = store1
+        .write_checkpoint(content(&path, "first"))
+        .expect("write first");
+    let second = store1
+        .write_checkpoint(content(&path, "second"))
+        .expect("write second");
+
+    // Create another store instance pointing to the same path (simulating Tauri's recovery_store(app, revision))
+    let store2 = store(&path);
+    let loaded = store2
+        .load_latest()
+        .expect("load checkpoint")
+        .expect("latest checkpoint");
+    assert_eq!(loaded.checkpoint_id, second.checkpoint_id);
+    assert_eq!(loaded.sequence, 2);
+    assert_eq!(loaded.content.reason, "second");
+
+    // Creating a third store instance also hits the shared cache
+    let store3 = store(&path);
+    let loaded3 = store3
+        .load_latest()
+        .expect("load checkpoint")
+        .expect("latest checkpoint");
+    assert_eq!(loaded3.checkpoint_id, second.checkpoint_id);
+    assert_eq!(loaded3.sequence, 2);
+
+    let _ = fs::remove_dir_all(&path);
+}
+
+#[test]
+fn test_defect_a_recovery_review_and_retry_flow() {
+    let path = root("defect-a-flow-ws");
+    let recovery_dir = root("defect-a-flow-rec");
+    let store1 = RecoveryStore::new(&recovery_dir, vec![7; 32]).expect("open recovery store");
+    let mut run = empty_run(&path);
+    run.tasks.insert(
+        "task-11".into(),
+        ExecutionTask {
+            task_id: "task-11".into(),
+            objective: "Phase 5 Task 11".into(),
+            requirement_ids: vec!["requirement-p9".into()],
+            dependency_ids: Vec::new(),
+            priority: RequirementPriority::P2,
+            state: ExecutionTaskState::Ready,
+            scope: LeaseScope {
+                workspace: path.clone(),
+                file_scopes: Vec::new(),
+                directory_scopes: Vec::new(),
+                shared_resources: Vec::new(),
+                package_lockfiles: Vec::new(),
+                generated_files: Vec::new(),
+                allowed_tools: Default::default(),
+                external_authority: Default::default(),
+                scope_known: true,
+            },
+            usage_budget: UsageBudget::default(),
+            retry_policy: RetryPolicy::default(),
+            evidence_obligations: Vec::new(),
+            attempt_number: 0,
+        },
+    );
+    run.state = ExecutionRunState::Ready;
+
+    let packet = run.start_task("task-11", 200).expect("start task 11");
+    if let Some(attempt) = run.attempts.last_mut() {
+        attempt.execution_boundary = relintor_execution::AttemptExecutionBoundary::ExternalProcessStarted;
+        attempt.state = TaskAttemptState::Failed;
+        attempt.termination_reason = Some("execution ledger: recovery storage: recovery artifact exceeds size limit".into());
+        attempt.ended_at_ms = Some(250);
+    }
+    for lease in &mut run.leases {
+        if lease.lease_id == packet.lease_id {
+            lease.status = LeaseStatus::Consumed;
+            lease.lease_digest = lease.compute_digest().unwrap();
+        }
+    }
+    run.tasks.get_mut("task-11").unwrap().state = ExecutionTaskState::BlockedExternal;
+    run.state = ExecutionRunState::BlockedExternal;
+    run.last_error = Some("execution ledger: recovery storage: recovery artifact exceeds size limit".into());
+
+    let ws = WorkspaceSnapshot::capture(&path, 100).expect("capture ws");
+    let mut auth = authority(&ws);
+    auth.p7_run_id = run.run_id.clone();
+    let coord = RecoveryCoordinator::new(store1.clone());
+
+    let mut proc = owned_process();
+    proc.run_id = run.run_id.clone();
+    proc.task_id = Some("task-11".into());
+    proc.attempt_id = run.attempts.last().map(|a| a.attempt_id.clone());
+    proc.lease_id = Some(packet.lease_id.clone());
+
+    // Write initial checkpoint 1
+    let cp1 = coord.checkpoint_run(
+        &run,
+        auth.clone(),
+        CheckpointKind::AfterTaskPersistence,
+        &path,
+        vec![proc],
+        vec![],
+        "initial checkpoint",
+        300,
+    ).expect("checkpoint 1");
+    assert_eq!(cp1.sequence, 1);
+
+    // 1. Resume integrity check: ExternalProcessStarted attempt, process is gone
+    let integrity = coord.resume_integrity_for_run(
+        &run,
+        &auth,
+        &path,
+        &ConservativeProcessInspector,
+        400,
+    ).expect("evaluate resume integrity");
+    assert_eq!(integrity.disposition, RecoveryDisposition::RevalidationRequired);
+
+    // 2. Begin revalidation (writes checkpoint-revalidation.json)
+    let reval = coord.begin_revalidation(&auth, &integrity, 401).expect("begin revalidation");
+    assert_eq!(reval.disposition, RecoveryDisposition::RevalidationRequired);
+
+    // 3. User authorizes manual retry
+    let retry_reval = coord.authorize_manual_retry(&auth, &integrity, 500).expect("authorize retry");
+    assert_eq!(retry_reval.decision, "MANUAL_RETRY_AUTHORIZED");
+
+    // 4. Update run with reviewed delta
+    let target = run.current_recovery_attempt().expect("target exists");
+    let delta = relintor_execution::ReviewedRecoveryDelta {
+        mission_id: run.mission_id.clone(),
+        mission_revision: run.mission_revision,
+        seal_hash: run.seal_hash.clone(),
+        task_id: target.task_id.clone(),
+        attempt_id: target.attempt_id.clone(),
+        checkpoint_id: Some(cp1.checkpoint_id.clone()),
+        affected_paths: retry_reval.affected_paths.clone(),
+        baseline_fingerprint: run.workspace_fingerprint.clone(),
+        authorized_starting_fingerprint: String::new(),
+        authorized_at_ms: 500,
+    };
+    run.authorize_manual_recovery_retry_with_delta(&target, Some(&delta), 500).expect("authorize retry with delta");
+
+    // 5. Checkpoint the retry (Checkpoint 2) - verifies compact JSON writing and size check
+    let cp2 = coord.checkpoint_run(
+        &run,
+        auth.clone(),
+        CheckpointKind::AfterTaskPersistence,
+        &path,
+        vec![],
+        vec![],
+        "explicit recovery review authorized a fresh attempt for the interrupted task",
+        510,
+    ).expect("write recovery retry checkpoint");
+    assert_eq!(cp2.sequence, 2);
+
+    let _ = fs::remove_dir_all(&path);
+    let _ = fs::remove_dir_all(&recovery_dir);
+}
+

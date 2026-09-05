@@ -13,18 +13,18 @@ use super::{
 use relintor_antigravity::{observable_process_command_digest, process_creation_time_ms};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const RECOVERY_VERSION: &str = "p9-recovery-v2";
 const LEGACY_RECOVERY_VERSION: &str = "p9-recovery-v1";
-pub const MAX_CHECKPOINT_BYTES: usize = 256 * 1024 * 1024;
+pub const MAX_CHECKPOINT_BYTES: usize = 512 * 1024 * 1024;
 pub const MAX_SNAPSHOT_FILES: usize = 4096;
 pub const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_UNTRACKED_FILE_BYTES: u64 = 2 * 1024 * 1024;
@@ -1505,6 +1505,14 @@ struct ValidatedChainEntry {
     len: u64,
 }
 
+type SharedStoreCaches = (
+    Arc<Mutex<BTreeMap<u64, ValidatedChainEntry>>>,
+    Arc<Mutex<Option<(u64, SystemTime, u64, CheckpointRecord)>>>,
+);
+
+static SHARED_STORE_CACHES: LazyLock<Mutex<HashMap<PathBuf, SharedStoreCaches>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 #[derive(Debug, Clone)]
 pub struct RecoveryStore {
     root: PathBuf,
@@ -1534,11 +1542,22 @@ impl RecoveryStore {
                 }
             }
         }
+        let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
+        let (chain_cache, latest_cache) = {
+            let mut map = SHARED_STORE_CACHES.lock().unwrap_or_else(|e| e.into_inner());
+            let entry = map.entry(canonical).or_insert_with(|| {
+                (
+                    Arc::new(Mutex::new(BTreeMap::new())),
+                    Arc::new(Mutex::new(None)),
+                )
+            });
+            (Arc::clone(&entry.0), Arc::clone(&entry.1))
+        };
         Ok(Self {
             root,
             key,
-            chain_cache: Arc::new(Mutex::new(BTreeMap::new())),
-            latest_cache: Arc::new(Mutex::new(None)),
+            chain_cache,
+            latest_cache,
         })
     }
 
@@ -1617,7 +1636,7 @@ impl RecoveryStore {
         };
         let integrity_tag = hmac_json(&self.key, &index_without_tag(&new_index))?;
         new_index.integrity_tag = integrity_tag;
-        atomic_write_json(&self.root.join("checkpoint-index.json"), &new_index)?;
+        atomic_write_pretty_json(&self.root.join("checkpoint-index.json"), &new_index)?;
         *self.latest_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
         Ok(record)
     }
@@ -1788,7 +1807,7 @@ impl RecoveryStore {
             let tag = hmac_json(&self.key, &index_without_tag(&current_index))?;
             current_index.integrity_tag = tag;
             if let Err(error) =
-                atomic_write_json(&self.root.join("checkpoint-index.json"), &current_index)
+                atomic_write_pretty_json(&self.root.join("checkpoint-index.json"), &current_index)
             {
                 if !is_low_storage_error(&error) {
                     return Err(error);
@@ -1880,7 +1899,7 @@ impl RecoveryStore {
         marker.ended_at_ms = Some(now_ms);
         let integrity_tag = hmac_json(&self.key, &session_without_tag(&marker))?;
         marker.integrity_tag = integrity_tag;
-        atomic_write_json(&self.root.join("session-marker.json"), &marker)
+        atomic_write_pretty_json(&self.root.join("session-marker.json"), &marker)
     }
 
     pub fn load_session(&self) -> Result<Option<SessionMarker>, RecoveryError> {
@@ -1905,7 +1924,7 @@ impl RecoveryStore {
             marker.record_version = RECOVERY_VERSION.into();
             let tag = hmac_json(&self.key, &session_without_tag(&marker))?;
             marker.integrity_tag = tag;
-            if let Err(error) = atomic_write_json(&path, &marker) {
+            if let Err(error) = atomic_write_pretty_json(&path, &marker) {
                 if !is_low_storage_error(&error) {
                     return Err(error);
                 }
@@ -1933,7 +1952,7 @@ impl RecoveryStore {
         let path = self
             .root
             .join(format!("revalidation-{}.json", record.revalidation_id));
-        atomic_write_json(&path, &record)?;
+        atomic_write_pretty_json(&path, &record)?;
         Ok(record)
     }
 
@@ -2429,6 +2448,7 @@ impl RecoveryCoordinator {
         if result.target.as_ref().is_some_and(|target| {
             target.execution_boundary == AttemptExecutionBoundary::ExternalProcessStarted
         }) {
+            let mut captured_workspace: Option<WorkspaceSnapshot> = None;
             if let Some(target) = result.target.as_ref() {
                 if let Some(attempt) = run
                     .attempts
@@ -2436,7 +2456,13 @@ impl RecoveryCoordinator {
                     .find(|attempt| attempt.attempt_id == target.attempt_id)
                 {
                     if let Some(before) = attempt.workspace_before.as_ref() {
-                        let current = WorkspaceSnapshot::capture(root, now_ms)?;
+                        let current = match &captured_workspace {
+                            Some(c) => c,
+                            None => {
+                                captured_workspace = Some(WorkspaceSnapshot::capture(root, now_ms)?);
+                                captured_workspace.as_ref().unwrap()
+                            }
+                        };
                         let after = current
                             .files
                             .iter()
@@ -2469,7 +2495,13 @@ impl RecoveryCoordinator {
                 false
             };
             if retry_already_bound {
-                let current = WorkspaceSnapshot::capture(root, now_ms)?;
+                let current = match &captured_workspace {
+                    Some(c) => c,
+                    None => {
+                        captured_workspace = Some(WorkspaceSnapshot::capture(root, now_ms)?);
+                        captured_workspace.as_ref().unwrap()
+                    }
+                };
                 if current.fingerprint == run.workspace_fingerprint {
                     result.disposition = RecoveryDisposition::PreExecutionRetryAuthorized;
                     result.classification = RecoveryClassification::PreExecutionPrevented;
@@ -3250,6 +3282,12 @@ fn legacy_revalidation_with_decision_without_tag(
 }
 
 fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), RecoveryError> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|error| RecoveryError::Corrupt(error.to_string()))?;
+    atomic_write(path, &bytes)
+}
+
+fn atomic_write_pretty_json<T: Serialize>(path: &Path, value: &T) -> Result<(), RecoveryError> {
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|error| RecoveryError::Corrupt(error.to_string()))?;
     atomic_write(path, &bytes)

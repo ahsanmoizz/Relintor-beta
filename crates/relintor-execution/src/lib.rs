@@ -3902,7 +3902,7 @@ impl ExecutionRun {
             )
     }
 
-    fn current_recovery_attempt_is_pre_execution(&self) -> bool {
+    pub fn current_recovery_attempt_is_pre_execution(&self) -> bool {
         let Some(attempt) = self.current_recovery_attempt_record() else {
             return false;
         };

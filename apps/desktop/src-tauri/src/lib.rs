@@ -37,7 +37,7 @@ use reqwest::blocking::Client;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -46,12 +46,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, Condvar, Mutex, OnceLock,
+    Arc, Condvar, LazyLock, Mutex, OnceLock,
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::UpdaterExt;
 
@@ -4609,16 +4609,29 @@ fn execution_status_view_base(
     }
 }
 
+static RECOVERY_KEY_CACHE: LazyLock<Mutex<HashMap<String, Vec<u8>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 fn recovery_store(app: &AppHandle, revision: &MissionRevision) -> Result<RecoveryStore, String> {
     let app_data = app
         .path()
         .app_data_dir()
         .map_err(|error| format!("resolve P9 recovery directory: {error}"))?;
-    let key = load_or_create_keychain_authority_key(
-        "Relintor.P9.Recovery",
-        &format!("{}-{}", revision.seal.project_id, revision.revision),
-    )
-    .map_err(|error| format!("load P9 OS keychain authority: {error}"))?;
+    let cache_key = format!("{}-{}", revision.seal.project_id, revision.revision);
+    let key = {
+        let mut cache = RECOVERY_KEY_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = cache.get(&cache_key) {
+            existing.clone()
+        } else {
+            let loaded = load_or_create_keychain_authority_key(
+                "Relintor.P9.Recovery",
+                &cache_key,
+            )
+            .map_err(|error| format!("load P9 OS keychain authority: {error}"))?;
+            cache.insert(cache_key, loaded.clone());
+            loaded
+        }
+    };
     RecoveryStore::new(
         app_data.join("execution").join("recovery").join(format!(
             "{}-{}",
@@ -4766,7 +4779,6 @@ fn p9_status_view(
     )
     .into();
     let store = recovery_store(app, revision)?;
-    let coordinator = RecoveryCoordinator::new(store.clone());
     let latest = store
         .load_latest()
         .map_err(|error| format!("load P9 checkpoint: {error}"))?;
@@ -4790,51 +4802,15 @@ fn p9_status_view(
         view.recovery_action = "NONE".into();
         return Ok(view);
     }
-    let integrity = coordinator
-        .resume_integrity_for_run(
-            run,
-            &expected,
-            &run.workspace,
-            &ConservativeProcessInspector,
-            execution_now_ms(),
-        )
-        .map_err(|error| format!("evaluate P9 resume integrity: {error}"))?;
-    view.recovery_task_id = integrity
-        .target
+    let target = run.current_recovery_attempt();
+    view.recovery_task_id = target
         .as_ref()
         .map(|target| target.task_id.clone());
-    view.recovery_task_objective = integrity
-        .target
+    view.recovery_task_objective = target
         .as_ref()
         .and_then(|target| run.tasks.get(&target.task_id))
         .map(|task| task.objective.clone());
-    let revalidation_is_current = latest_revalidation.as_ref().is_some_and(|record| {
-        record.project_id == expected.project_id
-            && record.mission_id == expected.mission_id
-            && record.mission_revision == expected.mission_revision
-            && record.p7_run_id == expected.p7_run_id
-            && record.target == integrity.target
-            && !(integrity.disposition == RecoveryDisposition::PreExecutionRetryAuthorized
-                && record.disposition != RecoveryDisposition::PreExecutionRetryAuthorized)
-            && revalidation_record_is_current(record, latest.as_ref())
-    });
-    view.recovery_action = if revalidation_is_current
-        && integrity.target.as_ref().is_some_and(|target| {
-            target.execution_boundary
-                == relintor_execution::AttemptExecutionBoundary::ExternalProcessStarted
-        })
-        && !integrity.process_observations.is_empty()
-        && integrity
-            .process_observations
-            .iter()
-            .all(|observation| *observation == relintor_execution::ProcessObservation::ProcessGone)
-    {
-        "MANUAL_REVIEW_RETRY".into()
-    } else {
-        "CHECK_SAFETY".into()
-    };
-    let failure_detail = integrity
-        .target
+    let failure_detail = target
         .as_ref()
         .and_then(|target| {
             run.attempts
@@ -4843,34 +4819,76 @@ fn p9_status_view(
                 .and_then(|attempt| attempt.termination_reason.clone())
         })
         .or_else(|| run.last_error.clone());
-    if let Some(record) = latest_revalidation.filter(|_| revalidation_is_current) {
+    let is_pre_execution = run.current_recovery_attempt_is_pre_execution();
+    let revalidation_is_current = latest_revalidation.as_ref().is_some_and(|record| {
+        record.project_id == expected.project_id
+            && record.mission_id == expected.mission_id
+            && record.mission_revision == expected.mission_revision
+            && record.p7_run_id == expected.p7_run_id
+            && record.target == target
+            && (!is_pre_execution
+                || record.disposition == RecoveryDisposition::PreExecutionRetryAuthorized)
+            && revalidation_record_is_current(record, latest.as_ref())
+    });
+    let processes_gone = latest.as_ref().map_or(true, |record| {
+        record.content.processes.iter().all(|process| {
+            ConservativeProcessInspector.observe(process) == relintor_execution::ProcessObservation::ProcessGone
+        })
+    });
+    view.recovery_action = if revalidation_is_current
+        && target.as_ref().is_some_and(|target| {
+            target.execution_boundary
+                == relintor_execution::AttemptExecutionBoundary::ExternalProcessStarted
+        })
+        && processes_gone
+    {
+        "MANUAL_REVIEW_RETRY".into()
+    } else {
+        "CHECK_SAFETY".into()
+    };
+    if let Some(record) = latest_revalidation.as_ref().filter(|_| revalidation_is_current) {
         view.recovery_state = format!("{:?}", record.disposition);
         view.resume_disposition = Some(format!("{:?}", record.disposition));
         view.resume_blocker = (record.disposition
             != RecoveryDisposition::PreExecutionRetryAuthorized)
             .then(|| failure_detail.clone().or_else(|| record.reasons.first().cloned()))
             .flatten();
-        view.external_changes = record.affected_paths;
+        view.external_changes = record.affected_paths.clone();
         view.recovery_detected = true;
-    } else if let Some(record) = latest {
-        if record.is_safe_to_resume() {
+    } else if is_pre_execution {
+        if let Some(record) = latest.as_ref().filter(|record| record.is_safe_to_resume()) {
             view.last_safe_checkpoint =
                 Some(format!("{}#{}", record.checkpoint_id, record.sequence));
         }
-        view.recovery_state = format!("{:?}", integrity.disposition);
-        view.resume_disposition = Some(format!("{:?}", integrity.disposition));
-        view.resume_blocker = failure_detail.or_else(|| integrity.reasons.first().cloned());
-        view.external_changes = integrity.changed_paths;
-        view.recovery_detected = !integrity.reasons.is_empty();
+        view.recovery_state = "PreExecutionRetryAuthorized".into();
+        view.resume_disposition = Some("PreExecutionRetryAuthorized".into());
+        view.resume_blocker = None;
+        view.external_changes.clear();
+        view.recovery_detected = false;
+    } else if let Some(record) = latest.as_ref() {
+        if record.is_safe_to_resume() {
+            view.last_safe_checkpoint =
+                Some(format!("{}#{}", record.checkpoint_id, record.sequence));
+            view.recovery_state = "SafeToResume".into();
+            view.resume_disposition = Some("SafeToResume".into());
+            view.resume_blocker = None;
+            view.external_changes.clear();
+            view.recovery_detected = false;
+        } else {
+            view.recovery_state = "RevalidationRequired".into();
+            view.resume_disposition = Some("RevalidationRequired".into());
+            view.resume_blocker = failure_detail.clone().or_else(|| {
+                Some("checkpoint records durable state but not a safe automatic-resume boundary".into())
+            });
+            view.external_changes.clear();
+            view.recovery_detected = true;
+        }
     } else {
-        view.recovery_state = format!("{:?}", integrity.disposition);
-        view.resume_disposition = Some(format!("{:?}", integrity.disposition));
-        view.resume_blocker = (integrity.disposition
-            != RecoveryDisposition::PreExecutionRetryAuthorized)
-            .then(|| failure_detail.or_else(|| integrity.reasons.first().cloned()))
-            .flatten();
-        view.external_changes = integrity.changed_paths;
-        view.recovery_detected = !integrity.reasons.is_empty();
+        view.recovery_state = "RevalidationRequired".into();
+        view.resume_disposition = Some("RevalidationRequired".into());
+        view.resume_blocker = failure_detail.clone();
+        view.external_changes.clear();
+        view.recovery_detected = failure_detail.is_some();
     }
     Ok(view)
 }
