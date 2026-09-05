@@ -1714,3 +1714,77 @@ fn test_defect_a_recovery_review_and_retry_flow() {
     let _ = fs::remove_dir_all(&recovery_dir);
 }
 
+#[test]
+fn test_intermediate_duplicate_checkpoint_with_forked_lineage_resolves_to_authoritative_branch() {
+    let path = root("forked-intermediate-dup");
+    let recovery_dir = path.join(".relintor-recovery");
+    let recovery_store = store(&path);
+
+    // 1. Write checkpoint 1
+    let _cp1 = recovery_store
+        .write_checkpoint(content(&path, "sequence 1 checkpoint"))
+        .expect("write cp1");
+    let index_after_cp1 = fs::read(recovery_dir.join("checkpoint-index.json")).expect("read index cp1");
+
+    // 2. Write checkpoint 2 branch A
+    let mut c_a = content(&path, "sequence 2 branch A");
+    c_a.created_at_ms = 2000;
+    let cp2_a = recovery_store
+        .write_checkpoint(c_a)
+        .expect("write cp2_a");
+    let cp2_a_path = recovery_dir.join(format!(
+        "checkpoint-00000000000000000002-{}.json",
+        cp2_a.checkpoint_id
+    ));
+    let cp2_a_bytes = fs::read(&cp2_a_path).expect("read cp2_a");
+
+    // Revert index to cp1 and remove cp2_a
+    fs::write(recovery_dir.join("checkpoint-index.json"), index_after_cp1).expect("revert index");
+    fs::remove_file(&cp2_a_path).expect("remove cp2_a temporarily");
+
+    // Re-create store to clear any memory cache
+    let recovery_store = store(&path);
+
+    // 3. Write checkpoint 2 branch B
+    let mut c_b = content(&path, "sequence 2 branch B (canonical)");
+    c_b.created_at_ms = 2500;
+    let cp2_b = recovery_store
+        .write_checkpoint(c_b)
+        .expect("write cp2_b");
+    assert_ne!(cp2_a.checkpoint_id, cp2_b.checkpoint_id, "checkpoint IDs must differ");
+
+    // 4. Write checkpoint 3 on top of branch B
+    let cp3 = recovery_store
+        .write_checkpoint(content(&path, "sequence 3 checkpoint"))
+        .expect("write cp3");
+    assert_eq!(cp3.parent_digest, Some(cp2_b.content_digest.clone()));
+
+    // 5. Place branch A artifact back into the directory so sequence 2 now has 2 valid duplicate artifacts
+    fs::write(&cp2_a_path, cp2_a_bytes).expect("restore cp2_a file");
+
+    let seq2_files = fs::read_dir(&recovery_dir)
+        .expect("read dir")
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with("checkpoint-00000000000000000002-"))
+        .collect::<Vec<_>>();
+    assert_eq!(seq2_files.len(), 2, "must have 2 duplicate sequence 2 files");
+
+    // 6. Fresh store loads latest: must resolve sequence 2 to branch B and sequence 3 to cp3
+    let fresh_store = store(&path);
+    let loaded = fresh_store.load_latest().expect("load_latest must resolve lineage");
+    assert!(loaded.is_some());
+    let latest = loaded.unwrap();
+    assert_eq!(latest.sequence, 3);
+    assert_eq!(latest.checkpoint_id, cp3.checkpoint_id);
+
+    // Verify branch B exists and is authoritative
+    let cp2_resolved_path = recovery_dir.join(format!(
+        "checkpoint-00000000000000000002-{}.json",
+        cp2_b.checkpoint_id
+    ));
+    assert!(cp2_resolved_path.exists());
+
+    let _ = fs::remove_dir_all(&path);
+}
+
+

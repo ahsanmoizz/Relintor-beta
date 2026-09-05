@@ -1508,6 +1508,7 @@ struct ValidatedChainEntry {
 type SharedStoreCaches = (
     Arc<Mutex<BTreeMap<u64, ValidatedChainEntry>>>,
     Arc<Mutex<Option<(u64, SystemTime, u64, CheckpointRecord)>>>,
+    Arc<Mutex<Option<(String, String, ExecutionRun)>>>,
     Arc<Mutex<()>>,
 );
 
@@ -1520,6 +1521,7 @@ pub struct RecoveryStore {
     key: Vec<u8>,
     chain_cache: Arc<Mutex<BTreeMap<u64, ValidatedChainEntry>>>,
     latest_cache: Arc<Mutex<Option<(u64, SystemTime, u64, CheckpointRecord)>>>,
+    run_cache: Arc<Mutex<Option<(String, String, ExecutionRun)>>>,
     write_lock: Arc<Mutex<()>>,
 }
 
@@ -1545,11 +1547,12 @@ impl RecoveryStore {
             }
         }
         let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
-        let (chain_cache, latest_cache, write_lock) = {
+        let (chain_cache, latest_cache, run_cache, write_lock) = {
             let mut map = SHARED_STORE_CACHES.lock().unwrap_or_else(|e| e.into_inner());
             let entry = map.entry(canonical).or_insert_with(|| {
                 (
                     Arc::new(Mutex::new(BTreeMap::new())),
+                    Arc::new(Mutex::new(None)),
                     Arc::new(Mutex::new(None)),
                     Arc::new(Mutex::new(())),
                 )
@@ -1558,6 +1561,7 @@ impl RecoveryStore {
                 Arc::clone(&entry.0),
                 Arc::clone(&entry.1),
                 Arc::clone(&entry.2),
+                Arc::clone(&entry.3),
             )
         };
         Ok(Self {
@@ -1565,6 +1569,7 @@ impl RecoveryStore {
             key,
             chain_cache,
             latest_cache,
+            run_cache,
             write_lock,
         })
     }
@@ -1647,6 +1652,7 @@ impl RecoveryStore {
         new_index.integrity_tag = integrity_tag;
         atomic_write_pretty_json(&self.root.join("checkpoint-index.json"), &new_index)?;
         *self.latest_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.run_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
         Ok(record)
     }
 
@@ -1731,31 +1737,70 @@ impl RecoveryStore {
             }
         }
 
-        let mut previous: Option<String> = None;
-        let mut latest_record: Option<CheckpointRecord> = None;
-        let mut cache = self.chain_cache.lock().unwrap_or_else(|e| e.into_inner());
+        // Resolve canonical path for each sequence from 1..=index.latest_sequence.
+        // We resolve backwards from latest_sequence anchored by index.latest_checkpoint_id and
+        // index.latest_digest, ensuring any intermediate duplicates are disambiguated by the
+        // parent_digest expected by the child sequence in the cryptographic chain.
+        let mut resolved_paths: BTreeMap<u64, PathBuf> = BTreeMap::new();
+        let mut expected_digest: Option<String> = Some(index.latest_digest.clone());
 
-        for sequence in 1..=index.latest_sequence {
-            let candidate_paths = checkpoint_files.get(&sequence).ok_or_else(|| {
-                RecoveryError::Chain(format!("checkpoint sequence {sequence} is missing"))
+        for seq in (1..=index.latest_sequence).rev() {
+            let candidate_paths = checkpoint_files.get(&seq).ok_or_else(|| {
+                RecoveryError::Chain(format!("checkpoint sequence {seq} is missing"))
             })?;
-            let path = if candidate_paths.len() == 1 {
-                &candidate_paths[0]
-            } else if sequence == index.latest_sequence {
-                let expected_path = self.checkpoint_path(sequence, &index.latest_checkpoint_id);
+
+            let (chosen_path, chosen_parent_digest) = if candidate_paths.len() == 1 {
+                let p = &candidate_paths[0];
+                if seq == index.latest_sequence {
+                    let expected_path = self.checkpoint_path(seq, &index.latest_checkpoint_id);
+                    if p != &expected_path {
+                        return Err(RecoveryError::Chain(format!(
+                            "checkpoint sequence {seq} does not match authoritative index latest checkpoint id"
+                        )));
+                    }
+                }
+                let meta = fs::metadata(p).map_err(io_error)?;
+                let mtime = meta.modified().unwrap_or(UNIX_EPOCH);
+                let len = meta.len();
+                let parent_digest = {
+                    let cache = self.chain_cache.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(cached) = cache.get(&seq) {
+                        if cached.mtime == mtime && cached.len == len {
+                            cached.parent_digest.clone()
+                        } else {
+                            let rec: CheckpointRecord = read_json(p)?;
+                            self.validate_record(&rec)?;
+                            rec.parent_digest
+                        }
+                    } else {
+                        let rec: CheckpointRecord = read_json(p)?;
+                        self.validate_record(&rec)?;
+                        rec.parent_digest
+                    }
+                };
+                (p.clone(), parent_digest)
+            } else if seq == index.latest_sequence {
+                let expected_path = self.checkpoint_path(seq, &index.latest_checkpoint_id);
                 let matching = candidate_paths
                     .iter()
                     .filter(|p| *p == &expected_path)
                     .collect::<Vec<_>>();
                 if matching.len() == 1 {
-                    &latest_path
+                    let rec: CheckpointRecord = read_json(&expected_path)?;
+                    self.validate_record(&rec)?;
+                    if rec.content_digest != index.latest_digest {
+                        return Err(RecoveryError::Chain(
+                            "checkpoint index digest does not match newest artifact".into(),
+                        ));
+                    }
+                    (expected_path, rec.parent_digest)
                 } else if matching.is_empty() {
                     return Err(RecoveryError::Chain(format!(
-                        "checkpoint sequence {sequence} has duplicate artifacts with none matching the authoritative index"
+                        "checkpoint sequence {seq} has duplicate artifacts with none matching the authoritative index"
                     )));
                 } else {
                     return Err(RecoveryError::Chain(format!(
-                        "checkpoint sequence {sequence} has ambiguous duplicate authority matching index"
+                        "checkpoint sequence {seq} has ambiguous duplicate authority matching index"
                     )));
                 }
             } else {
@@ -1763,25 +1808,39 @@ impl RecoveryStore {
                 for cand in candidate_paths {
                     if let Ok(cand_record) = read_json::<CheckpointRecord>(cand) {
                         if self.validate_record(&cand_record).is_ok()
-                            && cand_record.sequence == sequence
-                            && cand_record.parent_digest == previous
+                            && cand_record.sequence == seq
+                            && Some(&cand_record.content_digest) == expected_digest.as_ref()
                         {
-                            valid_candidates.push(cand);
+                            valid_candidates.push((cand.clone(), cand_record));
                         }
                     }
                 }
                 if valid_candidates.len() == 1 {
-                    valid_candidates[0]
+                    let (chosen_cand, chosen_rec) = valid_candidates.remove(0);
+                    (chosen_cand, chosen_rec.parent_digest)
                 } else if valid_candidates.is_empty() {
                     return Err(RecoveryError::Chain(format!(
-                        "checkpoint sequence {sequence} has duplicate artifacts with none matching cryptographic lineage"
+                        "checkpoint sequence {seq} has duplicate artifacts with none matching cryptographic lineage from child sequence"
                     )));
                 } else {
                     return Err(RecoveryError::Chain(format!(
-                        "checkpoint sequence {sequence} has ambiguous authority: multiple candidates match lineage"
+                        "checkpoint sequence {seq} has ambiguous authority: multiple candidates match child sequence parent digest"
                     )));
                 }
             };
+
+            expected_digest = chosen_parent_digest;
+            resolved_paths.insert(seq, chosen_path);
+        }
+
+        let mut previous: Option<String> = None;
+        let mut latest_record: Option<CheckpointRecord> = None;
+        let mut cache = self.chain_cache.lock().unwrap_or_else(|e| e.into_inner());
+
+        for sequence in 1..=index.latest_sequence {
+            let path = resolved_paths.get(&sequence).ok_or_else(|| {
+                RecoveryError::Chain(format!("checkpoint sequence {sequence} is missing"))
+            })?;
             let meta = fs::metadata(path).map_err(io_error)?;
             let mtime = meta.modified().unwrap_or(UNIX_EPOCH);
             let len = meta.len();
@@ -1893,9 +1952,25 @@ impl RecoveryStore {
         let Some(record) = self.load_latest()? else {
             return Ok(None);
         };
-        ExecutionRun::restore_json(&record.content.run_snapshot_json)
-            .map(Some)
-            .map_err(|error| RecoveryError::Corrupt(error.to_string()))
+        {
+            let cache_guard = self.run_cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((cached_id, cached_digest, cached_run)) = cache_guard.as_ref() {
+                if cached_id == &record.checkpoint_id && cached_digest == &record.content_digest {
+                    return Ok(Some(cached_run.clone()));
+                }
+            }
+        }
+        let run = ExecutionRun::restore_json(&record.content.run_snapshot_json)
+            .map_err(|error| RecoveryError::Corrupt(error.to_string()))?;
+        {
+            let mut cache_guard = self.run_cache.lock().unwrap_or_else(|e| e.into_inner());
+            *cache_guard = Some((
+                record.checkpoint_id.clone(),
+                record.content_digest.clone(),
+                run.clone(),
+            ));
+        }
+        Ok(Some(run))
     }
 
     pub fn begin_session(
@@ -2188,6 +2263,15 @@ impl RecoveryStore {
                 let expected = self.checkpoint_path(sequence, &index.latest_checkpoint_id);
                 let matching = matches.iter().filter(|p| *p == &expected).collect::<Vec<_>>();
                 if matching.len() == 1 {
+                    return Ok(expected);
+                }
+            }
+        }
+        if let Ok(Some(_)) = self.load_latest() {
+            let cache = self.chain_cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = cache.get(&sequence) {
+                let expected = self.checkpoint_path(sequence, &entry.checkpoint_id);
+                if matches.iter().any(|p| p == &expected) {
                     return Ok(expected);
                 }
             }
