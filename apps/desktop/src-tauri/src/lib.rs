@@ -4944,14 +4944,27 @@ fn load_execution_run(
     if run.state == relintor_execution::ExecutionRunState::Running
         && active_execution(project_id)?.is_none()
     {
-        reconcile_persisted_running_execution(
-            app,
-            project_id,
-            &mut run,
-            &ledger_path,
-            &revision,
-            &recovery,
-        )?;
+        with_execution_mutation_lock(|| {
+            if run.state == relintor_execution::ExecutionRunState::Running
+                && active_execution(project_id)?.is_none()
+            {
+                if let Ok(fresh_run) = ExecutionRun::restore_snapshot(&ledger_path) {
+                    if fresh_run.state != relintor_execution::ExecutionRunState::Running {
+                        run = fresh_run;
+                        return Ok(());
+                    }
+                }
+                reconcile_persisted_running_execution(
+                    app,
+                    project_id,
+                    &mut run,
+                    &ledger_path,
+                    &revision,
+                    &recovery,
+                )?;
+            }
+            Ok(())
+        })?;
     }
     if run.all_tasks_finished() {
         if run.state != relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification {

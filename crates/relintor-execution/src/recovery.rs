@@ -1508,6 +1508,7 @@ struct ValidatedChainEntry {
 type SharedStoreCaches = (
     Arc<Mutex<BTreeMap<u64, ValidatedChainEntry>>>,
     Arc<Mutex<Option<(u64, SystemTime, u64, CheckpointRecord)>>>,
+    Arc<Mutex<()>>,
 );
 
 static SHARED_STORE_CACHES: LazyLock<Mutex<HashMap<PathBuf, SharedStoreCaches>>> =
@@ -1519,6 +1520,7 @@ pub struct RecoveryStore {
     key: Vec<u8>,
     chain_cache: Arc<Mutex<BTreeMap<u64, ValidatedChainEntry>>>,
     latest_cache: Arc<Mutex<Option<(u64, SystemTime, u64, CheckpointRecord)>>>,
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl RecoveryStore {
@@ -1543,21 +1545,27 @@ impl RecoveryStore {
             }
         }
         let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
-        let (chain_cache, latest_cache) = {
+        let (chain_cache, latest_cache, write_lock) = {
             let mut map = SHARED_STORE_CACHES.lock().unwrap_or_else(|e| e.into_inner());
             let entry = map.entry(canonical).or_insert_with(|| {
                 (
                     Arc::new(Mutex::new(BTreeMap::new())),
                     Arc::new(Mutex::new(None)),
+                    Arc::new(Mutex::new(())),
                 )
             });
-            (Arc::clone(&entry.0), Arc::clone(&entry.1))
+            (
+                Arc::clone(&entry.0),
+                Arc::clone(&entry.1),
+                Arc::clone(&entry.2),
+            )
         };
         Ok(Self {
             root,
             key,
             chain_cache,
             latest_cache,
+            write_lock,
         })
     }
 
@@ -1569,6 +1577,7 @@ impl RecoveryStore {
         &self,
         mut content: CheckpointContent,
     ) -> Result<CheckpointRecord, RecoveryError> {
+        let _write_guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         content.authority.validate_nonempty()?;
         if content.run_snapshot_json.len() > MAX_CHECKPOINT_BYTES {
             return Err(RecoveryError::Storage(
@@ -1690,19 +1699,32 @@ impl RecoveryStore {
             return Ok(None);
         };
 
-        let mut checkpoint_files = BTreeMap::new();
+        // Fast path: if latest_cache holds the record matching index and latest file on disk has not changed
+        let latest_path = self.checkpoint_path(index.latest_sequence, &index.latest_checkpoint_id);
+        if let Ok(meta) = fs::metadata(&latest_path) {
+            let mtime = meta.modified().unwrap_or(UNIX_EPOCH);
+            let len = meta.len();
+            let latest_cache_guard = self.latest_cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((cached_seq, cached_mtime, cached_len, cached_rec)) = latest_cache_guard.as_ref() {
+                if *cached_seq == index.latest_sequence
+                    && *cached_mtime == mtime
+                    && *cached_len == len
+                    && cached_rec.checkpoint_id == index.latest_checkpoint_id
+                    && cached_rec.content_digest == index.latest_digest
+                {
+                    return Ok(Some(cached_rec.clone()));
+                }
+            }
+        }
+
+        let mut checkpoint_files: BTreeMap<u64, Vec<PathBuf>> = BTreeMap::new();
         for entry in fs::read_dir(&self.root).map_err(io_error)?.filter_map(Result::ok) {
             let path = entry.path();
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 if name.starts_with("checkpoint-") && name.ends_with(".json") {
                     if let Some(seq_part) = name.strip_prefix("checkpoint-").and_then(|s| s.split('-').next()) {
                         if let Ok(seq) = seq_part.parse::<u64>() {
-                            if checkpoint_files.contains_key(&seq) {
-                                return Err(RecoveryError::Chain(format!(
-                                    "checkpoint sequence {seq} has duplicate artifacts"
-                                )));
-                            }
-                            checkpoint_files.insert(seq, path);
+                            checkpoint_files.entry(seq).or_default().push(path);
                         }
                     }
                 }
@@ -1714,9 +1736,25 @@ impl RecoveryStore {
         let mut cache = self.chain_cache.lock().unwrap_or_else(|e| e.into_inner());
 
         for sequence in 1..=index.latest_sequence {
-            let path = checkpoint_files.get(&sequence).ok_or_else(|| {
+            let candidate_paths = checkpoint_files.get(&sequence).ok_or_else(|| {
                 RecoveryError::Chain(format!("checkpoint sequence {sequence} is missing"))
             })?;
+            let path = if candidate_paths.len() == 1 {
+                &candidate_paths[0]
+            } else if sequence == index.latest_sequence {
+                let expected_path = self.checkpoint_path(sequence, &index.latest_checkpoint_id);
+                if candidate_paths.iter().any(|p| p == &expected_path) {
+                    &latest_path
+                } else {
+                    return Err(RecoveryError::Chain(format!(
+                        "checkpoint sequence {sequence} has duplicate artifacts with none matching the authoritative index"
+                    )));
+                }
+            } else {
+                return Err(RecoveryError::Chain(format!(
+                    "checkpoint sequence {sequence} has duplicate artifacts"
+                )));
+            };
             let meta = fs::metadata(path).map_err(io_error)?;
             let mtime = meta.modified().unwrap_or(UNIX_EPOCH);
             let len = meta.len();

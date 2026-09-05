@@ -474,6 +474,7 @@ fn test_upgrade_matrix_existing_phase5_mission_loads() {
                 relintor_execution::ExecutionRunState::Ready
                     | relintor_execution::ExecutionRunState::BlockedExternal
                     | relintor_execution::ExecutionRunState::RevalidationRequired
+                    | relintor_execution::ExecutionRunState::StoppedIncomplete
             ));
             for id in [
                 "task_131fe92c0e2f030454e92944",
