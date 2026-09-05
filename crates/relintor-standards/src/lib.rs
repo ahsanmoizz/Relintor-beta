@@ -12,6 +12,9 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+pub mod duplication;
+pub use duplication::*;
+
 pub const P6_SCHEMA_VERSION: u16 = 1;
 pub const STANDARDS_STATUS: &str = "implemented_unverified";
 

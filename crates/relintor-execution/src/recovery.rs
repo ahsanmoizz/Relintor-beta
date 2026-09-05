@@ -1743,17 +1743,44 @@ impl RecoveryStore {
                 &candidate_paths[0]
             } else if sequence == index.latest_sequence {
                 let expected_path = self.checkpoint_path(sequence, &index.latest_checkpoint_id);
-                if candidate_paths.iter().any(|p| p == &expected_path) {
+                let matching = candidate_paths
+                    .iter()
+                    .filter(|p| *p == &expected_path)
+                    .collect::<Vec<_>>();
+                if matching.len() == 1 {
                     &latest_path
-                } else {
+                } else if matching.is_empty() {
                     return Err(RecoveryError::Chain(format!(
                         "checkpoint sequence {sequence} has duplicate artifacts with none matching the authoritative index"
                     )));
+                } else {
+                    return Err(RecoveryError::Chain(format!(
+                        "checkpoint sequence {sequence} has ambiguous duplicate authority matching index"
+                    )));
                 }
             } else {
-                return Err(RecoveryError::Chain(format!(
-                    "checkpoint sequence {sequence} has duplicate artifacts"
-                )));
+                let mut valid_candidates = Vec::new();
+                for cand in candidate_paths {
+                    if let Ok(cand_record) = read_json::<CheckpointRecord>(cand) {
+                        if self.validate_record(&cand_record).is_ok()
+                            && cand_record.sequence == sequence
+                            && cand_record.parent_digest == previous
+                        {
+                            valid_candidates.push(cand);
+                        }
+                    }
+                }
+                if valid_candidates.len() == 1 {
+                    valid_candidates[0]
+                } else if valid_candidates.is_empty() {
+                    return Err(RecoveryError::Chain(format!(
+                        "checkpoint sequence {sequence} has duplicate artifacts with none matching cryptographic lineage"
+                    )));
+                } else {
+                    return Err(RecoveryError::Chain(format!(
+                        "checkpoint sequence {sequence} has ambiguous authority: multiple candidates match lineage"
+                    )));
+                }
             };
             let meta = fs::metadata(path).map_err(io_error)?;
             let mtime = meta.modified().unwrap_or(UNIX_EPOCH);
@@ -2148,15 +2175,26 @@ impl RecoveryStore {
             })
             .collect::<Vec<_>>();
         matches.sort();
-        match matches.as_slice() {
-            [path] => Ok(path.clone()),
-            [] => Err(RecoveryError::Chain(format!(
+        if matches.is_empty() {
+            return Err(RecoveryError::Chain(format!(
                 "checkpoint sequence {sequence} is missing"
-            ))),
-            _ => Err(RecoveryError::Chain(format!(
-                "checkpoint sequence {sequence} has duplicate artifacts"
-            ))),
+            )));
         }
+        if matches.len() == 1 {
+            return Ok(matches[0].clone());
+        }
+        if let Ok(Some(index)) = self.load_index() {
+            if sequence == index.latest_sequence {
+                let expected = self.checkpoint_path(sequence, &index.latest_checkpoint_id);
+                let matching = matches.iter().filter(|p| *p == &expected).collect::<Vec<_>>();
+                if matching.len() == 1 {
+                    return Ok(expected);
+                }
+            }
+        }
+        Err(RecoveryError::Chain(format!(
+            "checkpoint sequence {sequence} has duplicate artifacts"
+        )))
     }
 
     fn has_checkpoint_files(&self) -> Result<bool, RecoveryError> {

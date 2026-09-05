@@ -3068,14 +3068,17 @@ impl ExplicitUserDecisionRecorder {
                 "sealed human decision has no user-review criterion".into(),
             ));
         }
-        let recorded_at_ms = now_ms();
         let decision_digest = sha256(&canonical(&(
             authority.identity_digest()?,
             requirement_id,
             approved,
             notes,
-            recorded_at_ms,
         ))?);
+        let evidence_id = format!(
+            "p8-user-decision-{requirement_id}-{}",
+            &decision_digest[..16]
+        );
+        let recorded_at_ms = now_ms();
         let collector = CollectorIdentity::new(EXPLICIT_USER_DECISION_COLLECTOR, "p8-v1");
         let probe_identity = "EXPLICIT_USER_ACTION".to_string();
         let command_digest = sha256(&canonical(&(
@@ -3096,10 +3099,7 @@ impl ExplicitUserDecisionRecorder {
         let mut binding = CollectorBinding::from_authority_internal(
             authority,
             current,
-            format!(
-                "p8-user-decision-{requirement_id}-{}",
-                &decision_digest[..16]
-            ),
+            evidence_id,
             vec![requirement_id.into()],
             true,
             accepted_criteria.clone(),
@@ -3122,6 +3122,9 @@ impl ExplicitUserDecisionRecorder {
             })
             .collect();
         binding = binding.bind_successful_execution(p7_execution, authority, requirement_id)?;
+        if let Ok(existing) = store.load(&binding.evidence_id) {
+            return Ok(existing.artifact);
+        }
         let result = if approved {
             EvidenceResult::Pass
         } else {
