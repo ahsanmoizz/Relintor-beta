@@ -3835,20 +3835,35 @@ fn persist_execution_boundary(
     kind: CheckpointKind,
     processes: Vec<ProcessOwnershipRecord>,
 ) -> Result<(), relintor_execution::ExecutionError> {
-    run.persist_snapshot(ledger_path)?;
-    RecoveryCoordinator::new(recovery.clone())
-        .checkpoint_run(
-            run,
-            recovery_authority(run, revision),
-            kind,
-            &run.workspace,
-            processes,
-            Vec::new(),
-            detail,
-            execution_now_ms(),
-        )
-        .map_err(|error| relintor_execution::ExecutionError::Ledger(error.to_string()))?;
-    Ok(())
+    let mut last_error = None;
+    for attempt in 0..3 {
+        let res = (|| -> Result<(), relintor_execution::ExecutionError> {
+            run.persist_snapshot(ledger_path)?;
+            RecoveryCoordinator::new(recovery.clone())
+                .checkpoint_run(
+                    run,
+                    recovery_authority(run, revision),
+                    kind,
+                    &run.workspace,
+                    processes.clone(),
+                    Vec::new(),
+                    detail,
+                    execution_now_ms(),
+                )
+                .map_err(|error| relintor_execution::ExecutionError::Ledger(error.to_string()))?;
+            Ok(())
+        })();
+        match res {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                last_error = Some(err);
+                if attempt < 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(50 * (attempt + 1)));
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap())
 }
 
 fn process_ownership_record(
@@ -4612,12 +4627,21 @@ fn execution_status_view_base(
 static RECOVERY_KEY_CACHE: LazyLock<Mutex<HashMap<String, Vec<u8>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+static RECOVERY_STORE_CACHE: LazyLock<Mutex<HashMap<String, RecoveryStore>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 fn recovery_store(app: &AppHandle, revision: &MissionRevision) -> Result<RecoveryStore, String> {
+    let cache_key = format!("{}-{}", revision.seal.project_id, revision.revision);
+    {
+        let cache = RECOVERY_STORE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = cache.get(&cache_key) {
+            return Ok(existing.clone());
+        }
+    }
     let app_data = app
         .path()
         .app_data_dir()
         .map_err(|error| format!("resolve P9 recovery directory: {error}"))?;
-    let cache_key = format!("{}-{}", revision.seal.project_id, revision.revision);
     let key = {
         let mut cache = RECOVERY_KEY_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = cache.get(&cache_key) {
@@ -4628,18 +4652,23 @@ fn recovery_store(app: &AppHandle, revision: &MissionRevision) -> Result<Recover
                 &cache_key,
             )
             .map_err(|error| format!("load P9 OS keychain authority: {error}"))?;
-            cache.insert(cache_key, loaded.clone());
+            cache.insert(cache_key.clone(), loaded.clone());
             loaded
         }
     };
-    RecoveryStore::new(
+    let store = RecoveryStore::new(
         app_data.join("execution").join("recovery").join(format!(
             "{}-{}",
             revision.seal.mission_id, revision.revision
         )),
         key,
     )
-    .map_err(|error| format!("open P9 recovery store: {error}"))
+    .map_err(|error| format!("open P9 recovery store: {error}"))?;
+    {
+        let mut cache = RECOVERY_STORE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        cache.insert(cache_key, store.clone());
+    }
+    Ok(store)
 }
 
 fn recovery_authority(run: &ExecutionRun, revision: &MissionRevision) -> RecoveryAuthority {

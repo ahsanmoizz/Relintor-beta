@@ -1537,15 +1537,6 @@ impl RecoveryStore {
         }
         let root = root.into();
         fs::create_dir_all(&root).map_err(io_error)?;
-        // Clean up any stale orphan .*.tmp files in root left by prior interrupted writes
-        if let Ok(entries) = fs::read_dir(&root) {
-            for entry in entries.filter_map(Result::ok) {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with('.') && name.ends_with(".tmp") {
-                    let _ = fs::remove_file(entry.path());
-                }
-            }
-        }
         let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
         let (chain_cache, latest_cache, run_cache, write_lock) = {
             let mut map = SHARED_STORE_CACHES.lock().unwrap_or_else(|e| e.into_inner());
@@ -1564,6 +1555,20 @@ impl RecoveryStore {
                 Arc::clone(&entry.3),
             )
         };
+        // Clean up any stale orphan .*.tmp files in root left by prior interrupted writes.
+        // We acquire write_lock to guarantee that we never clean up an in-flight temporary file
+        // that is actively being written by a concurrent write_checkpoint or write_revalidation.
+        {
+            let _write_guard = write_lock.lock().unwrap_or_else(|e| e.into_inner());
+            if let Ok(entries) = fs::read_dir(&root) {
+                for entry in entries.filter_map(Result::ok) {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with('.') && name.ends_with(".tmp") {
+                        let _ = fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
         Ok(Self {
             root,
             key,
@@ -1980,6 +1985,7 @@ impl RecoveryStore {
         command_digest: &str,
         now_ms: u64,
     ) -> Result<Option<CrashRecord>, RecoveryError> {
+        let _write_guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         let prior = self.load_session()?;
         let process_start_time_ms = current_process_start_time_ms();
         let crash = match prior.as_ref() {
@@ -2025,6 +2031,7 @@ impl RecoveryStore {
     }
 
     pub fn end_session(&self, state: SessionEndState, now_ms: u64) -> Result<(), RecoveryError> {
+        let _write_guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         let Some(mut marker) = self.load_session()? else {
             return Err(RecoveryError::Storage(
                 "cannot close a missing recovery session".into(),
@@ -2077,6 +2084,7 @@ impl RecoveryStore {
         &self,
         mut record: RevalidationRecord,
     ) -> Result<RevalidationRecord, RecoveryError> {
+        let _write_guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         if record.project_id.is_empty()
             || record.mission_id.is_empty()
             || record.p7_run_id.is_empty()
