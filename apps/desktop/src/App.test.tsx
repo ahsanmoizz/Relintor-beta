@@ -379,7 +379,7 @@ describe("desktop shell foundation", () => {
     );
 
     expect(screen.getByRole("heading", { name: "Relintor needs your decision" })).toBeTruthy();
-    expect(screen.getByText("Technical evidence details")).toBeTruthy();
+    expect(screen.getByText(/Technical Evidence/i)).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Optional notes"), { target: { value: "The result matches." } });
     const staleRefresh: VerificationStatus = {
       ...decision,

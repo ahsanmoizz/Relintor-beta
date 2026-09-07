@@ -119,7 +119,7 @@ export function verificationPresentation(status: VerificationStatus | null): {
   }
   if (status.workflow_stage === "USER_DECISION_REJECTED") {
     return {
-      label: "Result rejected",
+      label: "Correction required",
       supporting: status.summary,
       tone: "warning",
       verifiedComplete: false,
@@ -251,6 +251,17 @@ export function missionPresentation(
         supporting: verification.summary,
         badge: "Correcting",
         tone: "info",
+        primaryAction: "none",
+        recoveryRequired: false,
+        verifiedComplete: false,
+      };
+    }
+    if (verification.workflow_stage === "USER_DECISION_REJECTED") {
+      return {
+        headline: "Correction required",
+        supporting: verification.summary,
+        badge: "Needs attention",
+        tone: "warning",
         primaryAction: "none",
         recoveryRequired: false,
         verifiedComplete: false,

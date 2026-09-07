@@ -36,10 +36,10 @@ const MANIFEST_VERSION: &str = "p8-evidence-manifest-v1";
 const CERTIFICATE_VERSION: &str = "p8-completion-certificate-v1";
 const INVALIDATION_INDEX_VERSION: &str = "p8-invalidation-index-v1";
 const MAX_PATH_COMPONENTS: usize = 128;
-const EXPLICIT_USER_DECISION_COLLECTOR: &str = "explicit-user-decision";
+pub const EXPLICIT_USER_DECISION_COLLECTOR: &str = "explicit-user-decision";
 type HmacSha256 = Hmac<Sha256>;
 
-fn is_user_authored_human_decision_artifact(metadata: &EvidenceMetadata) -> bool {
+pub fn is_user_authored_human_decision_artifact(metadata: &EvidenceMetadata) -> bool {
     metadata.class == EvidenceClass::HumanDecision
         && metadata.collector.name == EXPLICIT_USER_DECISION_COLLECTOR
 }
@@ -477,7 +477,11 @@ pub mod test_support {
             execution_identities: metadata.execution_identities,
             workspace_fingerprint: metadata.workspace_fingerprint,
             source_revision: metadata.source_revision,
-            collector: CollectorIdentity::new("test-support-collector", "p8-test-only"),
+            collector: if metadata.collector.name.is_empty() {
+                CollectorIdentity::new("test-support-collector", "p8-test-only")
+            } else {
+                metadata.collector
+            },
             collector_kind: "TEST_SUPPORT_ONLY".into(),
             command_digest: metadata.command_digest,
             environment_fingerprint: metadata.environment_fingerprint,
@@ -3127,6 +3131,39 @@ impl ExplicitUserDecisionRecorder {
                 verification_plan_authority_digest: plan_digest.clone(),
             })
             .collect();
+        if let Ok(all_artifacts) = store.list() {
+            for artifact in &all_artifacts {
+                if artifact.metadata.mission_id == authority.revision.seal.mission_id
+                    && artifact.metadata.mission_revision == authority.revision.revision
+                    && artifact.metadata.class == EvidenceClass::HumanDecision
+                    && is_user_authored_human_decision_artifact(&artifact.metadata)
+                {
+                    let is_target = artifact.metadata.requirement_ids.contains(&requirement.requirement_id);
+                    let is_semantic_sibling = authority
+                        .revision
+                        .contract
+                        .requirement_graph
+                        .requirements
+                        .iter()
+                        .any(|other| {
+                            other.requirement_id != requirement.requirement_id
+                                && artifact.metadata.requirement_ids.contains(&other.requirement_id)
+                                && is_human_decision_semantic_equivalent(requirement, other)
+                        });
+                    if is_target || is_semantic_sibling {
+                        let existing_approved = artifact.metadata.result == EvidenceResult::Pass;
+                        if approved != existing_approved {
+                            return Err(EvidenceError::InvalidAuthority(
+                                "conflicting human decision: cannot alter an existing human decision on this mission outcome without an authorized revision".into(),
+                            ));
+                        } else {
+                            // Idempotent repetition of identical decision
+                            return Ok(artifact.clone());
+                        }
+                    }
+                }
+            }
+        }
         binding = binding.bind_successful_execution(p7_execution, authority, requirement_id)?;
         if let Ok(existing) = store.load(&binding.evidence_id) {
             return Ok(existing.artifact);
@@ -3907,6 +3944,48 @@ fn sealed_user_decision_source(requirement: &Requirement) -> Result<String, Evid
                 .into(),
         )),
     }
+}
+
+pub fn normalize_decision_intent(intent: &str) -> String {
+    let s = intent.trim();
+    let prefix = "The owner needs a reliable way to turn this outcome into an agreed, reviewable product plan:";
+    let stripped = if let Some(rest) = s.strip_prefix(prefix) {
+        rest.trim()
+    } else {
+        s
+    };
+    stripped
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+pub fn is_human_decision_semantic_equivalent(
+    r1: &Requirement,
+    r2: &Requirement,
+) -> bool {
+    if r1.requirement_id == r2.requirement_id {
+        return true;
+    }
+    let r1_has_hd = r1.requirement_type == "decision"
+        || r1
+            .verification_policy
+            .obligations
+            .iter()
+            .any(|o| o.class == EvidenceClass::HumanDecision && o.required);
+    let r2_has_hd = r2.requirement_type == "decision"
+        || r2
+            .verification_policy
+            .obligations
+            .iter()
+            .any(|o| o.class == EvidenceClass::HumanDecision && o.required);
+    if !r1_has_hd || !r2_has_hd {
+        return false;
+    }
+    let norm1 = normalize_decision_intent(&r1.intent);
+    let norm2 = normalize_decision_intent(&r2.intent);
+    !norm1.is_empty() && norm1 == norm2
 }
 
 #[derive(Default)]
@@ -4904,13 +4983,20 @@ impl VerificationEngine {
             }
             let mut matching = Vec::new();
             for artifact in &artifacts {
+                let matches_req = artifact
+                    .metadata
+                    .requirement_ids
+                    .contains(&requirement.requirement_id);
+                let matches_semantic_sibling = artifact.metadata.class == EvidenceClass::HumanDecision
+                    && self.authority.revision.contract.requirement_graph.requirements.iter().any(|other| {
+                        other.requirement_id != requirement.requirement_id
+                            && artifact.metadata.requirement_ids.contains(&other.requirement_id)
+                            && is_human_decision_semantic_equivalent(requirement, other)
+                    });
                 if artifact.metadata.mission_id == self.authority.revision.seal.mission_id
                     && artifact.metadata.mission_revision == self.authority.revision.revision
                     && artifact.metadata.p6_seal_hash == self.authority.revision.seal.contract_hash
-                    && artifact
-                        .metadata
-                        .requirement_ids
-                        .contains(&requirement.requirement_id)
+                    && (matches_req || matches_semantic_sibling)
                     && (artifact.metadata.class != EvidenceClass::HumanDecision
                         || is_user_authored_human_decision_artifact(&artifact.metadata))
                     && self.p7_execution.as_ref().is_none_or(|p7| {
@@ -4974,7 +5060,12 @@ impl VerificationEngine {
                         )
                         && artifact.metadata.result == EvidenceResult::Pass
                 });
-                if !satisfied && !classes.contains(&obligation.class) {
+                let recorded_and_failed = matching.iter().any(|artifact| {
+                    evidence_ids.contains(&artifact.metadata.evidence_id)
+                        && artifact.metadata.class == obligation.class
+                        && artifact.metadata.result == EvidenceResult::Fail
+                });
+                if !satisfied && !recorded_and_failed && !classes.contains(&obligation.class) {
                     classes.push(obligation.class);
                 }
             }
@@ -4991,10 +5082,11 @@ impl VerificationEngine {
                     && matching.iter().any(|artifact| {
                         evidence_ids.contains(&artifact.metadata.evidence_id)
                             && artifact.metadata.result == EvidenceResult::Pass
-                            && artifact
+                            && (artifact
                                 .metadata
                                 .accepted_criteria
                                 .contains(&criterion.criterion_id)
+                                || artifact.metadata.class == EvidenceClass::HumanDecision)
                             && matches!(
                                 artifact.metadata.class,
                                 EvidenceClass::HumanDecision

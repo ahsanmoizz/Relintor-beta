@@ -390,5 +390,26 @@ describe("user-visible mission state model", () => {
       expect(m.headline).toBe("Verification needs attention");
       expect(m.badge).not.toBe("Verified");
     });
+
+    it("presents Correction required and disables actions when human decision was rejected", () => {
+      const ver = verification({
+        workflow_stage: "USER_DECISION_REJECTED",
+        summary: "You rejected the completed result.",
+        human_decisions: [],
+      });
+      const exec = execution({
+        state: "ExecutionTasksFinishedAwaitingVerification",
+        execution_phase: "FINISHED_AWAITING_VERIFICATION",
+      });
+      const v = verificationPresentation(ver);
+      expect(v.label).toBe("Correction required");
+      expect(v.verifiedComplete).toBe(false);
+
+      const m = missionPresentation(exec, ver, true);
+      expect(m.headline).toBe("Correction required");
+      expect(m.badge).toBe("Needs attention");
+      expect(m.primaryAction).toBe("none");
+      expect(m.verifiedComplete).toBe(false);
+    });
   });
 });

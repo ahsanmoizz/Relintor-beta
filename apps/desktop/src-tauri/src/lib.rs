@@ -5561,6 +5561,18 @@ fn human_decision_prompts(
         })
         .collect();
 
+    let any_user_rejected = report.requirement_statuses.iter().any(|status| {
+        status.failed_evidence.iter().any(|evidence_id| {
+            context
+                .store
+                .load(evidence_id)
+                .is_ok_and(|stored| stored.artifact.metadata.class == EvidenceClass::HumanDecision)
+        })
+    });
+    if any_user_rejected {
+        return Vec::new();
+    }
+
     report
         .requirement_statuses
         .iter()
@@ -5606,7 +5618,9 @@ fn default_verification_workflow_stage(
     user_rejected: bool,
     failed_count: usize,
 ) -> &'static str {
-    if certificate_present {
+    if user_rejected {
+        "USER_DECISION_REJECTED"
+    } else if certificate_present {
         "VERIFIED_COMPLETE"
     } else if human_decision_pending {
         "WAITING_FOR_USER_DECISION"
@@ -5614,8 +5628,6 @@ fn default_verification_workflow_stage(
         "READY_TO_VERIFY"
     } else if *completion_state == relintor_evidence::CompletionState::BlockedExternal {
         "COLLECTION_BLOCKED"
-    } else if user_rejected {
-        "USER_DECISION_REJECTED"
     } else if failed_count > 0 {
         "VERIFICATION_NEEDS_ATTENTION"
     } else {
@@ -6080,8 +6092,18 @@ fn verification_start_inner(
 ) -> Result<VerificationStatusView, String> {
     let (context, report, manifest, collection) = evaluate_p8(&app, &project_id, true)?;
     let certificate = ensure_verified_completion_certificate(&app, &context, &report, &manifest)?;
+    let user_rejected = report.requirement_statuses.iter().any(|status| {
+        status.failed_evidence.iter().any(|evidence_id| {
+            context
+                .store
+                .load(evidence_id)
+                .is_ok_and(|stored| stored.artifact.metadata.class == EvidenceClass::HumanDecision)
+        })
+    });
     let mut workflow_stage = None;
-    if report.decision.state == relintor_evidence::CompletionState::FailedVerification
+    if user_rejected {
+        workflow_stage = Some("USER_DECISION_REJECTED");
+    } else if report.decision.state == relintor_evidence::CompletionState::FailedVerification
         || (!deterministic_failed_requirement_ids(&report, &context.store).is_empty()
             && human_decision_prompts(&context, &report).is_empty())
     {
