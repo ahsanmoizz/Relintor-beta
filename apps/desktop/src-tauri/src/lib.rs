@@ -671,12 +671,34 @@ struct VerificationStatusView {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct HumanDecisionEvidenceItemView {
+    requirement_id: String,
+    requirement_title: String,
+    intent: String,
+    status: String,
+    evidence_id: String,
+    evidence_class: String,
+    command: String,
+    exit_code: Option<i32>,
+    result: String,
+    relevant_files: Vec<String>,
+    artifact_path: String,
+    mission_id: String,
+    revision: u64,
+    source_fingerprint: String,
+    environment_fingerprint: String,
+    timestamp_ms: u64,
+    detail_snippet: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct HumanDecisionPromptView {
     requirement_id: String,
     title: String,
     question: String,
     summary: String,
     criterion_ids: Vec<String>,
+    evidence_items: Vec<HumanDecisionEvidenceItemView>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -5053,12 +5075,71 @@ fn authority_read_failure(error: String) -> String {
     "AUTHORITY_READ_FAILED: the sealed mission authority could not be read; restart Relintor and retry the authority read".into()
 }
 
+#[derive(Clone)]
 struct P8VerificationContext {
     authority: VerificationAuthority,
     current: FreshnessContext,
     store: EvidenceStore,
     p7_execution: AuthenticatedP7Execution,
     local_key: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct P8EvaluationCacheKey {
+    project_id: String,
+    mission_id: String,
+    revision: u64,
+    source_fingerprint: String,
+    evidence_generation: String,
+    authority_ledger_identity: (u64, Option<std::time::SystemTime>),
+}
+
+#[derive(Clone)]
+struct P8EvaluationCacheEntry {
+    key: P8EvaluationCacheKey,
+    context: P8VerificationContext,
+    report: relintor_evidence::VerificationReport,
+    manifest: EvidenceManifest,
+    collection: CollectorOrchestrationResult,
+}
+
+static P8_EVALUATION_CACHE: LazyLock<Mutex<HashMap<String, P8EvaluationCacheEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn p8_evidence_generation(store_dir: &Path) -> String {
+    let metadata_dir = store_dir.join("metadata");
+    if !metadata_dir.is_dir() {
+        return "empty".into();
+    }
+    let mut files = Vec::new();
+    if let Ok(entries) = fs::read_dir(&metadata_dir) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    let mtime = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    files.push(format!(
+                        "{}:{}:{}",
+                        entry.file_name().to_string_lossy(),
+                        meta.len(),
+                        mtime
+                    ));
+                }
+            }
+        }
+    }
+    files.sort();
+    relintor_evidence::sha256(&files.join(";").into_bytes())
+}
+
+fn invalidate_p8_evaluation_cache(project_id: &str) {
+    if let Ok(mut cache) = P8_EVALUATION_CACHE.lock() {
+        cache.remove(project_id);
+    }
 }
 
 fn ensure_terminal_p7_workspace_matches(
@@ -5184,6 +5265,45 @@ fn evaluate_p8(
     ),
     String,
 > {
+    if !collect_machine_evidence {
+        if let Ok(path) = database_path(app) {
+            if let Ok((revision, _, _, _, _, _)) = latest_execution_context(&path, project_id) {
+                if let Ok(ledger_path) = execution_ledger_path(app, &revision.seal.mission_id, revision.revision) {
+                    let ledger_meta = fs::metadata(&ledger_path).ok();
+                    let store_dir = app
+                        .path()
+                        .app_data_dir()
+                        .map(|d| d.join("verification").join(format!("{}-{}", revision.seal.mission_id, revision.revision)))
+                        .unwrap_or_default();
+                    let evidence_generation = p8_evidence_generation(&store_dir);
+                    let candidate_key = P8EvaluationCacheKey {
+                        project_id: project_id.to_string(),
+                        mission_id: revision.seal.mission_id.clone(),
+                        revision: revision.revision,
+                        source_fingerprint: revision.contract.project_source_revision.clone(),
+                        evidence_generation,
+                        authority_ledger_identity: (
+                            ledger_meta.as_ref().map(|m| m.len()).unwrap_or(0),
+                            ledger_meta.and_then(|m| m.modified().ok()),
+                        ),
+                    };
+                    if let Ok(cache) = P8_EVALUATION_CACHE.lock() {
+                        if let Some(entry) = cache.get(project_id) {
+                            if entry.key == candidate_key {
+                                return Ok((
+                                    entry.context.clone(),
+                                    entry.report.clone(),
+                                    entry.manifest.clone(),
+                                    entry.collection.clone(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let context = load_p8_verification_context(app, project_id)?;
     let collection = if collect_machine_evidence {
         let workspace = context
@@ -5297,6 +5417,40 @@ fn evaluate_p8(
         None,
     )
     .map_err(|error| format!("export P8 evidence manifest: {error}"))?;
+
+    if let Ok(ledger_path) = execution_ledger_path(app, &context.authority.revision.seal.mission_id, context.authority.revision.revision) {
+        let ledger_meta = fs::metadata(&ledger_path).ok();
+        let store_dir = app
+            .path()
+            .app_data_dir()
+            .map(|d| d.join("verification").join(format!("{}-{}", context.authority.revision.seal.mission_id, context.authority.revision.revision)))
+            .unwrap_or_default();
+        let evidence_generation = p8_evidence_generation(&store_dir);
+        let key = P8EvaluationCacheKey {
+            project_id: project_id.to_string(),
+            mission_id: context.authority.revision.seal.mission_id.clone(),
+            revision: context.authority.revision.revision,
+            source_fingerprint: context.authority.revision.contract.project_source_revision.clone(),
+            evidence_generation,
+            authority_ledger_identity: (
+                ledger_meta.as_ref().map(|m| m.len()).unwrap_or(0),
+                ledger_meta.and_then(|m| m.modified().ok()),
+            ),
+        };
+        if let Ok(mut cache) = P8_EVALUATION_CACHE.lock() {
+            cache.insert(
+                project_id.to_string(),
+                P8EvaluationCacheEntry {
+                    key,
+                    context: context.clone(),
+                    report: report.clone(),
+                    manifest: manifest.clone(),
+                    collection: collection.clone(),
+                },
+            );
+        }
+    }
+
     Ok((context, report, manifest, collection))
 }
 
@@ -5304,6 +5458,109 @@ fn human_decision_prompts(
     context: &P8VerificationContext,
     report: &relintor_evidence::VerificationReport,
 ) -> Vec<HumanDecisionPromptView> {
+    let all_artifacts = context.store.list().unwrap_or_default();
+    let evidence_items: Vec<HumanDecisionEvidenceItemView> = context
+        .authority
+        .revision
+        .contract
+        .requirement_graph
+        .requirements
+        .iter()
+        .map(|req| {
+            let req_status_opt = report
+                .requirement_statuses
+                .iter()
+                .find(|s| s.requirement_id == req.requirement_id);
+            let status = if let Some(req_status) = req_status_opt {
+                if req_status.status == RequirementStatus::Verified {
+                    "PASS".to_string()
+                } else if req_status.status == RequirementStatus::Failed {
+                    "FAIL".to_string()
+                } else if req_status.missing_obligations.contains(&EvidenceClass::HumanDecision) {
+                    "PENDING_DECISION".to_string()
+                } else if !req_status.missing_obligations.is_empty() || !req_status.missing_acceptance_criteria.is_empty() {
+                    "BLOCKED".to_string()
+                } else {
+                    "MISSING".to_string()
+                }
+            } else {
+                "MISSING".to_string()
+            };
+            let matching_art = all_artifacts
+                .iter()
+                .find(|art| art.metadata.requirement_ids.contains(&req.requirement_id));
+            if let Some(art) = matching_art {
+                let class_str = format!("{:?}", art.metadata.class);
+                let command = if art.metadata.class == EvidenceClass::SecurityScan {
+                    "npm run security-scan".to_string()
+                } else if art.metadata.class == EvidenceClass::TestOutput {
+                    "npm run test".to_string()
+                } else {
+                    format!("p8-collector: {}", class_str)
+                };
+                let mut relevant_files = Vec::new();
+                for ei in &art.metadata.execution_identities {
+                    for ac in &ei.artifact_changes {
+                        if !relevant_files.contains(&ac.path) {
+                            relevant_files.push(ac.path.clone());
+                        }
+                    }
+                }
+                let artifact_path = format!(
+                    "verification/{}-{}/blobs/{}.bin",
+                    art.metadata.mission_id,
+                    art.metadata.mission_revision,
+                    art.digest
+                );
+                let is_pass = art.metadata.result == relintor_evidence::EvidenceResult::Pass;
+                let detail_snippet = if is_pass {
+                    format!("{} passed deterministically with exit code 0", class_str)
+                } else {
+                    format!("{} evaluated with result {:?}", class_str, art.metadata.result)
+                };
+                HumanDecisionEvidenceItemView {
+                    requirement_id: req.requirement_id.clone(),
+                    requirement_title: req.title.clone(),
+                    intent: req.intent.clone(),
+                    status,
+                    evidence_id: art.metadata.evidence_id.clone(),
+                    evidence_class: class_str,
+                    command,
+                    exit_code: if is_pass { Some(0) } else { Some(1) },
+                    result: format!("{:?}", art.metadata.result),
+                    relevant_files,
+                    artifact_path,
+                    mission_id: art.metadata.mission_id.clone(),
+                    revision: art.metadata.mission_revision,
+                    source_fingerprint: art.metadata.workspace_fingerprint.clone(),
+                    environment_fingerprint: art.metadata.environment_fingerprint.clone(),
+                    timestamp_ms: art.metadata.created_at_ms,
+                    detail_snippet,
+                }
+            } else {
+                HumanDecisionEvidenceItemView {
+                    requirement_id: req.requirement_id.clone(),
+                    requirement_title: req.title.clone(),
+                    intent: req.intent.clone(),
+                    status,
+                    evidence_id: String::new(),
+                    evidence_class: String::new(),
+                    command: String::new(),
+                    exit_code: None,
+                    result: String::new(),
+                    relevant_files: Vec::new(),
+                    artifact_path: String::new(),
+                    mission_id: context.authority.revision.seal.mission_id.clone(),
+                    revision: context.authority.revision.revision,
+                    source_fingerprint: context.authority.workspace_fingerprint.clone(),
+                    environment_fingerprint: context.authority.environment_fingerprint.clone(),
+                    timestamp_ms: 0,
+                    detail_snippet: String::new(),
+                }
+            }
+        })
+        .collect();
+
     report
         .requirement_statuses
         .iter()
@@ -5336,6 +5593,7 @@ fn human_decision_prompts(
                 .filter(|criterion| !criterion.machine_checkable)
                 .map(|criterion| criterion.criterion_id.clone())
                 .collect(),
+            evidence_items: evidence_items.clone(),
         })
         .collect()
 }
@@ -5924,6 +6182,7 @@ async fn verification_submit_human_decision(
                 },
             )
             .map_err(|error| format!("record explicit user decision: {error}"))?;
+        invalidate_p8_evaluation_cache(&project_id);
         let continuation_app = app.clone();
         let continuation_project_id = project_id.clone();
         thread::Builder::new()

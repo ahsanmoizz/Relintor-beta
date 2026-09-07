@@ -252,6 +252,26 @@ export type ExecutionStatus = {
   events: Array<{ sequence: number; occurred_at_ms: number; task_id: string | null; kind: string; detail: string }>;
 };
 
+export type HumanDecisionEvidenceItem = {
+  requirement_id: string;
+  requirement_title: string;
+  intent: string;
+  status: string;
+  evidence_id: string;
+  evidence_class: string;
+  command: string;
+  exit_code: number | null;
+  result: string;
+  relevant_files: string[];
+  artifact_path: string;
+  mission_id: string;
+  revision: number;
+  source_fingerprint: string;
+  environment_fingerprint: string;
+  timestamp_ms: number;
+  detail_snippet: string;
+};
+
 export type VerificationStatus = {
   project_id: string;
   mission_id: string;
@@ -277,6 +297,7 @@ export type VerificationStatus = {
     question: string;
     summary: string;
     criterion_ids: string[];
+    evidence_items?: HumanDecisionEvidenceItem[];
   }>;
   collector_activity: string[];
   collection_failures: string[];

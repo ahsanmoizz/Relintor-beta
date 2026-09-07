@@ -2048,11 +2048,17 @@ fn process_command(command: &CommandSpec) -> Command {
         // remove the outer pair and preserve the quoted script path.
         use std::os::windows::process::CommandExt;
         process.raw_arg(format!(" \"{command_line}\""));
+        process.creation_flags(0x0800_0000);
         return process;
     }
 
     let mut process = Command::new(&command.program);
     process.args(&command.args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        process.creation_flags(0x0800_0000);
+    }
     process
 }
 

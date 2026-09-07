@@ -1531,7 +1531,96 @@ export function MissionCockpit({ status, verification, antigravity, busy, revali
     {presentation.recoveryRequired && <section className="panel attention-panel" aria-labelledby="recovery-title"><span className="panel-kicker">RECOVERY</span><h3 id="recovery-title">Review the interrupted task before continuing</h3><p>{recoveryMessage}</p>{status.external_changes.length > 0 && <ul>{status.external_changes.map((path) => <li key={path}>Workspace change to review: {displayWindowsPath(path)}</li>)}</ul>}<p className="form-hint">Relintor will not retry automatically or claim the workspace is unchanged. A reviewed retry creates a new exact attempt and preserves this history.</p></section>}
 
     {verificationNotice && <p className="form-hint" role="status" aria-live="polite">{verificationNotice}</p>}
-    {pendingDecision && <section className="panel attention-panel decision-panel" aria-labelledby="human-decision-title"><span className="panel-kicker">YOUR DECISION</span><h3 id="human-decision-title">Relintor needs your decision</h3><p><strong>{pendingDecision.question}</strong></p><p>{pendingDecision.summary}</p><label className="field-label" htmlFor="decision-notes">Optional notes</label><textarea id="decision-notes" value={decisionNotes} maxLength={4000} disabled={busy} onChange={(event) => setDecisionNotes(event.target.value)} placeholder="Add context for the audit record (optional)" /><div className="primary-action-row"><button className="primary-button" type="button" disabled={busy} onClick={() => onDecision(pendingDecision.requirement_id, true, decisionNotes)}>{busy ? "Recording decision…" : "Approve"}</button><button className="danger-button" type="button" disabled={busy} onClick={() => onDecision(pendingDecision.requirement_id, false, decisionNotes)}>{busy ? "Recording decision…" : "Reject"}</button></div><p className="form-hint">Only your action can satisfy this decision. Relintor and Antigravity cannot approve it for you.</p><details className="technical-details"><summary>Technical evidence details</summary><dl><div><dt>Requirement</dt><dd><code>{pendingDecision.requirement_id}</code></dd></div><div><dt>Criteria</dt><dd><code>{pendingDecision.criterion_ids.join(", ")}</code></dd></div></dl></details></section>}
+    {pendingDecision && (
+      <section className="panel attention-panel decision-panel" aria-labelledby="human-decision-title">
+        <span className="panel-kicker">YOUR DECISION</span>
+        <h3 id="human-decision-title">Relintor needs your decision</h3>
+        <p><strong>{pendingDecision.question}</strong></p>
+        <p>{pendingDecision.summary}</p>
+        <label className="field-label" htmlFor="decision-notes">Optional notes</label>
+        <textarea
+          id="decision-notes"
+          value={decisionNotes}
+          maxLength={4000}
+          disabled={busy}
+          onChange={(event) => setDecisionNotes(event.target.value)}
+          placeholder="Add context for the audit record (optional)"
+        />
+        <div className="primary-action-row">
+          <button
+            className="primary-button"
+            type="button"
+            disabled={busy}
+            onClick={() => onDecision(pendingDecision.requirement_id, true, decisionNotes)}
+          >
+            {busy ? "Recording decision…" : "Approve"}
+          </button>
+          <button
+            className="danger-button"
+            type="button"
+            disabled={busy}
+            onClick={() => onDecision(pendingDecision.requirement_id, false, decisionNotes)}
+          >
+            {busy ? "Recording decision…" : "Reject"}
+          </button>
+        </div>
+        <p className="form-hint">Only your action can satisfy this decision. Relintor and Antigravity cannot approve it for you.</p>
+        <details className="technical-details" open>
+          <summary>Technical Evidence Review ({pendingDecision.evidence_items?.length ?? 0} requirements)</summary>
+          {pendingDecision.evidence_items && pendingDecision.evidence_items.length > 0 ? (
+            <div className="evidence-digest-list">
+              {pendingDecision.evidence_items.map((item) => (
+                <div key={`${item.requirement_id}-${item.evidence_id}`} className="evidence-item-card">
+                  <div className="evidence-item-header">
+                    <span className={`status-badge tone-${item.status === "PASS" ? "success" : item.status === "PENDING_DECISION" ? "warning" : item.status === "FAIL" ? "danger" : "neutral"}`}>
+                      {item.status}
+                    </span>
+                    <strong className="evidence-item-title">{item.requirement_title}</strong>
+                  </div>
+                  <p className="evidence-item-intent">{item.intent}</p>
+                  {item.evidence_id ? (
+                    <div className="evidence-item-support">
+                      <div className="evidence-meta-row">
+                        <span>Type: <code>{item.evidence_class}</code></span>
+                        <span>Command: <code>{item.command}</code></span>
+                        {item.exit_code !== null && <span>Exit: <code>{item.exit_code}</code></span>}
+                        <span>Result: <code>{item.result}</code></span>
+                      </div>
+                      {item.relevant_files.length > 0 && (
+                        <p className="evidence-files-summary">
+                          Files: <code>{item.relevant_files.slice(0, 4).join(", ")}{item.relevant_files.length > 4 ? ` +${item.relevant_files.length - 4} more` : ""}</code>
+                        </p>
+                      )}
+                      <details className="evidence-provenance-details">
+                        <summary>Provenance &amp; Artifact Details</summary>
+                        <dl className="technical-list">
+                          <div><dt>Evidence ID</dt><dd><code>{item.evidence_id}</code></dd></div>
+                          <div><dt>Artifact</dt><dd><code>{item.artifact_path}</code></dd></div>
+                          <div><dt>Mission / Rev</dt><dd><code>{item.mission_id} (rev {item.revision})</code></dd></div>
+                          <div><dt>Source Fingerprint</dt><dd><code>{item.source_fingerprint}</code></dd></div>
+                          <div><dt>Environment</dt><dd><code>{item.environment_fingerprint}</code></dd></div>
+                          <div><dt>Timestamp</dt><dd>{item.timestamp_ms ? new Date(item.timestamp_ms).toISOString() : "N/A"}</dd></div>
+                          {item.detail_snippet && <div><dt>Collector Output</dt><dd><span>{item.detail_snippet}</span></dd></div>}
+                        </dl>
+                      </details>
+                    </div>
+                  ) : (
+                    <p className="evidence-pending-note">
+                      {item.status === "PENDING_DECISION" ? "Awaiting your explicit Human Decision (Approve / Reject above)." : "No automated evidence collector is bound to this requirement."}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <dl>
+              <div><dt>Requirement</dt><dd><code>{pendingDecision.requirement_id}</code></dd></div>
+              <div><dt>Criteria</dt><dd><code>{pendingDecision.criterion_ids.join(", ")}</code></dd></div>
+            </dl>
+          )}
+        </details>
+      </section>
+    )}
     {!presentation.verifiedComplete && !pendingDecision && (verificationAttention.length > 0 || (verification && verificationView.tone === "warning")) && <section className="panel attention-panel" aria-labelledby="verification-blocker-title"><span className="panel-kicker">VERIFICATION</span><h3 id="verification-blocker-title">Verification needs attention</h3><p>{verification?.summary || verificationView.supporting}</p>{verification?.collection_failures.length ? <ul>{verification.collection_failures.map((item) => <li key={item}>{item}</li>)}</ul> : null}{verificationAttention.length > 0 && <details className="technical-details"><summary>Technical evidence details</summary><ul>{verificationAttention.map((item) => <li key={item}>{item}</li>)}</ul></details>}</section>}
 
     <div className="mission-summary-grid" aria-label="Mission summary">
