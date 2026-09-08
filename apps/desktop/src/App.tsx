@@ -38,6 +38,7 @@ import {
   rerunVerification,
   verificationEvidence,
   exportVerificationManifest,
+  authorizeCorrection,
   takeoverScan,
   chooseWorkspace,
   setProjectWorkspace,
@@ -50,6 +51,7 @@ import {
   type VerificationStatus,
   type VerificationEvidence,
   type HumanDecisionEvidenceItem,
+  type CorrectionScope,
   type AntigravityHealth,
   type AntigravitySetupView,
 } from "./backend";
@@ -1275,6 +1277,35 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
     }
   };
 
+  const recordCorrectionAuthorization = async (scopeHash: string) => {
+    if (!status || !verification?.correction_scope) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await authorizeCorrection(
+        status.project_id,
+        verification.correction_scope.mission_id,
+        verification.correction_scope.revision,
+        scopeHash,
+      );
+      setStatus(updated);
+      setVerification((prev) =>
+        prev
+          ? {
+              ...prev,
+              correction_scope: prev.correction_scope
+                ? { ...prev.correction_scope, authorized: true }
+                : null,
+            }
+          : null,
+      );
+    } catch (reason) {
+      setError(verificationActionError(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return <section className="view" aria-labelledby="activity-title">
     <div className="eyebrow">MISSION ACTIVITY</div>
     <h1 id="activity-title">{status?.project_name || "Activity"}</h1>
@@ -1282,7 +1313,7 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
     {handoff && <AntigravitySetupCard health={antigravity} onRefresh={refreshAntigravity} />}
     {!handoff && <div className="panel empty-panel" data-testid="activity-empty"><span className="panel-kicker">NO SEALED MISSION</span><h2>Nothing is ready to execute.</h2><p>Review a blueprint and let the Rust authority seal a mission first. There is no frontend-only activity to display.</p></div>}
     {handoff && loading && <div className="panel loading-panel" role="status" aria-live="polite"><span className="panel-kicker">MISSION STATE</span><h2>Reading persisted state…</h2><p>Waiting for the Rust execution and verification authorities.</p></div>}
-    {handoff && !loading && status && <MissionCockpit status={status} verification={verification} antigravity={antigravity} busy={busy} revalidating={revalidating} verificationNotice={verificationNotice} onCommand={runCommand} onVerify={() => void runVerificationCommand()} onDecision={(requirementId, approved, notes) => void recordHumanDecision(requirementId, approved, notes)} onRefresh={() => void load()} />}
+    {handoff && !loading && status && <MissionCockpit status={status} verification={verification} antigravity={antigravity} busy={busy} revalidating={revalidating} verificationNotice={verificationNotice} onCommand={runCommand} onVerify={() => void runVerificationCommand()} onDecision={(requirementId, approved, notes) => void recordHumanDecision(requirementId, approved, notes)} onRefresh={() => void load()} onAuthorizeCorrection={recordCorrectionAuthorization} />}
     {handoff && !loading && !status && !error && <div className="panel empty-panel"><span className="panel-kicker">STATE UNAVAILABLE</span><h2>No mission state returned.</h2><p>The authority did not provide an execution record, so the UI will not infer one.</p></div>}
     {error && <div className="panel error-panel" role="alert"><span className="panel-kicker">ACTION REQUIRED</span><h2>{/Antigravity is not ready/i.test(error) ? "Antigravity setup required" : authorityReadFailure ? "Mission state unavailable" : "Relintor needs your attention"}</h2><p>{error}</p>{authorityReadFailure && <button className="secondary-button" type="button" onClick={() => void load()}>Retry authority read</button>}{authorityReadFailure && authorityReadStatus && <p className="form-hint" role="status">{authorityReadStatus}</p>}</div>}
   </section>;
@@ -1543,7 +1574,31 @@ export function TechnicalEvidenceReview({
   );
 }
 
-export function MissionCockpit({ status, verification, antigravity, busy, revalidating, verificationNotice, onCommand, onVerify, onDecision, onRefresh }: { status: ExecutionStatus; verification: VerificationStatus | null; antigravity: AntigravityHealth | null; busy: boolean; revalidating: boolean; verificationNotice: string | null; onCommand: (command: (id: string) => Promise<ExecutionStatus>) => Promise<void>; onVerify: () => void; onDecision: (requirementId: string, approved: boolean, notes: string) => void; onRefresh: () => void }) {
+export function MissionCockpit({
+  status,
+  verification,
+  antigravity,
+  busy,
+  revalidating,
+  verificationNotice,
+  onCommand,
+  onVerify,
+  onDecision,
+  onRefresh,
+  onAuthorizeCorrection,
+}: {
+  status: ExecutionStatus;
+  verification: VerificationStatus | null;
+  antigravity: AntigravityHealth | null;
+  busy: boolean;
+  revalidating: boolean;
+  verificationNotice: string | null;
+  onCommand: (command: (id: string) => Promise<ExecutionStatus>) => Promise<void>;
+  onVerify: () => void;
+  onDecision: (requirementId: string, approved: boolean, notes: string) => void;
+  onRefresh: () => void;
+  onAuthorizeCorrection?: (scopeHash: string) => void;
+}) {
   const [decisionNotes, setDecisionNotes] = useState("");
   const executorReady = antigravity?.adapter_ready === true;
   const presentation = missionPresentation(status, verification, executorReady);
@@ -1670,11 +1725,64 @@ export function MissionCockpit({ status, verification, antigravity, busy, revali
         <div className="correction-facts">
           <div><span>Execution state</span><strong>{status.finished_tasks} of {status.total_tasks} tasks completed · Preserved</strong></div>
           <div><span>Recovery state</span><strong>{status.recovery_state}</strong></div>
-          <div><span>Next step</span><strong>Prepare authorized correction</strong></div>
+          <div><span>Next step</span><strong>{verification.correction_scope?.authorized ? "Execute authorized correction" : "Authorize bounded correction"}</strong></div>
+          {verification.correction_scope && (
+            <div><span>Revision policy</span><strong>Same revision ({status.revision}) · Sealed scope</strong></div>
+          )}
         </div>
-        <p className="form-hint">
-          All {status.finished_tasks} historical task attempts remain completed and recorded in the tamper-evident ledger. Relintor will not restart execution or retry tasks without explicit human review and governance.
-        </p>
+
+        {verification.correction_scope ? (
+          <div className="correction-scope-details">
+            <div className="correction-scope-reasons">
+              <h4>Why correction is required</h4>
+              <ul>
+                {verification.correction_scope.user_rejection_notes && (
+                  <li><strong>Your rejection finding:</strong> {verification.correction_scope.user_rejection_notes}</li>
+                )}
+                <li><strong>Failed requirements ({verification.correction_scope.failed_requirement_ids.length}):</strong> <code>{verification.correction_scope.failed_requirement_ids.join(", ")}</code></li>
+                {verification.correction_scope.blocked_requirement_ids.length > 0 && (
+                  <li><strong>Blocked requirements ({verification.correction_scope.blocked_requirement_ids.length}):</strong> <code>{verification.correction_scope.blocked_requirement_ids.join(", ")}</code></li>
+                )}
+              </ul>
+            </div>
+
+            <div className="correction-scope-actions-summary">
+              <h4>Proposed correction boundary</h4>
+              <p>
+                Authorizing this correction will reopen <strong>{verification.correction_scope.affected_task_ids.length} {verification.correction_scope.affected_task_ids.length === 1 ? "task" : "tasks"}</strong> (<code>{verification.correction_scope.affected_task_ids.join(", ")}</code>) with fresh bounded execution allowances.
+              </p>
+              <p>
+                <strong>{verification.correction_scope.preserved_task_ids.length} historical tasks</strong> will NOT rerun and their completed records remain permanently preserved in the ledger.
+              </p>
+              <p className="form-hint">
+                The executor will only be allowed to modify files and artifacts within the bounded scope of the reopened tasks. Once complete, fresh evidence must be verified before a certificate can be issued.
+              </p>
+            </div>
+
+            <div className="correction-authorize-control">
+              {verification.correction_scope.authorized ? (
+                <p className="success-text">Scoped correction authorized. Use the execution control above ("Run next task") to begin work under normal governance.</p>
+              ) : (
+                <button
+                  className="primary-button"
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    if (verification?.correction_scope) {
+                      onAuthorizeCorrection?.(verification.correction_scope.scope_hash);
+                    }
+                  }}
+                >
+                  {busy ? "Authorizing correction…" : "Authorize scoped correction"}
+                </button>
+              )}
+            </div>
+          </div>
+        ) : (
+          <p className="form-hint">
+            All {status.finished_tasks} historical task attempts remain completed and recorded in the tamper-evident ledger. Relintor will not restart execution or retry tasks without explicit human review and governance.
+          </p>
+        )}
         <TechnicalEvidenceReview items={verification.evidence_items || []} />
       </section>
     )}

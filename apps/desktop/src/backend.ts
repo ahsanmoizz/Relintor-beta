@@ -300,9 +300,23 @@ export type VerificationStatus = {
     evidence_items?: HumanDecisionEvidenceItem[];
   }>;
   evidence_items?: HumanDecisionEvidenceItem[];
+  correction_scope?: CorrectionScope | null;
   collector_activity: string[];
   collection_failures: string[];
   detail: string;
+};
+
+export type CorrectionScope = {
+  mission_id: string;
+  revision: number;
+  originating_evidence_id: string;
+  user_rejection_notes: string;
+  failed_requirement_ids: string[];
+  blocked_requirement_ids: string[];
+  affected_task_ids: string[];
+  preserved_task_ids: string[];
+  scope_hash: string;
+  authorized: boolean;
 };
 
 export type VerificationEvidence = {
@@ -749,6 +763,23 @@ export async function submitHumanDecision(
     requirementId,
     approved,
     notes,
+  });
+}
+
+export async function authorizeCorrection(
+  projectId: string,
+  missionId: string,
+  revision: number,
+  scopeHash: string,
+): Promise<ExecutionStatus> {
+  if (!isTauriRuntime()) {
+    throw new Error("The installed Relintor desktop authority is required to authorize scoped correction.");
+  }
+  return invoke<ExecutionStatus>("verification_authorize_correction", {
+    projectId,
+    missionId,
+    revision,
+    scopeHash,
   });
 }
 

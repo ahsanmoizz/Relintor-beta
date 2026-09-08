@@ -17,9 +17,10 @@ use relintor_evidence::{
     VerificationCollectorPlan, VerificationEngine,
 };
 use relintor_execution::{
-    CheckpointKind, ConservativeProcessInspector, ExecutionError, ExecutionRun, ProcessInspector,
-    ProcessObservation, ProcessOwnershipRecord, RecoveryAuthority, RecoveryCoordinator,
-    RecoveryDisposition, RecoveryStore, SchedulerPolicy, SessionEndState,
+    CheckpointKind, ConservativeProcessInspector, ExecutionError, ExecutionEventKind, ExecutionRun,
+    ExecutionTaskState, ProcessInspector, ProcessObservation, ProcessOwnershipRecord,
+    RecoveryAuthority, RecoveryCoordinator, RecoveryDisposition, RecoveryStore, SchedulerPolicy,
+    SessionEndState,
 };
 use relintor_investigator::{
     persist_result, AnswerChoice, Blueprint, InvestigationView, Investigator, ProjectDraft,
@@ -666,9 +667,24 @@ struct VerificationStatusView {
     summary: String,
     human_decisions: Vec<HumanDecisionPromptView>,
     evidence_items: Vec<HumanDecisionEvidenceItemView>,
+    correction_scope: Option<CorrectionScopeView>,
     collector_activity: Vec<String>,
     collection_failures: Vec<String>,
     detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CorrectionScopeView {
+    mission_id: String,
+    revision: u64,
+    originating_evidence_id: String,
+    user_rejection_notes: String,
+    failed_requirement_ids: Vec<String>,
+    blocked_requirement_ids: Vec<String>,
+    affected_task_ids: Vec<String>,
+    preserved_task_ids: Vec<String>,
+    scope_hash: String,
+    authorized: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -5727,6 +5743,146 @@ fn default_verification_workflow_stage(
     }
 }
 
+fn derive_correction_scope_from_context(
+    context: &P8VerificationContext,
+    report: &relintor_evidence::VerificationReport,
+) -> Option<CorrectionScopeView> {
+    let mut originating_evidence_id = String::new();
+    let mut user_rejection_notes = String::new();
+
+    for status in &report.requirement_statuses {
+        for evidence_id in &status.failed_evidence {
+            if let Ok(stored) = context.store.load(evidence_id) {
+                if stored.artifact.metadata.class == EvidenceClass::HumanDecision {
+                    originating_evidence_id = evidence_id.clone();
+                    if let Ok(obs) = serde_json::from_slice::<
+                        relintor_evidence::ExplicitUserDecisionObservation,
+                    >(&stored.bytes)
+                    {
+                        user_rejection_notes = obs.notes.trim().to_string();
+                    } else {
+                        let raw = String::from_utf8_lossy(&stored.bytes).trim().to_string();
+                        if !raw.is_empty() && !raw.starts_with('{') {
+                            user_rejection_notes = raw;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        if !originating_evidence_id.is_empty() {
+            break;
+        }
+    }
+
+    if originating_evidence_id.is_empty() {
+        return None;
+    }
+
+    let mut failed_requirement_ids = Vec::new();
+    let mut blocked_requirement_ids = Vec::new();
+
+    for status in &report.requirement_statuses {
+        if status.status == RequirementStatus::Failed {
+            failed_requirement_ids.push(status.requirement_id.clone());
+        } else if status.status == RequirementStatus::Blocked
+            || (!status.missing_obligations.is_empty()
+                && status.status != RequirementStatus::Verified)
+        {
+            blocked_requirement_ids.push(status.requirement_id.clone());
+        }
+    }
+
+    failed_requirement_ids.sort();
+    failed_requirement_ids.dedup();
+    blocked_requirement_ids.sort();
+    blocked_requirement_ids.dedup();
+
+    let unverified_reqs = failed_requirement_ids
+        .iter()
+        .chain(blocked_requirement_ids.iter())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    let run = &context.p7_execution.run;
+    let mut affected = BTreeSet::new();
+
+    for task in run.tasks.values() {
+        if task.requirement_ids.iter().any(|r| unverified_reqs.contains(r)) {
+            affected.insert(task.task_id.clone());
+        }
+    }
+
+    loop {
+        let mut changed = false;
+        for task in run.tasks.values() {
+            if !affected.contains(&task.task_id)
+                && task
+                    .dependency_ids
+                    .iter()
+                    .any(|dependency| affected.contains(dependency))
+            {
+                affected.insert(task.task_id.clone());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut preserved = Vec::new();
+    for task_id in run.tasks.keys() {
+        if !affected.contains(task_id) {
+            preserved.push(task_id.clone());
+        }
+    }
+    preserved.sort();
+
+    let affected_vec = affected.into_iter().collect::<Vec<_>>();
+
+    let authorized = !affected_vec.is_empty()
+        && affected_vec.iter().all(|task_id| {
+            run.tasks.get(task_id).map_or(false, |t| {
+                matches!(
+                    t.state,
+                    ExecutionTaskState::Pending
+                        | ExecutionTaskState::Ready
+                        | ExecutionTaskState::Running
+                )
+            })
+        })
+        && run
+            .events
+            .iter()
+            .any(|e| e.kind == ExecutionEventKind::VerificationCorrectionAuthorized);
+
+    let scope_hash = relintor_evidence::sha256(
+        format!(
+            "{}:{}:{}:failed={}:blocked={}",
+            context.authority.revision.seal.mission_id,
+            context.authority.revision.revision,
+            originating_evidence_id,
+            failed_requirement_ids.join(","),
+            blocked_requirement_ids.join(",")
+        )
+        .as_bytes(),
+    );
+
+    Some(CorrectionScopeView {
+        mission_id: context.authority.revision.seal.mission_id.clone(),
+        revision: context.authority.revision.revision,
+        originating_evidence_id,
+        user_rejection_notes,
+        failed_requirement_ids,
+        blocked_requirement_ids,
+        affected_task_ids: affected_vec,
+        preserved_task_ids: preserved,
+        scope_hash,
+        authorized,
+    })
+}
+
 fn verification_view(
     project_id: &str,
     context: &P8VerificationContext,
@@ -5818,6 +5974,11 @@ fn verification_view(
         }
         _ => "Verification finished. Relintor is waiting for all required evidence.",
     };
+    let correction_scope = if user_rejected {
+        derive_correction_scope_from_context(context, report)
+    } else {
+        None
+    };
     VerificationStatusView {
         project_id: project_id.into(),
         mission_id: context.authority.revision.seal.mission_id.clone(),
@@ -5878,6 +6039,7 @@ fn verification_view(
         summary: summary.into(),
         human_decisions,
         evidence_items,
+        correction_scope,
         collector_activity: collection
             .executed
             .iter()
@@ -6330,6 +6492,101 @@ async fn verification_submit_human_decision(
             })
             .map_err(|error| format!("launch post-decision verification closure: {error}"))?;
         verification_status(app, project_id)
+    })
+}
+
+#[tauri::command]
+fn verification_authorize_correction(
+    app: AppHandle,
+    project_id: String,
+    mission_id: String,
+    revision: u64,
+    scope_hash: String,
+) -> Result<ExecutionStatusView, String> {
+    with_execution_mutation_lock(|| {
+        let project_id = canonical_project_id(&project_id)?;
+        require_execution_not_active(&project_id)?;
+
+        let (context, report, _manifest, _collection) = evaluate_p8(&app, &project_id, false)?;
+
+        let scope = derive_correction_scope_from_context(&context, &report)
+            .ok_or_else(|| "NO_CORRECTION_SCOPE: There is no active human rejection requiring correction.".to_string())?;
+
+        if scope.mission_id != mission_id {
+            return Err(format!(
+                "WRONG_MISSION_AUTHORIZATION: Requested mission {mission_id} does not match authoritative mission {}",
+                scope.mission_id
+            ));
+        }
+
+        if scope.revision != revision {
+            return Err(format!(
+                "WRONG_REVISION_AUTHORIZATION: Requested revision {revision} does not match authoritative revision {}",
+                scope.revision
+            ));
+        }
+
+        if scope.scope_hash != scope_hash {
+            return Err(
+                "STALE_CORRECTION_SCOPE: The correction scope is stale, invalid, or has been modified.".to_string(),
+            );
+        }
+
+        let (mut run, ledger_path, rev, _handoff) = load_execution_run(&app, &project_id)?;
+
+        if scope.authorized {
+            return p9_status_view(&app, &project_id, &ledger_path, &run, &rev);
+        }
+
+        if run.state != relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification {
+            return Err(format!(
+                "CONFLICTING_AUTHORIZATION: Correction cannot be authorized while execution is in state {:?}",
+                run.state
+            ));
+        }
+
+        let known_requirements = run
+            .tasks
+            .values()
+            .flat_map(|t| t.requirement_ids.iter().cloned())
+            .collect::<BTreeSet<_>>();
+
+        let target_reqs: BTreeSet<String> = scope
+            .failed_requirement_ids
+            .iter()
+            .chain(scope.blocked_requirement_ids.iter())
+            .filter(|r| known_requirements.contains(*r))
+            .cloned()
+            .collect();
+
+        if target_reqs.is_empty() {
+            return Err(
+                "NO_CORRECTION_TARGETS: No sealed tasks found matching the unverified requirements.".to_string(),
+            );
+        }
+
+        let affected = run
+            .authorize_verification_correction(&target_reqs, execution_now_ms())
+            .map_err(|error| format!("authorize verification correction: {error}"))?;
+
+        let recovery = recovery_store(&app, &rev)?;
+        persist_execution_boundary(
+            &run,
+            &ledger_path,
+            &recovery,
+            &rev,
+            &format!(
+                "user explicitly authorized scoped correction for {}",
+                affected.join(",")
+            ),
+            CheckpointKind::AfterTaskPersistence,
+            Vec::new(),
+        )
+        .map_err(|error| format!("persist authorized correction boundary: {error}"))?;
+
+        invalidate_p8_evaluation_cache(&project_id);
+
+        p9_status_view(&app, &project_id, &ledger_path, &run, &rev)
     })
 }
 
@@ -7156,6 +7413,7 @@ pub fn run() {
             verification_status,
             verification_rerun,
             verification_submit_human_decision,
+            verification_authorize_correction,
             verification_evidence,
             verification_certificate,
             verification_export_manifest,

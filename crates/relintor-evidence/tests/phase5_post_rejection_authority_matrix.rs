@@ -26,8 +26,8 @@ use ed25519_dalek::SigningKey;
 use relintor_evidence::test_support::*;
 use relintor_evidence::*;
 use relintor_execution::{
-    ExecutionLease, ExecutionRun, ExecutionRunState, ExecutionTask, ExecutionTaskState,
-    RetryPolicy, SchedulerPolicy, TaskAttempt,
+    ExecutionEventKind, ExecutionLease, ExecutionRun, ExecutionRunState, ExecutionTask,
+    ExecutionTaskState, RetryPolicy, SchedulerPolicy, TaskAttempt, TaskAttemptState,
 };
 use relintor_standards::{
     builtin_registry, scope_fingerprint, AcceptanceCriterion, ApplicabilityContext,
@@ -737,4 +737,301 @@ fn test_duplicate_rejection_idempotent() {
     ).expect("sibling rejection succeeds idempotently");
 
     assert_eq!(res1.digest, res3.digest);
+}
+
+fn multi_task_p7_execution_fixture(
+    authority: &VerificationAuthority,
+    root: &Path,
+    task_specs: Vec<(&str, Vec<String>)>,
+) -> ExecutionRun {
+    let mut tasks = BTreeMap::new();
+    let mut attempts = Vec::new();
+    let mut leases = Vec::new();
+
+    for (task_id, req_ids) in task_specs {
+        let packet_digest = "0".repeat(64);
+        let attempt_id = format!("attempt-{task_id}");
+        let lease_id = format!("lease-{task_id}");
+        let process_digest = "1".repeat(64);
+        let started_at_ms = 1000;
+        let ended_at_ms = 2000;
+        let expires_at_ms = 10000;
+
+        let lease_raw = serde_json::json!({
+            "lease_id": lease_id,
+            "mission_id": authority.revision.seal.mission_id,
+            "mission_revision": authority.revision.revision,
+            "task_id": task_id,
+            "task_packet_digest": packet_digest,
+            "scope": {
+                "workspace": root,
+                "file_scopes": [],
+                "directory_scopes": [],
+                "shared_resources": [],
+                "package_lockfiles": [],
+                "generated_files": [],
+                "allowed_tools": [],
+                "external_authority": [],
+                "scope_known": true
+            },
+            "issued_at_ms": started_at_ms,
+            "expires_at_ms": expires_at_ms,
+            "step_budget": 10,
+            "tool_call_budget": 10,
+            "usage_budget": {
+                "wall_clock_ms": 60000,
+                "execution_steps": 10,
+                "tool_calls": 10,
+                "retry_attempts": 1,
+                "cost_micros": null
+            },
+            "attempt_number": 1,
+            "status": "CONSUMED",
+            "lease_digest": ""
+        });
+        let mut lease: ExecutionLease = serde_json::from_value(lease_raw).expect("lease");
+        lease.lease_digest = lease.compute_digest().expect("lease digest");
+
+        let attempt_raw = serde_json::json!({
+            "attempt_id": attempt_id,
+            "task_id": task_id,
+            "attempt_number": 1,
+            "packet_digest": packet_digest,
+            "lease_id": lease_id,
+            "state": "SUCCEEDED",
+            "started_at_ms": started_at_ms,
+            "ended_at_ms": ended_at_ms,
+            "failure_class": null,
+            "failure_fingerprint": null,
+            "usage": {
+                "tool_calls": 0,
+                "execution_steps": 0,
+                "wall_time_ms": 1000,
+                "retry_count": 0,
+                "estimated_cost_micros": null,
+                "actual_cost_micros": null,
+                "attempt_count": 1,
+                "quality": "MEASURED"
+            },
+            "termination_reason": null,
+            "execution_boundary": "EXTERNAL_PROCESS_STARTED",
+            "extensions_granted": 0,
+            "completion_authority": {
+                "task_id": task_id,
+                "attempt_id": attempt_id,
+                "packet_digest": packet_digest,
+                "lease_id": lease_id,
+                "process_digest": process_digest,
+                "started_at_ms": started_at_ms,
+                "ended_at_ms": ended_at_ms
+            },
+            "workspace_before": {},
+            "workspace_after": {}
+        });
+        let attempt: TaskAttempt = serde_json::from_value(attempt_raw).expect("attempt");
+
+        tasks.insert(
+            task_id.to_string(),
+            ExecutionTask {
+                task_id: task_id.into(),
+                objective: format!("Task {task_id}"),
+                requirement_ids: req_ids,
+                dependency_ids: vec![],
+                priority: RequirementPriority::P1,
+                state: ExecutionTaskState::FinishedAwaitingVerification,
+                scope: lease.scope.clone(),
+                usage_budget: lease.usage_budget.clone(),
+                retry_policy: RetryPolicy::default(),
+                evidence_obligations: vec![],
+                attempt_number: 1,
+            },
+        );
+        attempts.push(attempt);
+        leases.push(lease);
+    }
+
+    ExecutionRun {
+        ledger_version: "p7-execution-ledger-v1".into(),
+        run_id: authority.p7_run_id.clone(),
+        mission_id: authority.revision.seal.mission_id.clone(),
+        mission_revision: authority.revision.revision,
+        seal_hash: authority.revision.seal.contract_hash.clone(),
+        project_id: authority.revision.seal.project_id.clone(),
+        workspace: root.to_path_buf(),
+        workspace_fingerprint: authority.workspace_fingerprint.clone(),
+        state: ExecutionRunState::ExecutionTasksFinishedAwaitingVerification,
+        tasks,
+        attempts,
+        leases,
+        events: vec![],
+        usage: relintor_execution::UsageTelemetry::default(),
+        loop_signals: vec![],
+        oscillation_signals: vec![],
+        continuations: vec![],
+        diagnostics: vec![],
+        external_modifications: vec![],
+        progress: vec![],
+        watchdog_state: relintor_execution::WatchdogState::Healthy,
+        policy: SchedulerPolicy::default(),
+        safe_boundary: None,
+        current_turn: 1,
+        last_error: None,
+        no_progress_occurrences: 0,
+        reviewed_recovery_deltas: vec![],
+        integrity_version: "p7-ledger-integrity-v1".into(),
+        integrity_tag: String::new(),
+    }
+}
+
+#[test]
+fn test_scoped_correction_authorization_matrix() {
+    let (authority, current, store, signing_key, temp) = create_phase5_test_fixture();
+
+    // 1. Record passing machine test evidence for REQ-TEST-AUTOMATED
+    let mut test_meta = test_metadata(
+        &authority,
+        &current,
+        "test-output-evidence-01",
+        EvidenceClass::TestOutput,
+        EvidenceResult::Pass,
+        EvidenceConfidence::StrongDeterministic,
+    );
+    test_meta.requirement_ids = vec!["REQ-TEST-AUTOMATED".into()];
+    test_meta.accepted_criteria = BTreeSet::from(["REQ-TEST-AUTOMATED-criterion".into()]);
+    store.put_test_fixture(test_meta, b"automated tests passed").unwrap();
+
+    // 2. Authoritative human rejection on REQ-A-OUTCOME
+    put_user_decision_fixture(
+        &store,
+        &authority,
+        &current,
+        "REQ-A-OUTCOME",
+        false,
+        "Rejection note: The UI flow lacks clear error indicators.",
+    );
+
+    // 3. Evaluate verification via VerificationEngine
+    let engine = VerificationEngine::new_for_test(
+        store.clone(),
+        authority.clone(),
+        current.clone(),
+        Vec::new(),
+    ).expect("engine");
+    let report = engine.evaluate(None).expect("evaluate");
+
+    // Rejection guarantees FailedVerification
+    assert_eq!(report.decision.state, CompletionState::FailedVerification);
+
+    // 4. Setup 3-task execution run:
+    //    task-decision: covers REQ-A-OUTCOME, REQ-B-PURPOSE (rejected/failed)
+    //    task-accessibility: covers REQ-ACCESSIBILITY (missing obligation/blocked)
+    //    task-automated: covers REQ-TEST-AUTOMATED (passing/verified)
+    let task_specs = vec![
+        ("task-decision", vec!["REQ-A-OUTCOME".to_string(), "REQ-B-PURPOSE".to_string()]),
+        ("task-accessibility", vec!["REQ-ACCESSIBILITY".to_string()]),
+        ("task-automated", vec!["REQ-TEST-AUTOMATED".to_string()]),
+    ];
+    let mut run = multi_task_p7_execution_fixture(&authority, temp.path(), task_specs);
+
+    // MATRIX 46A: Execution not automatically started on rejection
+    // Before authorization, run is FinishedAwaitingVerification and 0 tasks are runnable
+    assert_eq!(run.state, ExecutionRunState::ExecutionTasksFinishedAwaitingVerification);
+    assert_eq!(run.runnable_tasks().len(), 0);
+
+    // Derive correction scope generic rules:
+    // failed: requirements with status == Failed (REQ-A-OUTCOME, REQ-B-PURPOSE)
+    // blocked: requirements with status != Verified && status != Failed (REQ-ACCESSIBILITY)
+    // verified: requirements with status == Verified (REQ-TEST-AUTOMATED)
+    let failed_reqs = report.requirement_statuses.iter()
+        .filter(|s| s.status == RequirementStatus::Failed)
+        .map(|s| s.requirement_id.clone())
+        .collect::<BTreeSet<_>>();
+    let blocked_reqs = report.requirement_statuses.iter()
+        .filter(|s| s.status != RequirementStatus::Verified && s.status != RequirementStatus::Failed)
+        .map(|s| s.requirement_id.clone())
+        .collect::<BTreeSet<_>>();
+    let verified_reqs = report.requirement_statuses.iter()
+        .filter(|s| s.status == RequirementStatus::Verified)
+        .map(|s| s.requirement_id.clone())
+        .collect::<BTreeSet<_>>();
+
+    assert!(failed_reqs.contains("REQ-A-OUTCOME"));
+    assert!(failed_reqs.contains("REQ-B-PURPOSE"));
+    assert!(blocked_reqs.contains("REQ-ACCESSIBILITY"));
+    assert!(verified_reqs.contains("REQ-TEST-AUTOMATED"));
+
+    let target_reqs: BTreeSet<String> = failed_reqs.union(&blocked_reqs)
+        .filter(|r| run.tasks.values().any(|t| t.requirement_ids.contains(r)))
+        .cloned()
+        .collect();
+
+    // MATRIX 46J: Tamper-resistance / policy checks
+    // Empty target requirements denied
+    assert!(run.authorize_verification_correction(&BTreeSet::new(), 2000).is_err());
+    // Requirement outside sealed graph denied
+    let unknown_req = BTreeSet::from(["REQ-NONEXISTENT".into()]);
+    assert!(run.authorize_verification_correction(&unknown_req, 2000).is_err());
+
+    // Preserved historical attempts before authorization
+    let initial_attempts_count = run.attempts.len();
+    assert_eq!(initial_attempts_count, 3);
+    assert_eq!(run.tasks["task-automated"].attempt_number, 1);
+    assert_eq!(run.tasks["task-decision"].attempt_number, 1);
+    assert_eq!(run.tasks["task-accessibility"].attempt_number, 1);
+
+    // MATRIX 46C & 46D: User explicitly authorizes correction -> bounded task reactivation
+    let affected = run.authorize_verification_correction(&target_reqs, 2000)
+        .expect("authorization must succeed for valid target requirements");
+
+    // MATRIX 46D: Only affected tasks are reopened (Pending); unaffected tasks remain Completed
+    assert_eq!(affected.len(), 2);
+    assert!(affected.contains(&"task-decision".to_string()));
+    assert!(affected.contains(&"task-accessibility".to_string()));
+    assert!(!affected.contains(&"task-automated".to_string()));
+
+    assert_eq!(run.tasks["task-decision"].state, ExecutionTaskState::Pending);
+    assert_eq!(run.tasks["task-accessibility"].state, ExecutionTaskState::Pending);
+    assert_eq!(run.tasks["task-automated"].state, ExecutionTaskState::FinishedAwaitingVerification);
+
+    // MATRIX 46E: Runnable tasks > 0 after authorization
+    let runnable = run.runnable_tasks();
+    assert_eq!(runnable.len(), 2);
+    assert!(runnable.contains(&"task-decision".to_string()));
+    assert!(runnable.contains(&"task-accessibility".to_string()));
+    assert!(!runnable.contains(&"task-automated".to_string()));
+
+    // MATRIX 46F: State transitions: run state = Ready, waiting for user execution step
+    assert_eq!(run.state, ExecutionRunState::Ready);
+
+    // MATRIX 46G: Zero automatic execution: tasks are Pending, run is Ready, NOT Executing
+    assert_ne!(run.tasks["task-decision"].state, ExecutionTaskState::Running);
+    assert_ne!(run.tasks["task-accessibility"].state, ExecutionTaskState::Running);
+
+    // MATRIX 46H: Preserved historical records: previous attempts/logs remain immutable and preserved
+    assert_eq!(run.attempts.len(), initial_attempts_count);
+    for attempt in &run.attempts {
+        assert_eq!(attempt.state, TaskAttemptState::Succeeded);
+    }
+    // Attempt number preserved
+    assert_eq!(run.tasks["task-decision"].attempt_number, 1);
+    assert_eq!(run.tasks["task-accessibility"].attempt_number, 1);
+    assert_eq!(run.tasks["task-automated"].attempt_number, 1);
+
+    // MATRIX 46I: Same revision: operations remained in revision 1
+    assert_eq!(run.mission_revision, authority.revision.revision);
+
+    // MATRIX 46J: Repeated authorization denied / idempotent at execution level
+    let repeated = run.authorize_verification_correction(&target_reqs, 3000);
+    assert!(repeated.is_err(), "repeated correction on non-finished run must be denied");
+
+    // Events trace contains VerificationCorrectionAuthorized events
+    let correction_events = run.events.iter()
+        .filter(|e| e.kind == ExecutionEventKind::VerificationCorrectionAuthorized)
+        .collect::<Vec<_>>();
+    assert_eq!(correction_events.len(), 2);
+
+    // Certificate still denied because report is still FailedVerification
+    let cert_authority = CompletionAuthority::new(signing_key.to_bytes().as_ref()).expect("cert authority");
+    let authenticated_p7 = AuthenticatedP7Execution::from_run(run).expect("authenticated p7");
+    assert!(cert_authority.issue_with_p7_execution(&report, &authority, &authenticated_p7).is_err());
 }

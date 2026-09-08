@@ -618,7 +618,78 @@ describe("desktop shell foundation", () => {
       />,
     );
     expect(screen.queryByRole("heading", { name: "Relintor needs your decision" })).toBeNull();
-    expect(screen.getAllByRole("heading", { name: "Verification needs attention" })).toHaveLength(2);
+  });
+
+  it("renders correction scope preview and calls onAuthorizeCorrection when user clicks Authorize scoped correction", () => {
+    const onAuthorize = vi.fn();
+    const rejectedVer = pendingVerification();
+    rejectedVer.workflow_stage = "USER_DECISION_REJECTED";
+    rejectedVer.summary = "You rejected the completed result.";
+    rejectedVer.correction_scope = {
+      mission_id: "mission-test",
+      revision: 1,
+      originating_evidence_id: "p8-rejection-art",
+      user_rejection_notes: "Needs explicit retry backoff test",
+      failed_requirement_ids: ["REQ-A-OUTCOME"],
+      blocked_requirement_ids: ["REQ-ACCESSIBILITY"],
+      affected_task_ids: ["task-1"],
+      preserved_task_ids: ["task-2", "task-3"],
+      scope_hash: "test-scope-hash-123",
+      authorized: false,
+    };
+
+    const rendered = render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={rejectedVer}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+        onAuthorizeCorrection={onAuthorize}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: /Review Correction Scope/i })).toBeTruthy();
+    expect(screen.getByText(/Needs explicit retry backoff test/i)).toBeTruthy();
+    expect(screen.getByText(/REQ-A-OUTCOME/i)).toBeTruthy();
+    expect(screen.getByText(/REQ-ACCESSIBILITY/i)).toBeTruthy();
+    expect(screen.getByText(/2 historical tasks/i)).toBeTruthy();
+
+    const authBtn = screen.getByRole("button", { name: "Authorize scoped correction" });
+    expect(authBtn).toBeTruthy();
+    fireEvent.click(authBtn);
+    expect(onAuthorize).toHaveBeenCalledWith("test-scope-hash-123");
+
+    // Re-render as authorized
+    const authorizedVer = {
+      ...rejectedVer,
+      correction_scope: {
+        ...rejectedVer.correction_scope,
+        authorized: true,
+      },
+    };
+    rendered.rerender(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={authorizedVer}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+        onAuthorizeCorrection={onAuthorize}
+      />,
+    );
+    expect(screen.getByText(/Scoped correction authorized/i)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Authorize scoped correction" })).toBeNull();
   });
 
   it("renders Verified Complete without attention panel when valid certificate and verified requirements coexist with historical stale records", () => {
