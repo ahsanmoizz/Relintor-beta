@@ -52,6 +52,7 @@ import {
   type VerificationEvidence,
   type HumanDecisionEvidenceItem,
   type CorrectionScope,
+  type CorrectionTaskPreview,
   type AntigravityHealth,
   type AntigravitySetupView,
 } from "./backend";
@@ -1739,9 +1740,35 @@ export function MissionCockpit({
                 {verification.correction_scope.user_rejection_notes && (
                   <li><strong>Your rejection finding:</strong> {verification.correction_scope.user_rejection_notes}</li>
                 )}
-                <li><strong>Failed requirements ({verification.correction_scope.failed_requirement_ids.length}):</strong> <code>{verification.correction_scope.failed_requirement_ids.join(", ")}</code></li>
+                <li>
+                  <strong>Failed requirements ({verification.correction_scope.failed_requirement_ids.length}):</strong>
+                  <ul className="sub-req-list">
+                    {verification.correction_scope.failed_requirement_ids.map((id, i) => {
+                      const title = verification.correction_scope?.failed_requirement_titles?.[i];
+                      return (
+                        <li key={id}>
+                          {title && <span><strong>{title}</strong> — </span>}
+                          <code>{id}</code>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </li>
                 {verification.correction_scope.blocked_requirement_ids.length > 0 && (
-                  <li><strong>Blocked requirements ({verification.correction_scope.blocked_requirement_ids.length}):</strong> <code>{verification.correction_scope.blocked_requirement_ids.join(", ")}</code></li>
+                  <li>
+                    <strong>Blocked requirements ({verification.correction_scope.blocked_requirement_ids.length}):</strong>
+                    <ul className="sub-req-list">
+                      {verification.correction_scope.blocked_requirement_ids.map((id, i) => {
+                        const title = verification.correction_scope?.blocked_requirement_titles?.[i];
+                        return (
+                          <li key={id}>
+                            {title && <span><strong>{title}</strong> — </span>}
+                            <code>{id}</code>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </li>
                 )}
               </ul>
             </div>
@@ -1749,14 +1776,103 @@ export function MissionCockpit({
             <div className="correction-scope-actions-summary">
               <h4>Proposed correction boundary</h4>
               <p>
-                Authorizing this correction will reopen <strong>{verification.correction_scope.affected_task_ids.length} {verification.correction_scope.affected_task_ids.length === 1 ? "task" : "tasks"}</strong> (<code>{verification.correction_scope.affected_task_ids.join(", ")}</code>) with fresh bounded execution allowances.
-              </p>
-              <p>
-                <strong>{verification.correction_scope.preserved_task_ids.length} historical tasks</strong> will NOT rerun and their completed records remain permanently preserved in the ledger.
+                Authorizing this correction will reopen only <strong>{verification.correction_scope.affected_task_ids.length} {verification.correction_scope.affected_task_ids.length === 1 ? "task" : "tasks"}</strong> with fresh bounded execution allowances under the same sealed revision.
               </p>
               <p className="form-hint">
                 The executor will only be allowed to modify files and artifacts within the bounded scope of the reopened tasks. Once complete, fresh evidence must be verified before a certificate can be issued.
               </p>
+            </div>
+
+            <div className="correction-tasks-container">
+              <h4>Proposed Correction Tasks ({verification.correction_scope.proposed_tasks?.length || verification.correction_scope.affected_task_ids.length})</h4>
+              {verification.correction_scope.proposed_tasks && verification.correction_scope.proposed_tasks.length > 0 ? (
+                <div className="correction-task-cards">
+                  {verification.correction_scope.proposed_tasks.map((task, idx) => (
+                    <div key={task.task_id} className="correction-task-card" data-testid={`correction-task-card-${task.task_id}`}>
+                      <div className="correction-task-card-header">
+                        <span className="correction-task-card-index">Task {idx + 1} of {verification.correction_scope?.proposed_tasks?.length}</span>
+                        <span className={`correction-task-badge ${task.scope_relation === "DIRECT" ? "badge-direct" : "badge-downstream"}`}>
+                          {task.scope_relation === "DIRECT" ? "Direct Target" : "Downstream Dependency"}
+                        </span>
+                      </div>
+                      <h5 className="correction-task-title">{task.title}</h5>
+                      <div className="correction-task-id-badge">
+                        <code>{task.task_id}</code>
+                      </div>
+
+                      <div className="correction-task-section">
+                        <span className="section-label">Why included:</span>
+                        <p className="section-content">{task.why_included}</p>
+                        {task.dependency_reason && (
+                          <p className="dependency-reason"><em>Dependency reason:</em> {task.dependency_reason}</p>
+                        )}
+                        {task.triggering_requirement_titles && task.triggering_requirement_titles.length > 0 && (
+                          <div className="triggering-reqs-list">
+                            <span className="sub-label">Triggering requirements:</span>
+                            <ul>
+                              {task.triggering_requirement_titles.map((title, tIdx) => (
+                                <li key={tIdx}>
+                                  <strong>{title}</strong> {task.triggering_requirement_ids[tIdx] && <code>({task.triggering_requirement_ids[tIdx]})</code>}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="correction-task-section">
+                        <span className="section-label">Correction objective:</span>
+                        <p className="task-objective-text">{task.objective}</p>
+                      </div>
+
+                      <div className="correction-task-section">
+                        <span className="section-label">Authorized scope boundary:</span>
+                        <div className="task-scope-box">
+                          <div><span className="scope-field-name">Workspace:</span> <code>{task.authorized_scope.workspace}</code></div>
+                          {task.authorized_scope.file_scopes && task.authorized_scope.file_scopes.length > 0 && (
+                            <div><span className="scope-field-name">File scope:</span> <code>{task.authorized_scope.file_scopes.join(", ")}</code></div>
+                          )}
+                          {task.authorized_scope.package_lockfiles && task.authorized_scope.package_lockfiles.length > 0 && (
+                            <div><span className="scope-field-name">Package lockfiles:</span> <code>{task.authorized_scope.package_lockfiles.join(", ")}</code></div>
+                          )}
+                          {task.authorized_scope.allowed_tools && task.authorized_scope.allowed_tools.length > 0 && (
+                            <div><span className="scope-field-name">Allowed tools:</span> <code>{task.authorized_scope.allowed_tools.join(", ")}</code></div>
+                          )}
+                          {task.authorized_scope.suggested_scope && (
+                            <div><span className="scope-field-name">Domain:</span> <code>{task.authorized_scope.suggested_scope}</code></div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="correction-task-section">
+                        <span className="section-label">Expected implementation outcome:</span>
+                        <p className="section-content">{task.expected_outcome}</p>
+                      </div>
+
+                      {task.required_fresh_evidence && task.required_fresh_evidence.length > 0 && (
+                        <div className="correction-task-section">
+                          <span className="section-label">Required fresh evidence after correction:</span>
+                          <ul className="fresh-evidence-list">
+                            {task.required_fresh_evidence.map((ev, eIdx) => (
+                              <li key={eIdx}><code>{ev}</code></li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      <div className="correction-task-status-row">
+                        <span className="status-label">Status:</span> <em>Will become runnable only after explicit user authorization</em>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p>Reopening tasks: <code>{verification.correction_scope.affected_task_ids.join(", ")}</code></p>
+              )}
+            </div>
+
+            <div className="correction-preserved-notice">
+              <strong>{verification.correction_scope.preserved_task_ids.length} historical tasks preserved:</strong> These tasks will NOT rerun and their completed records remain permanently preserved in the ledger.
             </div>
 
             <div className="correction-authorize-control">

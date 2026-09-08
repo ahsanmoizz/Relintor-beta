@@ -306,15 +306,42 @@ export type VerificationStatus = {
   detail: string;
 };
 
+export type CorrectionTaskScope = {
+  workspace: string;
+  file_scopes: string[];
+  directory_scopes: string[];
+  package_lockfiles: string[];
+  allowed_tools: string[];
+  suggested_scope?: string | null;
+};
+
+export type CorrectionTaskPreview = {
+  task_id: string;
+  title: string;
+  objective: string;
+  why_included: string;
+  triggering_requirement_ids: string[];
+  triggering_requirement_titles: string[];
+  scope_relation: string;
+  dependency_reason?: string | null;
+  authorized_scope: CorrectionTaskScope;
+  expected_outcome: string;
+  required_fresh_evidence: string[];
+};
+
 export type CorrectionScope = {
   mission_id: string;
   revision: number;
   originating_evidence_id: string;
   user_rejection_notes: string;
   failed_requirement_ids: string[];
+  failed_requirement_titles?: string[];
   blocked_requirement_ids: string[];
+  blocked_requirement_titles?: string[];
   affected_task_ids: string[];
   preserved_task_ids: string[];
+  preserved_task_count?: number;
+  proposed_tasks?: CorrectionTaskPreview[];
   scope_hash: string;
   authorized: boolean;
 };

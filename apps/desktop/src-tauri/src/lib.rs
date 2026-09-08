@@ -674,15 +674,44 @@ struct VerificationStatusView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct CorrectionTaskScopeView {
+    workspace: String,
+    file_scopes: Vec<String>,
+    directory_scopes: Vec<String>,
+    package_lockfiles: Vec<String>,
+    allowed_tools: Vec<String>,
+    suggested_scope: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CorrectionTaskPreview {
+    task_id: String,
+    title: String,
+    objective: String,
+    why_included: String,
+    triggering_requirement_ids: Vec<String>,
+    triggering_requirement_titles: Vec<String>,
+    scope_relation: String,
+    dependency_reason: Option<String>,
+    authorized_scope: CorrectionTaskScopeView,
+    expected_outcome: String,
+    required_fresh_evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct CorrectionScopeView {
     mission_id: String,
     revision: u64,
     originating_evidence_id: String,
     user_rejection_notes: String,
     failed_requirement_ids: Vec<String>,
+    failed_requirement_titles: Vec<String>,
     blocked_requirement_ids: Vec<String>,
+    blocked_requirement_titles: Vec<String>,
     affected_task_ids: Vec<String>,
     preserved_task_ids: Vec<String>,
+    preserved_task_count: usize,
+    proposed_tasks: Vec<CorrectionTaskPreview>,
     scope_hash: String,
     authorized: bool,
 }
@@ -5838,8 +5867,207 @@ fn derive_correction_scope_from_context(
         }
     }
     preserved.sort();
+    let affected_vec: Vec<String> = affected.iter().cloned().collect();
 
-    let affected_vec = affected.into_iter().collect::<Vec<_>>();
+    let req_map: BTreeMap<&str, &relintor_standards::Requirement> = context
+        .authority
+        .revision
+        .contract
+        .requirement_graph
+        .requirements
+        .iter()
+        .map(|r| (r.requirement_id.as_str(), r))
+        .collect();
+
+    let contract_task_map: BTreeMap<&str, &relintor_standards::Task> = context
+        .authority
+        .revision
+        .contract
+        .task_graph
+        .tasks
+        .iter()
+        .map(|t| (t.task_id.as_str(), t))
+        .collect();
+
+    let contract_dependencies = &context.authority.revision.contract.task_graph.dependencies;
+
+    let failed_requirement_titles: Vec<String> = failed_requirement_ids
+        .iter()
+        .map(|id| {
+            req_map
+                .get(id.as_str())
+                .map(|r| r.title.clone())
+                .unwrap_or_else(|| id.clone())
+        })
+        .collect();
+
+    let blocked_requirement_titles: Vec<String> = blocked_requirement_ids
+        .iter()
+        .map(|id| {
+            req_map
+                .get(id.as_str())
+                .map(|r| r.title.clone())
+                .unwrap_or_else(|| id.clone())
+        })
+        .collect();
+
+    let mut proposed_tasks = Vec::new();
+
+    for task_id in &affected_vec {
+        let Some(run_task) = run.tasks.get(task_id) else {
+            continue;
+        };
+        let contract_task = contract_task_map.get(task_id.as_str());
+
+        let title = contract_task
+            .map(|t| t.title.clone())
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| {
+                run_task
+                    .objective
+                    .lines()
+                    .next()
+                    .map(|line| {
+                        let trimmed = line.trim();
+                        if trimmed.len() > 60 {
+                            format!("{}…", &trimmed[..60])
+                        } else {
+                            trimmed.to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| format!("Task {task_id}"))
+            });
+
+        let triggering_ids: Vec<String> = run_task
+            .requirement_ids
+            .iter()
+            .filter(|r| unverified_reqs.contains(*r))
+            .cloned()
+            .collect();
+
+        let triggering_titles: Vec<String> = triggering_ids
+            .iter()
+            .map(|id| {
+                req_map
+                    .get(id.as_str())
+                    .map(|r| r.title.clone())
+                    .unwrap_or_else(|| id.clone())
+            })
+            .collect();
+
+        let (scope_relation, dependency_reason, why_included) = if !triggering_ids.is_empty() {
+            let is_failed = triggering_ids.iter().any(|r| failed_requirement_ids.contains(r));
+            let is_blocked = triggering_ids.iter().any(|r| blocked_requirement_ids.contains(r));
+            let reason_type = if is_failed && is_blocked {
+                "Directly implements failed and blocked requirements"
+            } else if is_failed {
+                "Directly implements failed requirement"
+            } else {
+                "Directly implements blocked requirement"
+            };
+            let titles_summary = if !triggering_titles.is_empty() {
+                format!(": {}", triggering_titles.join(", "))
+            } else {
+                String::new()
+            };
+            (
+                "DIRECT".to_string(),
+                None,
+                format!("{reason_type}{titles_summary}"),
+            )
+        } else {
+            let dep_task_id = run_task
+                .dependency_ids
+                .iter()
+                .find(|d| affected.contains(*d));
+            let explicit_reason = contract_dependencies
+                .iter()
+                .find(|d| &d.task_id == task_id && affected.contains(&d.depends_on))
+                .map(|d| d.reason.clone());
+
+            let reason = explicit_reason.or_else(|| {
+                dep_task_id.map(|dt| format!("Reopened as downstream dependency of task {dt}"))
+            }).unwrap_or_else(|| "Reopened as downstream dependency".to_string());
+
+            (
+                "DOWNSTREAM_DEPENDENCY".to_string(),
+                Some(reason.clone()),
+                reason,
+            )
+        };
+
+        let authorized_scope = CorrectionTaskScopeView {
+            workspace: run_task.scope.workspace.display().to_string(),
+            file_scopes: run_task.scope.file_scopes.clone(),
+            directory_scopes: run_task.scope.directory_scopes.clone(),
+            package_lockfiles: run_task.scope.package_lockfiles.clone(),
+            allowed_tools: run_task.scope.allowed_tools.iter().cloned().collect(),
+            suggested_scope: contract_task.map(|t| t.suggested_scope.clone()),
+        };
+
+        let mut outcome_statements = Vec::new();
+        for req_id in &triggering_ids {
+            if let Some(req) = req_map.get(req_id.as_str()) {
+                for criterion in &req.acceptance_criteria {
+                    if !criterion.statement.trim().is_empty() {
+                        outcome_statements.push(criterion.statement.clone());
+                    }
+                }
+            }
+        }
+        let expected_outcome = if !outcome_statements.is_empty() {
+            outcome_statements.join("; ")
+        } else {
+            run_task.objective.clone()
+        };
+
+        let mut fresh_evidence_list = Vec::new();
+        let mut seen_ev = BTreeSet::new();
+
+        for obligation in &run_task.evidence_obligations {
+            let label = format!("{:?}", obligation.class);
+            let desc = if !obligation.rationale.trim().is_empty() {
+                format!("{label} ({})", obligation.rationale)
+            } else {
+                label
+            };
+            if seen_ev.insert(desc.clone()) {
+                fresh_evidence_list.push(desc);
+            }
+        }
+
+        for req_id in &triggering_ids {
+            if let Some(req) = req_map.get(req_id.as_str()) {
+                for obligation in &req.verification_policy.obligations {
+                    let label = format!("{:?}", obligation.class);
+                    let desc = if !obligation.rationale.trim().is_empty() {
+                        format!("{label} ({})", obligation.rationale)
+                    } else {
+                        label
+                    };
+                    if seen_ev.insert(desc.clone()) {
+                        fresh_evidence_list.push(desc);
+                    }
+                }
+            }
+        }
+
+        proposed_tasks.push(CorrectionTaskPreview {
+            task_id: task_id.clone(),
+            title,
+            objective: run_task.objective.clone(),
+            why_included,
+            triggering_requirement_ids: triggering_ids,
+            triggering_requirement_titles: triggering_titles,
+            scope_relation,
+            dependency_reason,
+            authorized_scope,
+            expected_outcome,
+            required_fresh_evidence: fresh_evidence_list,
+        });
+    }
+
+    let preserved_count = preserved.len();
 
     let authorized = !affected_vec.is_empty()
         && affected_vec.iter().all(|task_id| {
@@ -5875,9 +6103,13 @@ fn derive_correction_scope_from_context(
         originating_evidence_id,
         user_rejection_notes,
         failed_requirement_ids,
+        failed_requirement_titles,
         blocked_requirement_ids,
+        blocked_requirement_titles,
         affected_task_ids: affected_vec,
         preserved_task_ids: preserved,
+        preserved_task_count: preserved_count,
+        proposed_tasks,
         scope_hash,
         authorized,
     })

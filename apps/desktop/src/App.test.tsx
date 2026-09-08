@@ -692,6 +692,140 @@ describe("desktop shell foundation", () => {
     expect(screen.queryByRole("button", { name: "Authorize scoped correction" })).toBeNull();
   });
 
+  it("renders human-reviewable correction task cards with objectives, triggering requirements, scope boundaries, and fresh evidence expectations (Defect #48)", () => {
+    const onAuthorize = vi.fn();
+    const rejectedVer = pendingVerification();
+    rejectedVer.workflow_stage = "USER_DECISION_REJECTED";
+    rejectedVer.summary = "You rejected the completed result.";
+    rejectedVer.correction_scope = {
+      mission_id: "mission-test",
+      revision: 1,
+      originating_evidence_id: "p8-rejection-art",
+      user_rejection_notes: "Route error states are not surfaced cleanly.",
+      failed_requirement_ids: ["REQ-A-OUTCOME", "REQ-B-PURPOSE"],
+      failed_requirement_titles: ["User problem outcome", "User product purpose"],
+      blocked_requirement_ids: ["REQ-ACCESSIBILITY"],
+      blocked_requirement_titles: ["NFR: accessibility"],
+      affected_task_ids: ["task-1", "task-2", "task-3"],
+      preserved_task_ids: ["task-4", "task-5", "task-6", "task-7", "task-8", "task-9", "task-10", "task-11", "task-12", "task-13", "task-14", "task-15"],
+      preserved_task_count: 12,
+      proposed_tasks: [
+        {
+          task_id: "task-1",
+          title: "Implement: User problem outcome",
+          objective: "Implement transport health and route status plan.",
+          why_included: "Directly implements failed requirement: User problem outcome",
+          triggering_requirement_ids: ["REQ-A-OUTCOME"],
+          triggering_requirement_titles: ["User problem outcome"],
+          scope_relation: "DIRECT",
+          dependency_reason: null,
+          authorized_scope: {
+            workspace: "D:/TestWorkspace",
+            file_scopes: [],
+            directory_scopes: [],
+            package_lockfiles: ["Cargo.lock"],
+            allowed_tools: ["antigravity", "workspace"],
+            suggested_scope: "decision",
+          },
+          expected_outcome: "A reviewable evidence record demonstrates: User problem outcome",
+          required_fresh_evidence: ["HumanDecision (A genuine project decision requires explicit human review.)"],
+        },
+        {
+          task_id: "task-2",
+          title: "Implement: User product purpose",
+          objective: "Expose structured transport route health information.",
+          why_included: "Directly implements failed requirement: User product purpose",
+          triggering_requirement_ids: ["REQ-B-PURPOSE"],
+          triggering_requirement_titles: ["User product purpose"],
+          scope_relation: "DIRECT",
+          dependency_reason: null,
+          authorized_scope: {
+            workspace: "D:/TestWorkspace",
+            file_scopes: [],
+            directory_scopes: [],
+            package_lockfiles: ["Cargo.lock"],
+            allowed_tools: ["antigravity", "workspace"],
+            suggested_scope: "decision",
+          },
+          expected_outcome: "A reviewable evidence record demonstrates: User product purpose",
+          required_fresh_evidence: ["HumanDecision (A genuine project decision requires explicit human review.)"],
+        },
+        {
+          task_id: "task-3",
+          title: "Implement: NFR: accessibility",
+          objective: "Primary flows must be keyboard navigable.",
+          why_included: "Directly implements blocked requirement: NFR: accessibility",
+          triggering_requirement_ids: ["REQ-ACCESSIBILITY"],
+          triggering_requirement_titles: ["NFR: accessibility"],
+          scope_relation: "DIRECT",
+          dependency_reason: null,
+          authorized_scope: {
+            workspace: "D:/TestWorkspace",
+            file_scopes: [],
+            directory_scopes: [],
+            package_lockfiles: ["Cargo.lock"],
+            allowed_tools: ["antigravity", "workspace"],
+            suggested_scope: "accessibility",
+          },
+          expected_outcome: "A reviewable evidence record demonstrates: NFR: accessibility",
+          required_fresh_evidence: ["AccessibilityResult (Accessibility obligations require an accessibility result.)"],
+        },
+      ],
+      scope_hash: "test-scope-hash-48",
+      authorized: false,
+    };
+
+    render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={rejectedVer}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+        onAuthorizeCorrection={onAuthorize}
+      />,
+    );
+
+    // Requirements inspectability: titles and IDs
+    expect(screen.getAllByText(/User problem outcome/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/User product purpose/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/NFR: accessibility/).length).toBeGreaterThan(0);
+
+    // 3 task cards rendered
+    expect(screen.getByTestId("correction-task-card-task-1")).toBeTruthy();
+    expect(screen.getByTestId("correction-task-card-task-2")).toBeTruthy();
+    expect(screen.getByTestId("correction-task-card-task-3")).toBeTruthy();
+
+    // Human-readable titles rendered
+    expect(screen.getByText("Implement: User problem outcome")).toBeTruthy();
+    expect(screen.getByText("Implement: User product purpose")).toBeTruthy();
+    expect(screen.getByText("Implement: NFR: accessibility")).toBeTruthy();
+
+    // Objectives rendered
+    expect(screen.getByText("Implement transport health and route status plan.")).toBeTruthy();
+    expect(screen.getByText("Expose structured transport route health information.")).toBeTruthy();
+    expect(screen.getByText("Primary flows must be keyboard navigable.")).toBeTruthy();
+
+    // Direct badges
+    const badges = screen.getAllByText("Direct Target");
+    expect(badges).toHaveLength(3);
+
+    // Fresh evidence expectations rendered
+    expect(screen.getAllByText(/HumanDecision \(A genuine project decision/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/AccessibilityResult \(Accessibility obligations/)).toBeTruthy();
+
+    // 12 preserved historical tasks notice
+    expect(screen.getByText(/12 historical tasks preserved/)).toBeTruthy();
+
+    // Status hint before authorization
+    expect(screen.getAllByText(/Will become runnable only after explicit user authorization/)).toHaveLength(3);
+  });
+
   it("renders Verified Complete without attention panel when valid certificate and verified requirements coexist with historical stale records", () => {
     const verified = {
       project_id: "project-1",
