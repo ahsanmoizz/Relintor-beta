@@ -1092,4 +1092,79 @@ describe("desktop shell foundation", () => {
     const disabledBtn = screen.getByRole("button", { name: "Human scope refinement required" });
     expect((disabledBtn as HTMLButtonElement).disabled).toBe(true);
   });
+
+  it("allows operator to open scope refinement form, add entries, and save refinement", () => {
+    const onSaveRefinement = vi.fn().mockResolvedValue(undefined);
+    const rejectedVer = pendingVerification();
+    rejectedVer.workflow_stage = "USER_DECISION_REJECTED";
+    rejectedVer.summary = "You rejected the completed result.";
+    rejectedVer.correction_scope = {
+      mission_id: "mission-refine-test",
+      revision: 1,
+      originating_evidence_id: "p8-rejection-art",
+      user_rejection_notes: "Accessibility blocked without tests",
+      failed_requirement_ids: ["REQ-A-OUTCOME"],
+      blocked_requirement_ids: ["REQ-ACCESSIBILITY"],
+      affected_task_ids: ["task-1", "task-accessibility"],
+      preserved_task_ids: ["task-2"],
+      scope_hash: "unrefined-hash",
+      authorized: false,
+      human_refinement_required: true,
+      missing_provenance_tasks: ["task-accessibility"],
+    };
+
+    render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={rejectedVer}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+        onAuthorizeCorrection={vi.fn()}
+        onSaveRefinement={onSaveRefinement}
+      />,
+    );
+
+    expect(screen.getByTestId("scope-refinement-required-notice")).toBeTruthy();
+    expect(screen.getByText(/Unbounded tasks:/)).toBeTruthy();
+    expect(screen.getByText("task-accessibility")).toBeTruthy();
+
+    const refineBtn = screen.getByRole("button", { name: "Refine correction scope" });
+    fireEvent.click(refineBtn);
+
+    expect(screen.getByText("Refine Permitted Work Boundaries")).toBeTruthy();
+
+    const pathInput = screen.getByLabelText(/Path \(relative to workspace\)/i);
+    const reasonInput = screen.getByLabelText(/Justification reason/i);
+    fireEvent.change(pathInput, { target: { value: "docs/ACCESSIBILITY.md" } });
+    fireEvent.change(reasonInput, { target: { value: "Specify accessibility plan" } });
+
+    const addBtn = screen.getByRole("button", { name: "Add to refinement" });
+    fireEvent.click(addBtn);
+
+    expect(screen.getByText("docs/ACCESSIBILITY.md")).toBeTruthy();
+
+    const saveBtn = screen.getByRole("button", { name: "Save refinement" });
+    fireEvent.click(saveBtn);
+
+    expect(onSaveRefinement).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mission_id: "mission-refine-test",
+        revision: 1,
+        originating_evidence_id: "p8-rejection-art",
+        entries: expect.arrayContaining([
+          expect.objectContaining({
+            path: "docs/ACCESSIBILITY.md",
+            path_type: "File",
+            reason: "Specify accessibility plan",
+          }),
+        ]),
+      }),
+    );
+  });
 });

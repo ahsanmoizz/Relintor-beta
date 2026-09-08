@@ -4002,6 +4002,265 @@ pub struct CorrectionUnit {
     pub dependencies: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum PathType {
+    File,
+    Directory,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum PermittedOperation {
+    Read,
+    Modify,
+    CreateWithin,
+    Delete,
+    Rename,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeRefinementEntry {
+    pub path: String,
+    pub path_type: PathType,
+    pub reason: String,
+    pub target_task_id: String,
+    #[serde(default)]
+    pub correction_unit_ids: Vec<String>,
+    #[serde(default)]
+    pub requirement_ids: Vec<String>,
+    #[serde(default)]
+    pub permitted_operations: Vec<PermittedOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HumanScopeRefinement {
+    pub mission_id: String,
+    pub revision: u64,
+    pub originating_evidence_id: String,
+    pub entries: Vec<ScopeRefinementEntry>,
+    pub last_modified_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopePathError {
+    EmptyPath,
+    TraversalForbidden,
+    OutsideWorkspace,
+    DriveMismatch,
+    UncPathForbidden,
+    DevicePathForbidden,
+    SymlinkEscapeForbidden,
+    InvalidPathFormat(String),
+    ParentDirectoryNotAuthorized(String),
+    OperationNotPermitted(String),
+}
+
+impl std::fmt::Display for ScopePathError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScopePathError::EmptyPath => write!(f, "Path cannot be empty"),
+            ScopePathError::TraversalForbidden => write!(f, "Path traversal (..) is forbidden"),
+            ScopePathError::OutsideWorkspace => write!(f, "Path must be strictly within workspace root"),
+            ScopePathError::DriveMismatch => write!(f, "Path must reside on the same drive as the workspace"),
+            ScopePathError::UncPathForbidden => write!(f, "UNC network paths are forbidden"),
+            ScopePathError::DevicePathForbidden => write!(f, "Device and \\\\?\\ namespace paths are forbidden"),
+            ScopePathError::SymlinkEscapeForbidden => write!(f, "Symlink or reparse point escaping workspace is forbidden"),
+            ScopePathError::InvalidPathFormat(e) => write!(f, "Invalid path format: {e}"),
+            ScopePathError::ParentDirectoryNotAuthorized(e) => write!(f, "Parent directory not authorized for file creation: {e}"),
+            ScopePathError::OperationNotPermitted(e) => write!(f, "Operation not permitted: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ScopePathError {}
+
+pub fn validate_and_canonicalize_scope_path(
+    workspace_root: &std::path::Path,
+    input_path: &str,
+    _path_type: PathType,
+) -> Result<String, ScopePathError> {
+    let trimmed = input_path.trim();
+    if trimmed.is_empty() {
+        return Err(ScopePathError::EmptyPath);
+    }
+
+    // Reject Device namespaces e.g. \\?\ or \\.\ or //?/
+    if trimmed.starts_with(r"\\?\")
+        || trimmed.starts_with(r"\\.\")
+        || trimmed.starts_with(r"//?/")
+        || trimmed.starts_with(r"//./")
+    {
+        return Err(ScopePathError::DevicePathForbidden);
+    }
+
+    // Reject UNC paths e.g. \\server\share or //server/share
+    if trimmed.starts_with(r"\\") || trimmed.starts_with("//") {
+        return Err(ScopePathError::UncPathForbidden);
+    }
+
+    // Normalize forward slashes
+    let normalized = trimmed.replace('\\', "/");
+
+    // Check for traversal components before resolution
+    for part in normalized.split('/') {
+        if part == ".." {
+            return Err(ScopePathError::TraversalForbidden);
+        }
+    }
+
+    // Check for invalid chars / NUL
+    if trimmed.contains('\0') {
+        return Err(ScopePathError::InvalidPathFormat("Path contains null byte".into()));
+    }
+
+    // Canonicalize workspace root if possible, or use clean Path
+    let canon_ws = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
+
+    // If input is absolute path:
+    let candidate = if std::path::Path::new(trimmed).is_absolute() {
+        std::path::PathBuf::from(trimmed)
+    } else {
+        workspace_root.join(trimmed)
+    };
+
+    // Check drive letters on Windows if candidate has prefix
+    let ws_drive = match canon_ws.components().next() {
+        Some(std::path::Component::Prefix(p)) => match p.kind() {
+            std::path::Prefix::Disk(c) | std::path::Prefix::VerbatimDisk(c) => Some((c as char).to_ascii_uppercase()),
+            _ => None,
+        },
+        _ => None,
+    };
+    let cand_drive = match candidate.components().next() {
+        Some(std::path::Component::Prefix(p)) => match p.kind() {
+            std::path::Prefix::Disk(c) | std::path::Prefix::VerbatimDisk(c) => Some((c as char).to_ascii_uppercase()),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let (Some(d1), Some(d2)) = (ws_drive, cand_drive) {
+        if d1 != d2 {
+            return Err(ScopePathError::DriveMismatch);
+        }
+    }
+
+    // If candidate file/dir exists on disk, canonicalize and check containment
+    if candidate.exists() {
+        let canon_cand = candidate
+            .canonicalize()
+            .map_err(|_| ScopePathError::OutsideWorkspace)?;
+
+        // Ensure canon_cand starts with canon_ws
+        if !canon_cand.starts_with(&canon_ws) {
+            return Err(ScopePathError::OutsideWorkspace);
+        }
+
+        let rel = canon_cand
+            .strip_prefix(&canon_ws)
+            .map_err(|_| ScopePathError::OutsideWorkspace)?;
+
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if rel_str.is_empty() {
+            return Err(ScopePathError::InvalidPathFormat("Cannot target workspace root as a file scope".into()));
+        }
+        Ok(rel_str)
+    } else {
+        // If candidate does NOT exist yet, check closest existing ancestor for symlink escape
+        let mut cur = candidate.as_path();
+        while !cur.exists() {
+            match cur.parent() {
+                Some(p) => cur = p,
+                None => break,
+            }
+        }
+        if cur.exists() {
+            if let Ok(canon_parent) = cur.canonicalize() {
+                if !canon_parent.starts_with(&canon_ws) {
+                    return Err(ScopePathError::SymlinkEscapeForbidden);
+                }
+            }
+        }
+
+        // Logical containment check
+        let rel_candidate = if std::path::Path::new(trimmed).is_absolute() {
+            candidate
+                .strip_prefix(workspace_root)
+                .map_err(|_| ScopePathError::OutsideWorkspace)?
+        } else {
+            std::path::Path::new(trimmed)
+        };
+
+        let clean_rel = rel_candidate.to_string_lossy().replace('\\', "/");
+        let clean_rel = clean_rel.trim_start_matches('/').to_string();
+        if clean_rel.is_empty() {
+            return Err(ScopePathError::InvalidPathFormat("Path cannot be empty or root".into()));
+        }
+        Ok(clean_rel)
+    }
+}
+
+pub fn validate_new_file_creation(
+    workspace_root: &std::path::Path,
+    file_path: &str,
+    refinement_entries: &[ScopeRefinementEntry],
+) -> Result<String, ScopePathError> {
+    let clean_path = validate_and_canonicalize_scope_path(workspace_root, file_path, PathType::File)?;
+
+    let parent_dir = std::path::Path::new(&clean_path)
+        .parent()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+
+    let authorized_parent = refinement_entries.iter().any(|entry| {
+        entry.path_type == PathType::Directory
+            && entry.permitted_operations.contains(&PermittedOperation::CreateWithin)
+            && (entry.path == parent_dir || (entry.path == "." && parent_dir.is_empty()) || parent_dir.starts_with(&format!("{}/", entry.path)))
+    });
+
+    if !authorized_parent {
+        return Err(ScopePathError::ParentDirectoryNotAuthorized(format!(
+            "Parent directory '{parent_dir}' must be authorized with CreateWithin permission to create '{clean_path}'"
+        )));
+    }
+
+    Ok(clean_path)
+}
+
+pub fn validate_file_deletion(
+    clean_path: &str,
+    refinement_entries: &[ScopeRefinementEntry],
+) -> Result<(), ScopePathError> {
+    let permitted = refinement_entries.iter().any(|entry| {
+        (entry.path == clean_path || (entry.path_type == PathType::Directory && clean_path.starts_with(&format!("{}/", entry.path))))
+            && entry.permitted_operations.contains(&PermittedOperation::Delete)
+    });
+    if !permitted {
+        return Err(ScopePathError::OperationNotPermitted(format!(
+            "Delete operation not permitted for '{clean_path}'"
+        )));
+    }
+    Ok(())
+}
+
+pub fn validate_file_rename(
+    clean_path: &str,
+    refinement_entries: &[ScopeRefinementEntry],
+) -> Result<(), ScopePathError> {
+    let permitted = refinement_entries.iter().any(|entry| {
+        (entry.path == clean_path || (entry.path_type == PathType::Directory && clean_path.starts_with(&format!("{}/", entry.path))))
+            && entry.permitted_operations.contains(&PermittedOperation::Rename)
+    });
+    if !permitted {
+        return Err(ScopePathError::OperationNotPermitted(format!(
+            "Rename operation not permitted for '{clean_path}'"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CorrectionTaskScopeView {
     pub workspace: String,
@@ -4013,6 +4272,8 @@ pub struct CorrectionTaskScopeView {
     pub bounded_file_scopes: Vec<String>,
     pub authority_boundary_type: String,
     pub is_bounded: bool,
+    #[serde(default)]
+    pub refinement_entries: Vec<ScopeRefinementEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -4054,6 +4315,10 @@ pub struct CorrectionScopeView {
     pub scope_hash: String,
     pub authorized: bool,
     pub human_refinement_required: bool,
+    #[serde(default)]
+    pub human_scope_refinement: Option<HumanScopeRefinement>,
+    #[serde(default)]
+    pub missing_provenance_tasks: Vec<String>,
 }
 
 pub fn parse_rejection_notes_to_findings(notes: &str) -> Vec<String> {
@@ -4184,6 +4449,7 @@ pub fn derive_bounded_correction_scope(
     originating_evidence_id: &str,
     user_rejection_notes: &str,
     provenance_paths_by_task: &BTreeMap<String, Vec<String>>,
+    refinement: Option<&HumanScopeRefinement>,
 ) -> Option<CorrectionScopeView> {
     if originating_evidence_id.is_empty() {
         return None;
@@ -4519,6 +4785,7 @@ pub fn derive_bounded_correction_scope(
     }
 
     // Proposed tasks previews
+    let mut missing_provenance_tasks = Vec::new();
     let mut proposed_tasks = Vec::new();
     for task_id in &affected_vec {
         let Some(run_task) = run.tasks.get(task_id) else {
@@ -4608,13 +4875,27 @@ pub fn derive_bounded_correction_scope(
         if let Some(provenance_paths) = provenance_paths_by_task.get(task_id) {
             bounded_paths.extend(provenance_paths.iter().cloned());
         }
+
+        let mut task_refinement_entries = Vec::new();
+        if let Some(refine) = refinement {
+            for entry in &refine.entries {
+                if entry.target_task_id == *task_id || entry.target_task_id.is_empty() {
+                    bounded_paths.push(entry.path.clone());
+                    task_refinement_entries.push(entry.clone());
+                }
+            }
+        }
+
         bounded_paths.sort();
         bounded_paths.dedup();
 
         let is_bounded = !bounded_paths.is_empty();
-        let authority_boundary_type = if is_bounded {
+        let authority_boundary_type = if !task_refinement_entries.is_empty() {
+            "HUMAN_REFINED_BOUNDED".to_string()
+        } else if is_bounded {
             "PROVENANCE_BOUNDED".to_string()
         } else {
+            missing_provenance_tasks.push(task_id.clone());
             "UNBOUNDED_WORKSPACE".to_string()
         };
 
@@ -4628,6 +4909,7 @@ pub fn derive_bounded_correction_scope(
             bounded_file_scopes: bounded_paths,
             authority_boundary_type,
             is_bounded,
+            refinement_entries: task_refinement_entries,
         };
 
         let mut outcome_statements = Vec::new();
@@ -4719,15 +5001,39 @@ pub fn derive_bounded_correction_scope(
             .iter()
             .any(|e| e.kind == ExecutionEventKind::VerificationCorrectionAuthorized);
 
+    let mut refinement_hash_tokens = Vec::new();
+    if let Some(refine) = refinement {
+        for entry in &refine.entries {
+            let ops = entry
+                .permitted_operations
+                .iter()
+                .map(|o| format!("{:?}", o))
+                .collect::<Vec<_>>()
+                .join(",");
+            refinement_hash_tokens.push(format!(
+                "{}:{}:{:?}:[{}]:{}",
+                entry.target_task_id, entry.path, entry.path_type, ops, entry.reason
+            ));
+        }
+        refinement_hash_tokens.sort();
+    }
+
+    let refinement_part = if refinement_hash_tokens.is_empty() {
+        String::new()
+    } else {
+        format!(":refined={}", refinement_hash_tokens.join(";"))
+    };
+
     let scope_hash = sha256(
         format!(
-            "{}:{}:{}:failed={}:blocked={}:affected={}",
+            "{}:{}:{}:failed={}:blocked={}:affected={}{}",
             mission_id,
             revision,
             originating_evidence_id,
             failed_requirement_ids.join(","),
             blocked_requirement_ids.join(","),
-            affected_vec.join(",")
+            affected_vec.join(","),
+            refinement_part
         )
         .as_bytes(),
     );
@@ -4755,6 +5061,8 @@ pub fn derive_bounded_correction_scope(
         scope_hash,
         authorized,
         human_refinement_required,
+        human_scope_refinement: refinement.cloned(),
+        missing_provenance_tasks,
     })
 }
 

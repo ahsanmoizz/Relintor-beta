@@ -55,6 +55,11 @@ import {
   type CorrectionTaskPreview,
   type AntigravityHealth,
   type AntigravitySetupView,
+  type HumanScopeRefinement,
+  type ScopeRefinementEntry,
+  type PathType,
+  type PermittedOperation,
+  verificationSaveCorrectionRefinement,
 } from "./backend";
 import { createReadinessGate } from "./readiness";
 import {
@@ -1307,6 +1312,21 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
     }
   };
 
+  const recordScopeRefinement = async (refinement: HumanScopeRefinement) => {
+    if (!status || !projectId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await verificationSaveCorrectionRefinement(status.project_id, refinement);
+      setVerification(updated);
+      setVerificationNotice(verificationActionMessage(updated));
+    } catch (reason) {
+      setError(verificationActionError(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return <section className="view" aria-labelledby="activity-title">
     <div className="eyebrow">MISSION ACTIVITY</div>
     <h1 id="activity-title">{status?.project_name || "Activity"}</h1>
@@ -1314,7 +1334,7 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
     {handoff && <AntigravitySetupCard health={antigravity} onRefresh={refreshAntigravity} />}
     {!handoff && <div className="panel empty-panel" data-testid="activity-empty"><span className="panel-kicker">NO SEALED MISSION</span><h2>Nothing is ready to execute.</h2><p>Review a blueprint and let the Rust authority seal a mission first. There is no frontend-only activity to display.</p></div>}
     {handoff && loading && <div className="panel loading-panel" role="status" aria-live="polite"><span className="panel-kicker">MISSION STATE</span><h2>Reading persisted state…</h2><p>Waiting for the Rust execution and verification authorities.</p></div>}
-    {handoff && !loading && status && <MissionCockpit status={status} verification={verification} antigravity={antigravity} busy={busy} revalidating={revalidating} verificationNotice={verificationNotice} onCommand={runCommand} onVerify={() => void runVerificationCommand()} onDecision={(requirementId, approved, notes) => void recordHumanDecision(requirementId, approved, notes)} onRefresh={() => void load()} onAuthorizeCorrection={recordCorrectionAuthorization} />}
+    {handoff && !loading && status && <MissionCockpit status={status} verification={verification} antigravity={antigravity} busy={busy} revalidating={revalidating} verificationNotice={verificationNotice} onCommand={runCommand} onVerify={() => void runVerificationCommand()} onDecision={(requirementId, approved, notes) => void recordHumanDecision(requirementId, approved, notes)} onRefresh={() => void load()} onAuthorizeCorrection={recordCorrectionAuthorization} onSaveRefinement={recordScopeRefinement} />}
     {handoff && !loading && !status && !error && <div className="panel empty-panel"><span className="panel-kicker">STATE UNAVAILABLE</span><h2>No mission state returned.</h2><p>The authority did not provide an execution record, so the UI will not infer one.</p></div>}
     {error && <div className="panel error-panel" role="alert"><span className="panel-kicker">ACTION REQUIRED</span><h2>{/Antigravity is not ready/i.test(error) ? "Antigravity setup required" : authorityReadFailure ? "Mission state unavailable" : "Relintor needs your attention"}</h2><p>{error}</p>{authorityReadFailure && <button className="secondary-button" type="button" onClick={() => void load()}>Retry authority read</button>}{authorityReadFailure && authorityReadStatus && <p className="form-hint" role="status">{authorityReadStatus}</p>}</div>}
   </section>;
@@ -1587,6 +1607,7 @@ export function MissionCockpit({
   onDecision,
   onRefresh,
   onAuthorizeCorrection,
+  onSaveRefinement,
 }: {
   status: ExecutionStatus;
   verification: VerificationStatus | null;
@@ -1599,8 +1620,25 @@ export function MissionCockpit({
   onDecision: (requirementId: string, approved: boolean, notes: string) => void;
   onRefresh: () => void;
   onAuthorizeCorrection?: (scopeHash: string) => void;
+  onSaveRefinement?: (refinement: HumanScopeRefinement) => Promise<void>;
 }) {
   const [decisionNotes, setDecisionNotes] = useState("");
+  const [refineMode, setRefineMode] = useState(false);
+  const [newEntryPath, setNewEntryPath] = useState("");
+  const [newEntryType, setNewEntryType] = useState<PathType>("File");
+  const [newEntryTask, setNewEntryTask] = useState("");
+  const [newEntryReason, setNewEntryReason] = useState("");
+  const [newEntryOps, setNewEntryOps] = useState<PermittedOperation[]>(["Read", "Modify"]);
+  const [refineError, setRefineError] = useState<string | null>(null);
+
+  const existingEntries = verification?.correction_scope?.human_scope_refinement?.entries || [];
+  const [entries, setEntries] = useState<ScopeRefinementEntry[]>(existingEntries);
+
+  useEffect(() => {
+    if (verification?.correction_scope?.human_scope_refinement?.entries) {
+      setEntries(verification.correction_scope.human_scope_refinement.entries);
+    }
+  }, [verification?.correction_scope?.human_scope_refinement]);
   const executorReady = antigravity?.adapter_ready === true;
   const presentation = missionPresentation(status, verification, executorReady);
   const verificationView = verificationPresentation(verification);
@@ -1918,6 +1956,210 @@ export function MissionCockpit({
 
             <div className="correction-preserved-notice">
               <strong>{verification.correction_scope.preserved_task_ids.length} historical tasks preserved:</strong> These tasks will NOT rerun and their completed records remain permanently preserved in the ledger.
+            </div>
+
+            {verification.correction_scope.human_refinement_required && (
+              <div className="scope-refinement-alert" role="alert" data-testid="scope-refinement-required-notice">
+                <strong>Scope Refinement Required</strong>
+                <p>
+                  Automatic boundary derivation could not safely prove bounded file scopes for all affected tasks.
+                  {verification.correction_scope.missing_provenance_tasks && verification.correction_scope.missing_provenance_tasks.length > 0 && (
+                    <span> Unbounded tasks: <code>{verification.correction_scope.missing_provenance_tasks.join(", ")}</code>.</span>
+                  )}
+                  {" "}Add bounded paths with explicit operations and justifications before authorizing this correction.
+                </p>
+              </div>
+            )}
+
+            <div className="scope-refinement-controls">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setRefineMode(!refineMode)}
+              >
+                {refineMode ? "Hide scope refinement" : "Refine correction scope"}
+              </button>
+
+              {refineMode && (
+                <div className="scope-refinement-panel">
+                  <h4>Refine Permitted Work Boundaries</h4>
+                  <p className="form-hint">
+                    Specify files or directories permitted for corrective work. Every path is validated against sealed workspace containment.
+                  </p>
+
+                  {entries.length > 0 && (
+                    <div className="refinement-entries-list">
+                      <h5>Configured refinement entries ({entries.length})</h5>
+                      <table className="refinement-table">
+                        <thead>
+                          <tr>
+                            <th>Path</th>
+                            <th>Type</th>
+                            <th>Target Task</th>
+                            <th>Operations</th>
+                            <th>Reason</th>
+                            <th>Action</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {entries.map((entry, idx) => (
+                            <tr key={idx}>
+                              <td><code>{entry.path}</code></td>
+                              <td>{entry.path_type}</td>
+                              <td>{entry.target_task_id ? <code>{entry.target_task_id}</code> : <em>All affected</em>}</td>
+                              <td>{entry.permitted_operations.join(", ")}</td>
+                              <td>{entry.reason}</td>
+                              <td>
+                                <button
+                                  type="button"
+                                  className="danger-button small"
+                                  onClick={() => {
+                                    setEntries(entries.filter((_, i) => i !== idx));
+                                  }}
+                                >
+                                  Remove
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  <form
+                    className="add-refinement-entry-form"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      setRefineError(null);
+                      const trimmedPath = newEntryPath.trim();
+                      const trimmedReason = newEntryReason.trim();
+                      if (!trimmedPath) {
+                        setRefineError("Path is required.");
+                        return;
+                      }
+                      if (!trimmedReason) {
+                        setRefineError("Justification reason is required.");
+                        return;
+                      }
+                      if (newEntryOps.length === 0) {
+                        setRefineError("At least one permitted operation is required.");
+                        return;
+                      }
+                      const newEntry: ScopeRefinementEntry = {
+                        path: trimmedPath,
+                        path_type: newEntryType,
+                        reason: trimmedReason,
+                        target_task_id: newEntryTask,
+                        permitted_operations: newEntryOps,
+                      };
+                      setEntries([...entries, newEntry]);
+                      setNewEntryPath("");
+                      setNewEntryReason("");
+                    }}
+                  >
+                    <h5>Add bounded path</h5>
+                    <div className="form-grid">
+                      <div>
+                        <label className="field-label" htmlFor="refine-path">Path (relative to workspace)</label>
+                        <input
+                          id="refine-path"
+                          type="text"
+                          value={newEntryPath}
+                          onChange={(e) => setNewEntryPath(e.target.value)}
+                          placeholder="e.g. src/routing/health.rs"
+                        />
+                      </div>
+                      <div>
+                        <label className="field-label" htmlFor="refine-type">Type</label>
+                        <select
+                          id="refine-type"
+                          value={newEntryType}
+                          onChange={(e) => setNewEntryType(e.target.value as PathType)}
+                        >
+                          <option value="File">File</option>
+                          <option value="Directory">Directory</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="field-label" htmlFor="refine-task">Target Task</label>
+                        <select
+                          id="refine-task"
+                          value={newEntryTask}
+                          onChange={(e) => setNewEntryTask(e.target.value)}
+                        >
+                          <option value="">All affected tasks</option>
+                          {verification.correction_scope.affected_task_ids.map((tid) => (
+                            <option key={tid} value={tid}>{tid}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="operations-checkboxes">
+                      <span className="field-label">Permitted operations:</span>
+                      {(["Read", "Modify", "CreateWithin", "Delete", "Rename"] as PermittedOperation[]).map((op) => (
+                        <label key={op} className="checkbox-label">
+                          <input
+                            type="checkbox"
+                            checked={newEntryOps.includes(op)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setNewEntryOps([...newEntryOps, op]);
+                              } else {
+                                setNewEntryOps(newEntryOps.filter((o) => o !== op));
+                              }
+                            }}
+                          />
+                          <span>{op}</span>
+                        </label>
+                      ))}
+                    </div>
+
+                    <div>
+                      <label className="field-label" htmlFor="refine-reason">Justification reason</label>
+                      <input
+                        id="refine-reason"
+                        type="text"
+                        value={newEntryReason}
+                        onChange={(e) => setNewEntryReason(e.target.value)}
+                        placeholder="Why is this path needed for the correction?"
+                      />
+                    </div>
+
+                    <button type="submit" className="secondary-button">
+                      Add to refinement
+                    </button>
+                  </form>
+
+                  {refineError && <p className="error-text" role="alert">{refineError}</p>}
+
+                  <div className="save-refinement-row">
+                    <button
+                      type="button"
+                      className="primary-button"
+                      disabled={busy}
+                      onClick={async () => {
+                        if (!verification?.correction_scope) return;
+                        setRefineError(null);
+                        try {
+                          await onSaveRefinement?.({
+                            mission_id: verification.correction_scope.mission_id,
+                            revision: verification.correction_scope.revision,
+                            originating_evidence_id: verification.correction_scope.originating_evidence_id,
+                            entries,
+                            last_modified_ms: Date.now(),
+                          });
+                        } catch (err) {
+                          setRefineError(String(err));
+                        }
+                      }}
+                    >
+                      {busy ? "Saving refinement…" : "Save refinement"}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="correction-authorize-control">

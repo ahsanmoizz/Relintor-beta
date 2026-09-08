@@ -1194,6 +1194,7 @@ fn test_defect_49_duplicate_semantic_correction_matrix() {
         &originating_ev,
         "REJECTED: 1. Documentation falsely claims approval. 2. State transitions unreliable. 3. Inadequate tests. 4. Accessibility blocked.",
         &provenance,
+        None,
     ).expect("derive bounded correction scope");
 
     // MATRIX 49A1: Exactly 1 semantic correction authority for the duplicate HumanDecision
@@ -1326,6 +1327,7 @@ fn test_defect_49_technical_correction_evidence_matrix() {
         &originating_ev,
         "REJECTED: 1. Documentation falsely claims owner approval in docs. 2. State transitions unreliable in routing. 3. Current automated tests inadequate. 4. Accessibility blocked.",
         &provenance,
+        None,
     ).expect("derive bounded correction scope");
 
     // MATRIX 49B1: Human rejects due to technical implementation defect -> HumanDecision alone CANNOT satisfy correction
@@ -1357,6 +1359,7 @@ fn test_defect_49_technical_correction_evidence_matrix() {
         &originating_ev,
         "REJECTED: Unmapped failure without bounds.",
         &empty_provenance,
+        None,
     ).expect("scope derived");
     assert!(empty_scope.human_refinement_required, "Missing boundary provenance must require human refinement");
     assert!(empty_scope.project_wide_unbounded_authority, "Without provenance paths, authority cannot be bounded");
@@ -1502,6 +1505,7 @@ fn test_defect_49_authorization_precision_matrix() {
         &originating_ev,
         "REJECTED: 1. Documentation fabricated. 2. State transitions unreliable. 3. Inadequate automated tests. 4. Accessibility blocked.",
         &provenance,
+        None,
     ).expect("derive bounded correction scope");
 
     // All 5 Authorization Precision criteria:
@@ -1550,4 +1554,372 @@ fn test_defect_49_authorization_precision_matrix() {
     assert_eq!(runnable.len(), 2);
     assert!(runnable.contains(&"task-decision-a".to_string()));
     assert!(runnable.contains(&"task-accessibility".to_string()));
+}
+
+#[test]
+fn test_defect_51_path_security_and_governance() {
+    let temp_ws = tempdir().expect("temp workspace");
+    let ws_path = temp_ws.path();
+
+    // Create a dummy file and directory in the workspace
+    let src_dir = ws_path.join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    let main_file = src_dir.join("main.rs");
+    std::fs::write(&main_file, b"fn main() {}").unwrap();
+
+    // 1. Empty path rejected
+    assert!(matches!(
+        validate_and_canonicalize_scope_path(ws_path, "", PathType::File),
+        Err(ScopePathError::EmptyPath)
+    ));
+    assert!(matches!(
+        validate_and_canonicalize_scope_path(ws_path, "   ", PathType::File),
+        Err(ScopePathError::EmptyPath)
+    ));
+
+    // 2. Traversal patterns rejected
+    assert!(matches!(
+        validate_and_canonicalize_scope_path(ws_path, "../outside.txt", PathType::File),
+        Err(ScopePathError::TraversalForbidden)
+    ));
+    assert!(matches!(
+        validate_and_canonicalize_scope_path(ws_path, "src/../../outside.txt", PathType::File),
+        Err(ScopePathError::TraversalForbidden)
+    ));
+    assert!(matches!(
+        validate_and_canonicalize_scope_path(ws_path, "..\\outside.txt", PathType::File),
+        Err(ScopePathError::TraversalForbidden)
+    ));
+
+    // 3. UNC paths rejected
+    assert!(matches!(
+        validate_and_canonicalize_scope_path(ws_path, r"\\server\share\file.txt", PathType::File),
+        Err(ScopePathError::UncPathForbidden)
+    ));
+    assert!(matches!(
+        validate_and_canonicalize_scope_path(ws_path, "//server/share/file.txt", PathType::File),
+        Err(ScopePathError::UncPathForbidden)
+    ));
+
+    // 4. Device paths rejected
+    assert!(matches!(
+        validate_and_canonicalize_scope_path(ws_path, r"\\?\C:\file.txt", PathType::File),
+        Err(ScopePathError::DevicePathForbidden)
+    ));
+    assert!(matches!(
+        validate_and_canonicalize_scope_path(ws_path, r"\\.\COM1", PathType::File),
+        Err(ScopePathError::DevicePathForbidden)
+    ));
+
+    // 5. Valid relative path canonicalization
+    let clean = validate_and_canonicalize_scope_path(ws_path, "src\\main.rs", PathType::File).expect("valid relative path");
+    assert_eq!(clean, "src/main.rs");
+
+    // 6. Valid absolute path inside workspace
+    let abs_path = ws_path.join("src").join("main.rs").to_string_lossy().to_string();
+    let clean_abs = validate_and_canonicalize_scope_path(ws_path, &abs_path, PathType::File).expect("valid absolute path");
+    assert_eq!(clean_abs, "src/main.rs");
+
+    // 7. Non-existent new file path inside workspace
+    let clean_new = validate_and_canonicalize_scope_path(ws_path, "src/new_module.rs", PathType::File).expect("valid new path");
+    assert_eq!(clean_new, "src/new_module.rs");
+
+    // 8. New file creation governed by parent directory CreateWithin
+    let entries_without_parent = vec![
+        ScopeRefinementEntry {
+            path: "src/other.rs".into(),
+            path_type: PathType::File,
+            reason: "modify other".into(),
+            target_task_id: "task-1".into(),
+            correction_unit_ids: vec![],
+            requirement_ids: vec![],
+            permitted_operations: vec![PermittedOperation::Modify],
+        },
+    ];
+    let err = validate_new_file_creation(ws_path, "src/new_module.rs", &entries_without_parent);
+    assert!(matches!(err, Err(ScopePathError::ParentDirectoryNotAuthorized(_))));
+
+    let entries_with_parent_create = vec![
+        ScopeRefinementEntry {
+            path: "src".into(),
+            path_type: PathType::Directory,
+            reason: "allow creating inside src".into(),
+            target_task_id: "task-1".into(),
+            correction_unit_ids: vec![],
+            requirement_ids: vec![],
+            permitted_operations: vec![PermittedOperation::CreateWithin, PermittedOperation::Read],
+        },
+    ];
+    let ok = validate_new_file_creation(ws_path, "src/new_module.rs", &entries_with_parent_create);
+    assert!(ok.is_ok());
+    assert_eq!(ok.unwrap(), "src/new_module.rs");
+
+    // 9. Deletion governance
+    assert!(validate_file_deletion("src/main.rs", &entries_without_parent).is_err());
+    let entries_with_delete = vec![
+        ScopeRefinementEntry {
+            path: "src/main.rs".into(),
+            path_type: PathType::File,
+            reason: "delete dead file".into(),
+            target_task_id: "task-1".into(),
+            correction_unit_ids: vec![],
+            requirement_ids: vec![],
+            permitted_operations: vec![PermittedOperation::Delete],
+        },
+    ];
+    assert!(validate_file_deletion("src/main.rs", &entries_with_delete).is_ok());
+
+    // 10. Rename governance
+    assert!(validate_file_rename("src/main.rs", &entries_without_parent).is_err());
+    let entries_with_rename = vec![
+        ScopeRefinementEntry {
+            path: "src/main.rs".into(),
+            path_type: PathType::File,
+            reason: "rename file".into(),
+            target_task_id: "task-1".into(),
+            correction_unit_ids: vec![],
+            requirement_ids: vec![],
+            permitted_operations: vec![PermittedOperation::Rename],
+        },
+    ];
+    assert!(validate_file_rename("src/main.rs", &entries_with_rename).is_ok());
+}
+
+#[test]
+fn test_defect_51_scope_refinement_matrix() {
+    let (authority, current, store, _signing_key, temp) = create_phase5_test_fixture();
+
+    put_user_decision_fixture(
+        &store,
+        &authority,
+        &current,
+        "REQ-A-OUTCOME",
+        false,
+        "REJECTED: 1. Documentation fabricated. 2. State transitions unreliable. 3. Inadequate automated tests. 4. Accessibility blocked.",
+    );
+
+    let mut test_meta = test_metadata(
+        &authority,
+        &current,
+        "test-output-evidence-51",
+        EvidenceClass::TestOutput,
+        EvidenceResult::Pass,
+        EvidenceConfidence::StrongDeterministic,
+    );
+    test_meta.requirement_ids = vec!["REQ-TEST-AUTOMATED".into()];
+    store.put_test_fixture(test_meta, b"automated tests passed").unwrap();
+
+    let engine = VerificationEngine::new_for_test(
+        store.clone(),
+        authority.clone(),
+        current.clone(),
+        Vec::new(),
+    ).expect("engine");
+    let report = engine.evaluate(None).expect("evaluate");
+
+    let task_specs = vec![
+        ("task-decision-a", vec!["REQ-A-OUTCOME".to_string()]),
+        ("task-decision-b", vec!["REQ-B-PURPOSE".to_string()]),
+        ("task-accessibility", vec!["REQ-ACCESSIBILITY".to_string()]),
+        ("task-automated", vec!["REQ-TEST-AUTOMATED".to_string()]),
+    ];
+    let run = multi_task_p7_execution_fixture(&authority, temp.path(), task_specs);
+
+    let contract_tasks = vec![
+        Task {
+            task_id: "task-decision-a".into(),
+            title: "Implement: User problem outcome".into(),
+            objective: "Implement transport health outcome".into(),
+            requirement_ids: vec!["REQ-A-OUTCOME".into()],
+            dependency_ids: vec![],
+            suggested_scope: "decision".into(),
+            risk: RequirementRisk::High,
+            evidence_obligations: vec![EvidenceObligation {
+                class: EvidenceClass::HumanDecision,
+                minimum_confidence: EvidenceConfidence::HumanAsserted,
+                rationale: "Human decision".into(),
+                required: true,
+            }],
+            status: RequirementStatus::Verified,
+            provenance: "contract".into(),
+        },
+        Task {
+            task_id: "task-decision-b".into(),
+            title: "Implement: User product purpose".into(),
+            objective: "Implement transport health purpose".into(),
+            requirement_ids: vec!["REQ-B-PURPOSE".into()],
+            dependency_ids: vec![],
+            suggested_scope: "decision".into(),
+            risk: RequirementRisk::High,
+            evidence_obligations: vec![EvidenceObligation {
+                class: EvidenceClass::HumanDecision,
+                minimum_confidence: EvidenceConfidence::HumanAsserted,
+                rationale: "Human decision".into(),
+                required: true,
+            }],
+            status: RequirementStatus::Verified,
+            provenance: "contract".into(),
+        },
+        Task {
+            task_id: "task-accessibility".into(),
+            title: "Implement: NFR: accessibility".into(),
+            objective: "Implement accessibility".into(),
+            requirement_ids: vec!["REQ-ACCESSIBILITY".into()],
+            dependency_ids: vec![],
+            suggested_scope: "accessibility".into(),
+            risk: RequirementRisk::High,
+            evidence_obligations: vec![EvidenceObligation {
+                class: EvidenceClass::AccessibilityResult,
+                minimum_confidence: EvidenceConfidence::StrongDeterministic,
+                rationale: "Accessibility check".into(),
+                required: true,
+            }],
+            status: RequirementStatus::Blocked,
+            provenance: "contract".into(),
+        },
+        Task {
+            task_id: "task-automated".into(),
+            title: "Implement: automated tests".into(),
+            objective: "Implement tests".into(),
+            requirement_ids: vec!["REQ-TEST-AUTOMATED".into()],
+            dependency_ids: vec![],
+            suggested_scope: "functional".into(),
+            risk: RequirementRisk::Medium,
+            evidence_obligations: vec![EvidenceObligation {
+                class: EvidenceClass::TestOutput,
+                minimum_confidence: EvidenceConfidence::StrongDeterministic,
+                rationale: "Automated test".into(),
+                required: true,
+            }],
+            status: RequirementStatus::Verified,
+            provenance: "contract".into(),
+        },
+    ];
+
+    let originating_ev = report.requirement_statuses.iter()
+        .find(|s| s.requirement_id == "REQ-A-OUTCOME")
+        .and_then(|s| s.failed_evidence.first())
+        .cloned()
+        .unwrap_or_default();
+
+    // Provenance for decision-a only; task-accessibility intentionally has EMPTY provenance
+    let mut provenance = BTreeMap::new();
+    provenance.insert("task-decision-a".into(), vec![
+        "crates/routing/src/lib.rs".into(),
+        "docs/PLAN.md".into(),
+        "tests/HealthTest.kt".into(),
+    ]);
+
+    // STAGE 1: Automatic derivation fails-closed with HUMAN_SCOPE_REFINEMENT_REQUIRED
+    let scope_unrefined = derive_bounded_correction_scope(
+        &authority.revision.seal.mission_id,
+        authority.revision.revision,
+        &authority.revision.contract.requirement_graph.requirements,
+        &contract_tasks,
+        &[],
+        &report.requirement_statuses,
+        &run,
+        &originating_ev,
+        "REJECTED: 1. Documentation fabricated. 2. State transitions unreliable. 3. Inadequate automated tests. 4. Accessibility blocked.",
+        &provenance,
+        None,
+    ).expect("derive scope unrefined");
+
+    assert!(scope_unrefined.human_refinement_required, "Scope without provenance for all tasks must require refinement");
+    assert!(scope_unrefined.project_wide_unbounded_authority);
+    assert_eq!(scope_unrefined.missing_provenance_tasks, vec!["task-accessibility".to_string()]);
+    let unrefined_a11y = scope_unrefined.proposed_tasks.iter().find(|t| t.task_id == "task-accessibility").unwrap();
+    assert_eq!(unrefined_a11y.authorized_scope.authority_boundary_type, "UNBOUNDED_WORKSPACE");
+    assert!(!unrefined_a11y.authorized_scope.is_bounded);
+
+    // STAGE 2: Operator refines scope for the unbounded task
+    let refinement = HumanScopeRefinement {
+        mission_id: authority.revision.seal.mission_id.clone(),
+        revision: authority.revision.revision,
+        originating_evidence_id: originating_ev.clone(),
+        last_modified_ms: 1500,
+        entries: vec![
+            ScopeRefinementEntry {
+                path: "docs/ACCESSIBILITY.md".into(),
+                path_type: PathType::File,
+                reason: "Update accessibility specification and audit plan".into(),
+                target_task_id: "task-accessibility".into(),
+                correction_unit_ids: vec![],
+                requirement_ids: vec!["REQ-ACCESSIBILITY".into()],
+                permitted_operations: vec![PermittedOperation::Read, PermittedOperation::Modify],
+            },
+            ScopeRefinementEntry {
+                path: "tests/a11y.test.js".into(),
+                path_type: PathType::File,
+                reason: "Implement automated accessibility checks".into(),
+                target_task_id: "task-accessibility".into(),
+                correction_unit_ids: vec![],
+                requirement_ids: vec!["REQ-ACCESSIBILITY".into()],
+                permitted_operations: vec![PermittedOperation::Read, PermittedOperation::Modify],
+            },
+        ],
+    };
+
+    let scope_refined = derive_bounded_correction_scope(
+        &authority.revision.seal.mission_id,
+        authority.revision.revision,
+        &authority.revision.contract.requirement_graph.requirements,
+        &contract_tasks,
+        &[],
+        &report.requirement_statuses,
+        &run,
+        &originating_ev,
+        "REJECTED: 1. Documentation fabricated. 2. State transitions unreliable. 3. Inadequate automated tests. 4. Accessibility blocked.",
+        &provenance,
+        Some(&refinement),
+    ).expect("derive scope refined");
+
+    // All tasks are now bounded!
+    assert!(!scope_refined.human_refinement_required, "Refinement should clear human_refinement_required");
+    assert!(!scope_refined.project_wide_unbounded_authority);
+    assert!(scope_refined.missing_provenance_tasks.is_empty());
+
+    let refined_a11y = scope_refined.proposed_tasks.iter().find(|t| t.task_id == "task-accessibility").unwrap();
+    assert_eq!(refined_a11y.authorized_scope.authority_boundary_type, "HUMAN_REFINED_BOUNDED");
+    assert!(refined_a11y.authorized_scope.is_bounded);
+    assert!(refined_a11y.authorized_scope.bounded_file_scopes.contains(&"docs/ACCESSIBILITY.md".to_string()));
+    assert!(refined_a11y.authorized_scope.bounded_file_scopes.contains(&"tests/a11y.test.js".to_string()));
+    assert_eq!(refined_a11y.authorized_scope.refinement_entries.len(), 2);
+
+    // STAGE 3: Scope hash determinism & mutation sensitivity
+    assert_ne!(scope_unrefined.scope_hash, scope_refined.scope_hash, "Refinement must change scope_hash");
+
+    // Mutating an entry modifies scope_hash
+    let mut mutated_refinement = refinement.clone();
+    mutated_refinement.entries[0].reason = "Different reason".into();
+    let scope_mutated = derive_bounded_correction_scope(
+        &authority.revision.seal.mission_id,
+        authority.revision.revision,
+        &authority.revision.contract.requirement_graph.requirements,
+        &contract_tasks,
+        &[],
+        &report.requirement_statuses,
+        &run,
+        &originating_ev,
+        "REJECTED: 1. Documentation fabricated. 2. State transitions unreliable. 3. Inadequate automated tests. 4. Accessibility blocked.",
+        &provenance,
+        Some(&mutated_refinement),
+    ).expect("derive scope mutated");
+    assert_ne!(scope_refined.scope_hash, scope_mutated.scope_hash, "Changing entry reason must change scope_hash");
+
+    // STAGE 4: Authorize scoped correction with valid refined scope
+    let known_requirements = run.tasks.values().flat_map(|t| t.requirement_ids.iter().cloned()).collect::<BTreeSet<_>>();
+    let target_reqs: BTreeSet<String> = scope_refined.affected_task_ids.iter()
+        .filter_map(|tid| run.tasks.get(tid))
+        .flat_map(|t| t.requirement_ids.iter().cloned())
+        .filter(|r| known_requirements.contains(r))
+        .collect();
+
+    let mut authorized_run = run.clone();
+    let affected = authorized_run.authorize_verification_correction(&target_reqs, 2000).expect("authorize");
+    assert_eq!(affected.len(), 2);
+    assert!(affected.contains(&"task-decision-a".to_string()));
+    assert!(affected.contains(&"task-accessibility".to_string()));
+    assert_eq!(authorized_run.tasks["task-decision-a"].state, ExecutionTaskState::Pending);
+    assert_eq!(authorized_run.tasks["task-accessibility"].state, ExecutionTaskState::Pending);
 }

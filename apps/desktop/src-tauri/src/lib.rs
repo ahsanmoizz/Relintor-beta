@@ -13,8 +13,9 @@ use relintor_evidence::{
     AuthenticatedP7Execution, CollectorOrchestrationResult, CompletionAuthority,
     CompletionCertificate, EvidenceManifest, EvidenceStore, EvidenceSummary,
     ExplicitUserDecisionInput, ExplicitUserDecisionRecorder, FreshnessContext,
-    ProductionAiProvider, VerificationAuthority, VerificationCollectorOrchestrator,
-    VerificationCollectorPlan, VerificationEngine,
+    HumanScopeRefinement, ProductionAiProvider,
+    validate_and_canonicalize_scope_path, VerificationAuthority,
+    VerificationCollectorOrchestrator, VerificationCollectorPlan, VerificationEngine,
 };
 use relintor_execution::{
     CheckpointKind, ConservativeProcessInspector, ExecutionError, ExecutionRun,
@@ -5731,6 +5732,22 @@ fn default_verification_workflow_stage(
     }
 }
 
+fn correction_refinement_file_path(store_root: &Path) -> PathBuf {
+    store_root.join("correction_refinement.json")
+}
+
+fn load_correction_refinement(store_root: &Path) -> Option<HumanScopeRefinement> {
+    let path = correction_refinement_file_path(store_root);
+    if path.is_file() {
+        if let Ok(content) = fs::read_to_string(&path) {
+            if let Ok(refinement) = serde_json::from_str::<HumanScopeRefinement>(&content) {
+                return Some(refinement);
+            }
+        }
+    }
+    None
+}
+
 fn derive_correction_scope_from_context(
     context: &P8VerificationContext,
     report: &relintor_evidence::VerificationReport,
@@ -5810,6 +5827,8 @@ fn derive_correction_scope_from_context(
         }
     }
 
+    let refinement = load_correction_refinement(context.store.root());
+
     relintor_evidence::derive_bounded_correction_scope(
         &context.authority.revision.seal.mission_id,
         context.authority.revision.revision,
@@ -5821,6 +5840,7 @@ fn derive_correction_scope_from_context(
         &originating_evidence_id,
         &user_rejection_notes,
         &provenance_paths_by_task,
+        refinement.as_ref(),
     )
 }
 
@@ -6533,6 +6553,75 @@ fn verification_authorize_correction(
         invalidate_p8_evaluation_cache(&project_id);
 
         p9_status_view(&app, &project_id, &ledger_path, &run, &rev)
+    })
+}
+
+#[tauri::command]
+fn verification_get_correction_refinement(
+    app: AppHandle,
+    project_id: String,
+) -> Result<Option<HumanScopeRefinement>, String> {
+    let (context, _, _, _) = evaluate_p8(&app, &project_id, false)?;
+    Ok(load_correction_refinement(context.store.root()))
+}
+
+#[tauri::command]
+fn verification_save_correction_refinement(
+    app: AppHandle,
+    project_id: String,
+    refinement: HumanScopeRefinement,
+) -> Result<VerificationStatusView, String> {
+    with_verification_mutation_lock(|| {
+        let (context, _, _, _) = evaluate_p8(&app, &project_id, false)?;
+        let workspace = context
+            .current
+            .workspace_root
+            .as_deref()
+            .ok_or_else(|| "verification workspace is unavailable".to_string())?;
+
+        let mut validated_entries = Vec::new();
+        for entry in &refinement.entries {
+            let clean_rel = validate_and_canonicalize_scope_path(
+                workspace,
+                &entry.path,
+                entry.path_type,
+            )
+            .map_err(|err| format!("Invalid scope refinement path '{}': {err}", entry.path))?;
+
+            if entry.reason.trim().is_empty() {
+                return Err(format!("A reason is required for path '{}'", entry.path));
+            }
+            if entry.permitted_operations.is_empty() {
+                return Err(format!(
+                    "At least one permitted operation is required for path '{}'",
+                    entry.path
+                ));
+            }
+
+            let mut valid_entry = entry.clone();
+            valid_entry.path = clean_rel;
+            validated_entries.push(valid_entry);
+        }
+
+        let validated_refinement = HumanScopeRefinement {
+            mission_id: context.authority.revision.seal.mission_id.clone(),
+            revision: context.authority.revision.revision,
+            originating_evidence_id: refinement.originating_evidence_id,
+            entries: validated_entries,
+            last_modified_ms: execution_now_ms(),
+        };
+
+        let file_path = correction_refinement_file_path(context.store.root());
+        let json_bytes = serde_json::to_vec_pretty(&validated_refinement)
+            .map_err(|e| format!("serialize correction refinement: {e}"))?;
+        let tmp_path = file_path.with_extension("tmp");
+        fs::write(&tmp_path, &json_bytes)
+            .map_err(|e| format!("write temp refinement file: {e}"))?;
+        fs::rename(&tmp_path, &file_path)
+            .map_err(|e| format!("persist correction refinement file: {e}"))?;
+
+        invalidate_p8_evaluation_cache(&project_id);
+        verification_status(app, project_id)
     })
 }
 
@@ -7360,6 +7449,8 @@ pub fn run() {
             verification_rerun,
             verification_submit_human_decision,
             verification_authorize_correction,
+            verification_get_correction_refinement,
+            verification_save_correction_refinement,
             verification_evidence,
             verification_certificate,
             verification_export_manifest,

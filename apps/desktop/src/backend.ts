@@ -318,6 +318,28 @@ export type CorrectionUnit = {
   dependencies: string[];
 };
 
+export type PathType = "File" | "Directory";
+
+export type PermittedOperation = "Read" | "Modify" | "CreateWithin" | "Delete" | "Rename";
+
+export type ScopeRefinementEntry = {
+  path: string;
+  path_type: PathType;
+  reason: string;
+  target_task_id: string;
+  correction_unit_ids?: string[];
+  requirement_ids?: string[];
+  permitted_operations: PermittedOperation[];
+};
+
+export type HumanScopeRefinement = {
+  mission_id: string;
+  revision: number;
+  originating_evidence_id: string;
+  entries: ScopeRefinementEntry[];
+  last_modified_ms: number;
+};
+
 export type CorrectionTaskScope = {
   workspace: string;
   file_scopes: string[];
@@ -328,6 +350,7 @@ export type CorrectionTaskScope = {
   bounded_file_scopes?: string[];
   authority_boundary_type?: string;
   is_bounded?: boolean;
+  refinement_entries?: ScopeRefinementEntry[];
 };
 
 export type CorrectionTaskPreview = {
@@ -362,6 +385,8 @@ export type CorrectionScope = {
   scope_hash: string;
   authorized: boolean;
   human_refinement_required?: boolean;
+  human_scope_refinement?: HumanScopeRefinement | null;
+  missing_provenance_tasks?: string[];
   semantic_correction_authorities?: number;
   duplicate_correction_work?: number;
   unrelated_tasks?: number;
@@ -830,6 +855,30 @@ export async function authorizeCorrection(
     missionId,
     revision,
     scopeHash,
+  });
+}
+
+export async function verificationGetCorrectionRefinement(
+  projectId: string,
+): Promise<HumanScopeRefinement | null> {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+  return invoke<HumanScopeRefinement | null>("verification_get_correction_refinement", {
+    projectId,
+  });
+}
+
+export async function verificationSaveCorrectionRefinement(
+  projectId: string,
+  refinement: HumanScopeRefinement,
+): Promise<VerificationStatus> {
+  if (!isTauriRuntime()) {
+    throw new Error("The installed Relintor desktop authority is required to save scope refinement.");
+  }
+  return invoke<VerificationStatus>("verification_save_correction_refinement", {
+    projectId,
+    refinement,
   });
 }
 
