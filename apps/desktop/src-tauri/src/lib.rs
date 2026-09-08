@@ -17,8 +17,8 @@ use relintor_evidence::{
     VerificationCollectorPlan, VerificationEngine,
 };
 use relintor_execution::{
-    CheckpointKind, ConservativeProcessInspector, ExecutionError, ExecutionEventKind, ExecutionRun,
-    ExecutionTaskState, ProcessInspector, ProcessObservation, ProcessOwnershipRecord,
+    CheckpointKind, ConservativeProcessInspector, ExecutionError, ExecutionRun,
+    ProcessInspector, ProcessObservation, ProcessOwnershipRecord,
     RecoveryAuthority, RecoveryCoordinator, RecoveryDisposition, RecoveryStore, SchedulerPolicy,
     SessionEndState,
 };
@@ -673,48 +673,7 @@ struct VerificationStatusView {
     detail: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CorrectionTaskScopeView {
-    workspace: String,
-    file_scopes: Vec<String>,
-    directory_scopes: Vec<String>,
-    package_lockfiles: Vec<String>,
-    allowed_tools: Vec<String>,
-    suggested_scope: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CorrectionTaskPreview {
-    task_id: String,
-    title: String,
-    objective: String,
-    why_included: String,
-    triggering_requirement_ids: Vec<String>,
-    triggering_requirement_titles: Vec<String>,
-    scope_relation: String,
-    dependency_reason: Option<String>,
-    authorized_scope: CorrectionTaskScopeView,
-    expected_outcome: String,
-    required_fresh_evidence: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CorrectionScopeView {
-    mission_id: String,
-    revision: u64,
-    originating_evidence_id: String,
-    user_rejection_notes: String,
-    failed_requirement_ids: Vec<String>,
-    failed_requirement_titles: Vec<String>,
-    blocked_requirement_ids: Vec<String>,
-    blocked_requirement_titles: Vec<String>,
-    affected_task_ids: Vec<String>,
-    preserved_task_ids: Vec<String>,
-    preserved_task_count: usize,
-    proposed_tasks: Vec<CorrectionTaskPreview>,
-    scope_hash: String,
-    authorized: bool,
-}
+use relintor_evidence::CorrectionScopeView;
 
 #[derive(Debug, Clone, Serialize)]
 struct HumanDecisionEvidenceItemView {
@@ -5808,311 +5767,61 @@ fn derive_correction_scope_from_context(
         return None;
     }
 
-    let mut failed_requirement_ids = Vec::new();
-    let mut blocked_requirement_ids = Vec::new();
-
-    for status in &report.requirement_statuses {
-        if status.status == RequirementStatus::Failed {
-            failed_requirement_ids.push(status.requirement_id.clone());
-        } else if status.status == RequirementStatus::Blocked
-            || (!status.missing_obligations.is_empty()
-                && status.status != RequirementStatus::Verified)
-        {
-            blocked_requirement_ids.push(status.requirement_id.clone());
-        }
-    }
-
-    failed_requirement_ids.sort();
-    failed_requirement_ids.dedup();
-    blocked_requirement_ids.sort();
-    blocked_requirement_ids.dedup();
-
-    let unverified_reqs = failed_requirement_ids
-        .iter()
-        .chain(blocked_requirement_ids.iter())
-        .cloned()
-        .collect::<BTreeSet<_>>();
-
-    let run = &context.p7_execution.run;
-    let mut affected = BTreeSet::new();
-
-    for task in run.tasks.values() {
-        if task.requirement_ids.iter().any(|r| unverified_reqs.contains(r)) {
-            affected.insert(task.task_id.clone());
-        }
-    }
-
-    loop {
-        let mut changed = false;
-        for task in run.tasks.values() {
-            if !affected.contains(&task.task_id)
-                && task
-                    .dependency_ids
-                    .iter()
-                    .any(|dependency| affected.contains(dependency))
-            {
-                affected.insert(task.task_id.clone());
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-
-    let mut preserved = Vec::new();
-    for task_id in run.tasks.keys() {
-        if !affected.contains(task_id) {
-            preserved.push(task_id.clone());
-        }
-    }
-    preserved.sort();
-    let affected_vec: Vec<String> = affected.iter().cloned().collect();
-
-    let req_map: BTreeMap<&str, &relintor_standards::Requirement> = context
-        .authority
-        .revision
-        .contract
-        .requirement_graph
-        .requirements
-        .iter()
-        .map(|r| (r.requirement_id.as_str(), r))
-        .collect();
-
-    let contract_task_map: BTreeMap<&str, &relintor_standards::Task> = context
-        .authority
-        .revision
-        .contract
-        .task_graph
-        .tasks
-        .iter()
-        .map(|t| (t.task_id.as_str(), t))
-        .collect();
-
-    let contract_dependencies = &context.authority.revision.contract.task_graph.dependencies;
-
-    let failed_requirement_titles: Vec<String> = failed_requirement_ids
-        .iter()
-        .map(|id| {
-            req_map
-                .get(id.as_str())
-                .map(|r| r.title.clone())
-                .unwrap_or_else(|| id.clone())
-        })
-        .collect();
-
-    let blocked_requirement_titles: Vec<String> = blocked_requirement_ids
-        .iter()
-        .map(|id| {
-            req_map
-                .get(id.as_str())
-                .map(|r| r.title.clone())
-                .unwrap_or_else(|| id.clone())
-        })
-        .collect();
-
-    let mut proposed_tasks = Vec::new();
-
-    for task_id in &affected_vec {
-        let Some(run_task) = run.tasks.get(task_id) else {
-            continue;
-        };
-        let contract_task = contract_task_map.get(task_id.as_str());
-
-        let title = contract_task
-            .map(|t| t.title.clone())
-            .filter(|t| !t.trim().is_empty())
-            .unwrap_or_else(|| {
-                run_task
-                    .objective
-                    .lines()
-                    .next()
-                    .map(|line| {
-                        let trimmed = line.trim();
-                        if trimmed.len() > 60 {
-                            format!("{}…", &trimmed[..60])
-                        } else {
-                            trimmed.to_string()
+    // Collect file provenance by task from evidence store metadata directory
+    let mut provenance_paths_by_task: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    if let Ok(entries) = fs::read_dir(context.store.root().join("metadata")) {
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("json") {
+                if let Ok(file_str) = fs::read_to_string(&path) {
+                    if let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&file_str) {
+                        if let Some(meta) = envelope.get("artifact").and_then(|a| a.get("metadata")) {
+                            if let Some(task_id) = meta.get("task_id").and_then(|t| t.as_str()) {
+                                let mut paths = Vec::new();
+                                if let Some(execs) = meta.get("execution_identities").and_then(|e| e.as_array()) {
+                                    for exec in execs {
+                                        if let Some(changes) = exec.get("artifact_changes").and_then(|c| c.as_array()) {
+                                            for change in changes {
+                                                if let Some(p) = change.get("path").and_then(|s| s.as_str()) {
+                                                    paths.push(p.to_string());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Some(rel_paths) = meta.get("relevant_paths").and_then(|r| r.as_array()) {
+                                    for p in rel_paths {
+                                        if let Some(s) = p.as_str() {
+                                            paths.push(s.to_string());
+                                        }
+                                    }
+                                }
+                                if !paths.is_empty() {
+                                    provenance_paths_by_task
+                                        .entry(task_id.to_string())
+                                        .or_default()
+                                        .extend(paths);
+                                }
+                            }
                         }
-                    })
-                    .unwrap_or_else(|| format!("Task {task_id}"))
-            });
-
-        let triggering_ids: Vec<String> = run_task
-            .requirement_ids
-            .iter()
-            .filter(|r| unverified_reqs.contains(*r))
-            .cloned()
-            .collect();
-
-        let triggering_titles: Vec<String> = triggering_ids
-            .iter()
-            .map(|id| {
-                req_map
-                    .get(id.as_str())
-                    .map(|r| r.title.clone())
-                    .unwrap_or_else(|| id.clone())
-            })
-            .collect();
-
-        let (scope_relation, dependency_reason, why_included) = if !triggering_ids.is_empty() {
-            let is_failed = triggering_ids.iter().any(|r| failed_requirement_ids.contains(r));
-            let is_blocked = triggering_ids.iter().any(|r| blocked_requirement_ids.contains(r));
-            let reason_type = if is_failed && is_blocked {
-                "Directly implements failed and blocked requirements"
-            } else if is_failed {
-                "Directly implements failed requirement"
-            } else {
-                "Directly implements blocked requirement"
-            };
-            let titles_summary = if !triggering_titles.is_empty() {
-                format!(": {}", triggering_titles.join(", "))
-            } else {
-                String::new()
-            };
-            (
-                "DIRECT".to_string(),
-                None,
-                format!("{reason_type}{titles_summary}"),
-            )
-        } else {
-            let dep_task_id = run_task
-                .dependency_ids
-                .iter()
-                .find(|d| affected.contains(*d));
-            let explicit_reason = contract_dependencies
-                .iter()
-                .find(|d| &d.task_id == task_id && affected.contains(&d.depends_on))
-                .map(|d| d.reason.clone());
-
-            let reason = explicit_reason.or_else(|| {
-                dep_task_id.map(|dt| format!("Reopened as downstream dependency of task {dt}"))
-            }).unwrap_or_else(|| "Reopened as downstream dependency".to_string());
-
-            (
-                "DOWNSTREAM_DEPENDENCY".to_string(),
-                Some(reason.clone()),
-                reason,
-            )
-        };
-
-        let authorized_scope = CorrectionTaskScopeView {
-            workspace: run_task.scope.workspace.display().to_string(),
-            file_scopes: run_task.scope.file_scopes.clone(),
-            directory_scopes: run_task.scope.directory_scopes.clone(),
-            package_lockfiles: run_task.scope.package_lockfiles.clone(),
-            allowed_tools: run_task.scope.allowed_tools.iter().cloned().collect(),
-            suggested_scope: contract_task.map(|t| t.suggested_scope.clone()),
-        };
-
-        let mut outcome_statements = Vec::new();
-        for req_id in &triggering_ids {
-            if let Some(req) = req_map.get(req_id.as_str()) {
-                for criterion in &req.acceptance_criteria {
-                    if !criterion.statement.trim().is_empty() {
-                        outcome_statements.push(criterion.statement.clone());
                     }
                 }
             }
         }
-        let expected_outcome = if !outcome_statements.is_empty() {
-            outcome_statements.join("; ")
-        } else {
-            run_task.objective.clone()
-        };
-
-        let mut fresh_evidence_list = Vec::new();
-        let mut seen_ev = BTreeSet::new();
-
-        for obligation in &run_task.evidence_obligations {
-            let label = format!("{:?}", obligation.class);
-            let desc = if !obligation.rationale.trim().is_empty() {
-                format!("{label} ({})", obligation.rationale)
-            } else {
-                label
-            };
-            if seen_ev.insert(desc.clone()) {
-                fresh_evidence_list.push(desc);
-            }
-        }
-
-        for req_id in &triggering_ids {
-            if let Some(req) = req_map.get(req_id.as_str()) {
-                for obligation in &req.verification_policy.obligations {
-                    let label = format!("{:?}", obligation.class);
-                    let desc = if !obligation.rationale.trim().is_empty() {
-                        format!("{label} ({})", obligation.rationale)
-                    } else {
-                        label
-                    };
-                    if seen_ev.insert(desc.clone()) {
-                        fresh_evidence_list.push(desc);
-                    }
-                }
-            }
-        }
-
-        proposed_tasks.push(CorrectionTaskPreview {
-            task_id: task_id.clone(),
-            title,
-            objective: run_task.objective.clone(),
-            why_included,
-            triggering_requirement_ids: triggering_ids,
-            triggering_requirement_titles: triggering_titles,
-            scope_relation,
-            dependency_reason,
-            authorized_scope,
-            expected_outcome,
-            required_fresh_evidence: fresh_evidence_list,
-        });
     }
 
-    let preserved_count = preserved.len();
-
-    let authorized = !affected_vec.is_empty()
-        && affected_vec.iter().all(|task_id| {
-            run.tasks.get(task_id).map_or(false, |t| {
-                matches!(
-                    t.state,
-                    ExecutionTaskState::Pending
-                        | ExecutionTaskState::Ready
-                        | ExecutionTaskState::Running
-                )
-            })
-        })
-        && run
-            .events
-            .iter()
-            .any(|e| e.kind == ExecutionEventKind::VerificationCorrectionAuthorized);
-
-    let scope_hash = relintor_evidence::sha256(
-        format!(
-            "{}:{}:{}:failed={}:blocked={}",
-            context.authority.revision.seal.mission_id,
-            context.authority.revision.revision,
-            originating_evidence_id,
-            failed_requirement_ids.join(","),
-            blocked_requirement_ids.join(",")
-        )
-        .as_bytes(),
-    );
-
-    Some(CorrectionScopeView {
-        mission_id: context.authority.revision.seal.mission_id.clone(),
-        revision: context.authority.revision.revision,
-        originating_evidence_id,
-        user_rejection_notes,
-        failed_requirement_ids,
-        failed_requirement_titles,
-        blocked_requirement_ids,
-        blocked_requirement_titles,
-        affected_task_ids: affected_vec,
-        preserved_task_ids: preserved,
-        preserved_task_count: preserved_count,
-        proposed_tasks,
-        scope_hash,
-        authorized,
-    })
+    relintor_evidence::derive_bounded_correction_scope(
+        &context.authority.revision.seal.mission_id,
+        context.authority.revision.revision,
+        &context.authority.revision.contract.requirement_graph.requirements,
+        &context.authority.revision.contract.task_graph.tasks,
+        &context.authority.revision.contract.task_graph.dependencies,
+        &report.requirement_statuses,
+        &context.p7_execution.run,
+        &originating_evidence_id,
+        &user_rejection_notes,
+        &provenance_paths_by_task,
+    )
 }
 
 fn verification_view(
@@ -6744,6 +6453,10 @@ fn verification_authorize_correction(
         let scope = derive_correction_scope_from_context(&context, &report)
             .ok_or_else(|| "NO_CORRECTION_SCOPE: There is no active human rejection requiring correction.".to_string())?;
 
+        if scope.human_refinement_required {
+            return Err("HUMAN_SCOPE_REFINEMENT_REQUIRED: The correction scope cannot be safely bounded without explicit human refinement.".to_string());
+        }
+
         if scope.mission_id != mission_id {
             return Err(format!(
                 "WRONG_MISSION_AUTHORIZATION: Requested mission {mission_id} does not match authoritative mission {}",
@@ -6783,12 +6496,13 @@ fn verification_authorize_correction(
             .flat_map(|t| t.requirement_ids.iter().cloned())
             .collect::<BTreeSet<_>>();
 
+        // Only target requirements matching canonical affected tasks (deduplicated tasks are not reopened)
         let target_reqs: BTreeSet<String> = scope
-            .failed_requirement_ids
+            .affected_task_ids
             .iter()
-            .chain(scope.blocked_requirement_ids.iter())
-            .filter(|r| known_requirements.contains(*r))
-            .cloned()
+            .filter_map(|tid| run.tasks.get(tid))
+            .flat_map(|t| t.requirement_ids.iter().cloned())
+            .filter(|r| known_requirements.contains(r))
             .collect();
 
         if target_reqs.is_empty() {

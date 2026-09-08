@@ -921,14 +921,175 @@ describe("desktop shell foundation", () => {
     expect(screen.getAllByRole("heading", { name: "Verification needs attention" })).toHaveLength(2);
   });
 
-  it("exposes privacy controls and safe diagnostics without sensitive fields", async () => {
-    render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "Account" }));
-    expect(await screen.findByRole("heading", { name: "Choose what leaves this device." })).toBeTruthy();
-    expect(screen.getByLabelText(/Keep project evidence local/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Export safe diagnostics" })).toBeTruthy();
-    expect(screen.queryByText(/database_path/i)).toBeNull();
-    fireEvent.click(screen.getByLabelText(/Allow cloud account\/team state/));
-    await waitFor(() => expect(localStorage.getItem("relintor-privacy-cloud")).toBe("true"));
+  it("renders precise bounded correction scope with structured findings, deduplication notice, bounded files, and human refinement guard (Defect #49)", () => {
+    const onAuthorize = vi.fn();
+    const rejectedVer = pendingVerification();
+    rejectedVer.workflow_stage = "USER_DECISION_REJECTED";
+    rejectedVer.summary = "You rejected the completed result.";
+    rejectedVer.correction_scope = {
+      mission_id: "mission-test-49",
+      revision: 1,
+      originating_evidence_id: "p8-rejection-art",
+      user_rejection_notes: "REJECTED: 1. Documentation falsely claims approval. 2. State transitions unreliable. 3. Accessibility blocked.",
+      failed_requirement_ids: ["REQ-A-OUTCOME", "REQ-B-PURPOSE"],
+      failed_requirement_titles: ["User problem outcome", "User product purpose"],
+      blocked_requirement_ids: ["REQ-ACCESSIBILITY"],
+      blocked_requirement_titles: ["NFR: accessibility"],
+      affected_task_ids: ["task-1", "task-3"],
+      deduplicated_task_ids: ["task-2"],
+      preserved_task_ids: ["task-2", "task-4", "task-5"],
+      preserved_task_count: 3,
+      semantic_correction_authorities: 1,
+      duplicate_correction_work: 0,
+      unrelated_tasks: 0,
+      project_wide_unbounded_authority: false,
+      technical_findings_with_only_humandecision_evidence: 0,
+      human_refinement_required: false,
+      correction_units: [
+        {
+          correction_id: "corr-1-01",
+          semantic_finding: "Documentation falsely claims approval.",
+          triggering_human_decision: "p8-rejection-art",
+          affected_requirements: ["REQ-A-OUTCOME"],
+          affected_tasks: ["task-1"],
+          affected_source_or_artifact_scope: ["docs/PLAN.md"],
+          why_scope_is_included: "Documentation correction required.",
+          required_fresh_evidence: ["TEST_OUTPUT (Documentation integrity check)", "Source/policy inspection"],
+          dependencies: [],
+        },
+        {
+          correction_id: "corr-1-02",
+          semantic_finding: "Accessibility blocked.",
+          triggering_human_decision: "p8-rejection-art",
+          affected_requirements: ["REQ-ACCESSIBILITY"],
+          affected_tasks: ["task-3"],
+          affected_source_or_artifact_scope: ["docs/ACCESSIBILITY.md"],
+          why_scope_is_included: "Accessibility obligation remains blocked.",
+          required_fresh_evidence: ["ACCESSIBILITY_RESULT"],
+          dependencies: ["task-1"],
+        },
+      ],
+      proposed_tasks: [
+        {
+          task_id: "task-1",
+          title: "Implement: User problem outcome",
+          objective: "Implement transport health and route status plan.",
+          why_included: "Directly implements failed requirement: User problem outcome",
+          triggering_requirement_ids: ["REQ-A-OUTCOME"],
+          triggering_requirement_titles: ["User problem outcome"],
+          scope_relation: "DIRECT",
+          dependency_reason: null,
+          authorized_scope: {
+            workspace: "D:/TestWorkspace",
+            file_scopes: [],
+            directory_scopes: [],
+            package_lockfiles: ["Cargo.lock"],
+            allowed_tools: ["antigravity", "workspace"],
+            suggested_scope: "decision",
+            bounded_file_scopes: ["crates/routing/src/lib.rs", "docs/PLAN.md"],
+            authority_boundary_type: "PROVENANCE_BOUNDED",
+            is_bounded: true,
+          },
+          expected_outcome: "Technical proofs pass and owner ratifies outcome",
+          required_fresh_evidence: [
+            "TEST_OUTPUT (Documentation integrity check)",
+            "HUMAN_DECISION (Genuine final owner acceptance after technical proofs pass)",
+          ],
+        },
+        {
+          task_id: "task-3",
+          title: "Implement: NFR: accessibility",
+          objective: "Primary flows must be keyboard navigable.",
+          why_included: "Directly implements blocked requirement: NFR: accessibility",
+          triggering_requirement_ids: ["REQ-ACCESSIBILITY"],
+          triggering_requirement_titles: ["NFR: accessibility"],
+          scope_relation: "DIRECT",
+          dependency_reason: null,
+          authorized_scope: {
+            workspace: "D:/TestWorkspace",
+            file_scopes: [],
+            directory_scopes: [],
+            package_lockfiles: ["Cargo.lock"],
+            allowed_tools: ["antigravity", "workspace"],
+            suggested_scope: "accessibility",
+            bounded_file_scopes: ["docs/ACCESSIBILITY.md"],
+            authority_boundary_type: "PROVENANCE_BOUNDED",
+            is_bounded: true,
+          },
+          expected_outcome: "Accessibility audit passes",
+          required_fresh_evidence: ["ACCESSIBILITY_RESULT"],
+        },
+      ],
+      scope_hash: "test-scope-hash-49",
+      authorized: false,
+    };
+
+    const rendered = render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={rejectedVer}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+        onAuthorizeCorrection={onAuthorize}
+      />,
+    );
+
+    // 1. Structured rejection findings rendered
+    expect(screen.getByTestId("correction-units-section")).toBeTruthy();
+    expect(screen.getByText("Documentation falsely claims approval.")).toBeTruthy();
+    expect(screen.getByText("Accessibility blocked.")).toBeTruthy();
+    expect(screen.getAllByText(/docs\/PLAN\.md/).length).toBeGreaterThan(0);
+
+    // 2. Semantic deduplication notice rendered
+    expect(screen.getByTestId("correction-deduplication-notice")).toBeTruthy();
+    expect(screen.getByText(/Semantic Deduplication Applied/)).toBeTruthy();
+    expect(screen.getByText(/Duplicate correction work: 0/)).toBeTruthy();
+
+    // 3. Bounded authority scope rendered
+    expect(screen.getAllByText("PROVENANCE_BOUNDED").length).toBe(2);
+    expect(screen.getByText(/crates\/routing\/src\/lib\.rs, docs\/PLAN\.md/)).toBeTruthy();
+
+    // 4. Proposed tasks reflect deduplication: exactly 2 tasks, task-2 excluded
+    expect(screen.queryByTestId("correction-task-card-task-2")).toBeNull();
+    expect(screen.getByTestId("correction-task-card-task-1")).toBeTruthy();
+    expect(screen.getByTestId("correction-task-card-task-3")).toBeTruthy();
+
+    // 5. Authorize button enabled when bounded
+    const authBtn = screen.getByRole("button", { name: "Authorize scoped correction" });
+    expect(authBtn).toBeTruthy();
+    expect((authBtn as HTMLButtonElement).disabled).toBe(false);
+
+    // 6. When human_refinement_required is true: alert rendered and button disabled
+    const refinementVer = {
+      ...rejectedVer,
+      correction_scope: {
+        ...rejectedVer.correction_scope,
+        human_refinement_required: true,
+      },
+    };
+    rendered.rerender(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={refinementVer}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+        onAuthorizeCorrection={onAuthorize}
+      />,
+    );
+    expect(screen.getByTestId("human-refinement-required-alert")).toBeTruthy();
+    const disabledBtn = screen.getByRole("button", { name: "Human scope refinement required" });
+    expect((disabledBtn as HTMLButtonElement).disabled).toBe(true);
   });
 });

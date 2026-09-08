@@ -1035,3 +1035,519 @@ fn test_scoped_correction_authorization_matrix() {
     let authenticated_p7 = AuthenticatedP7Execution::from_run(run).expect("authenticated p7");
     assert!(cert_authority.issue_with_p7_execution(&report, &authority, &authenticated_p7).is_err());
 }
+
+#[test]
+fn test_defect_49_duplicate_semantic_correction_matrix() {
+    let (authority, current, store, _signing_key, temp) = create_phase5_test_fixture();
+
+    // 1. Two requirement IDs, same semantic HumanDecision -> ONE semantic correction authority
+    let req_a = authority.revision.contract.requirement_graph.requirements.iter()
+        .find(|r| r.requirement_id == "REQ-A-OUTCOME").unwrap();
+    let req_b = authority.revision.contract.requirement_graph.requirements.iter()
+        .find(|r| r.requirement_id == "REQ-B-PURPOSE").unwrap();
+    assert!(is_human_decision_semantic_equivalent(req_a, req_b));
+
+    // 2. Different titles, equivalent acceptance -> no duplicate execution work
+    // 3. Same title, genuinely different semantics -> separate correction scope
+    let mut req_c = req_a.clone();
+    req_c.requirement_id = "REQ-C-OTHER".into();
+    req_c.intent = "Implement unrelated user profile screen".into();
+    assert!(!is_human_decision_semantic_equivalent(req_a, &req_c));
+
+    // Record rejection on REQ-A-OUTCOME
+    put_user_decision_fixture(
+        &store,
+        &authority,
+        &current,
+        "REQ-A-OUTCOME",
+        false,
+        "REJECTED: 1. Documentation falsely claims approval. 2. State transitions unreliable. 3. Inadequate tests. 4. Accessibility blocked.",
+    );
+
+    // Also record passing evidence for REQ-TEST-AUTOMATED
+    let mut test_meta = test_metadata(
+        &authority,
+        &current,
+        "test-output-evidence-01",
+        EvidenceClass::TestOutput,
+        EvidenceResult::Pass,
+        EvidenceConfidence::StrongDeterministic,
+    );
+    test_meta.requirement_ids = vec!["REQ-TEST-AUTOMATED".into()];
+    store.put_test_fixture(test_meta, b"automated tests passed").unwrap();
+
+    let engine = VerificationEngine::new_for_test(
+        store.clone(),
+        authority.clone(),
+        current.clone(),
+        Vec::new(),
+    ).expect("engine");
+    let report = engine.evaluate(None).expect("evaluate");
+
+    assert_eq!(report.decision.state, CompletionState::FailedVerification);
+
+    let task_specs = vec![
+        ("task-decision-a", vec!["REQ-A-OUTCOME".to_string()]),
+        ("task-decision-b", vec!["REQ-B-PURPOSE".to_string()]),
+        ("task-accessibility", vec!["REQ-ACCESSIBILITY".to_string()]),
+        ("task-automated", vec!["REQ-TEST-AUTOMATED".to_string()]),
+    ];
+    let run = multi_task_p7_execution_fixture(&authority, temp.path(), task_specs);
+
+    let contract_tasks = vec![
+        Task {
+            task_id: "task-decision-a".into(),
+            title: "Implement: User problem outcome".into(),
+            objective: "Implement transport health outcome".into(),
+            requirement_ids: vec!["REQ-A-OUTCOME".into()],
+            dependency_ids: vec![],
+            suggested_scope: "decision".into(),
+            risk: RequirementRisk::High,
+            evidence_obligations: vec![EvidenceObligation {
+                class: EvidenceClass::HumanDecision,
+                minimum_confidence: EvidenceConfidence::HumanAsserted,
+                rationale: "Human decision".into(),
+                required: true,
+            }],
+            status: RequirementStatus::Verified,
+            provenance: "contract".into(),
+        },
+        Task {
+            task_id: "task-decision-b".into(),
+            title: "Implement: User product purpose".into(),
+            objective: "Implement transport health purpose".into(),
+            requirement_ids: vec!["REQ-B-PURPOSE".into()],
+            dependency_ids: vec![],
+            suggested_scope: "decision".into(),
+            risk: RequirementRisk::High,
+            evidence_obligations: vec![EvidenceObligation {
+                class: EvidenceClass::HumanDecision,
+                minimum_confidence: EvidenceConfidence::HumanAsserted,
+                rationale: "Human decision".into(),
+                required: true,
+            }],
+            status: RequirementStatus::Verified,
+            provenance: "contract".into(),
+        },
+        Task {
+            task_id: "task-accessibility".into(),
+            title: "Implement: NFR: accessibility".into(),
+            objective: "Implement accessibility".into(),
+            requirement_ids: vec!["REQ-ACCESSIBILITY".into()],
+            dependency_ids: vec![],
+            suggested_scope: "accessibility".into(),
+            risk: RequirementRisk::High,
+            evidence_obligations: vec![EvidenceObligation {
+                class: EvidenceClass::AccessibilityResult,
+                minimum_confidence: EvidenceConfidence::StrongDeterministic,
+                rationale: "Accessibility check".into(),
+                required: true,
+            }],
+            status: RequirementStatus::Blocked,
+            provenance: "contract".into(),
+        },
+        Task {
+            task_id: "task-automated".into(),
+            title: "Implement: automated tests".into(),
+            objective: "Implement tests".into(),
+            requirement_ids: vec!["REQ-TEST-AUTOMATED".into()],
+            dependency_ids: vec![],
+            suggested_scope: "functional".into(),
+            risk: RequirementRisk::Medium,
+            evidence_obligations: vec![EvidenceObligation {
+                class: EvidenceClass::TestOutput,
+                minimum_confidence: EvidenceConfidence::StrongDeterministic,
+                rationale: "Automated test".into(),
+                required: true,
+            }],
+            status: RequirementStatus::Verified,
+            provenance: "contract".into(),
+        },
+    ];
+
+    let provenance = BTreeMap::from([
+        ("task-decision-a".into(), vec![
+            "crates/routing/src/lib.rs".into(),
+            "docs/PLAN.md".into(),
+            "tests/HealthTest.kt".into(),
+        ]),
+        ("task-accessibility".into(), vec![
+            "docs/ACCESSIBILITY.md".into(),
+            "tests/a11y.test.js".into(),
+        ]),
+    ]);
+
+    let originating_ev = report.requirement_statuses.iter()
+        .find(|s| s.requirement_id == "REQ-A-OUTCOME")
+        .and_then(|s| s.failed_evidence.first())
+        .cloned()
+        .unwrap_or_default();
+
+    let scope = derive_bounded_correction_scope(
+        &authority.revision.seal.mission_id,
+        authority.revision.revision,
+        &authority.revision.contract.requirement_graph.requirements,
+        &contract_tasks,
+        &[],
+        &report.requirement_statuses,
+        &run,
+        &originating_ev,
+        "REJECTED: 1. Documentation falsely claims approval. 2. State transitions unreliable. 3. Inadequate tests. 4. Accessibility blocked.",
+        &provenance,
+    ).expect("derive bounded correction scope");
+
+    // MATRIX 49A1: Exactly 1 semantic correction authority for the duplicate HumanDecision
+    assert_eq!(scope.semantic_correction_authorities, 1);
+
+    // MATRIX 49A2: Duplicate execution work is 0
+    assert_eq!(scope.duplicate_correction_work, 0);
+
+    // MATRIX 49A3 & 49A6: task-decision-b is deduplicated and NOT in affected_task_ids
+    assert!(scope.deduplicated_task_ids.contains(&"task-decision-b".to_string()));
+    assert!(!scope.affected_task_ids.contains(&"task-decision-b".to_string()));
+    assert!(scope.affected_task_ids.contains(&"task-decision-a".to_string()));
+    assert!(scope.affected_task_ids.contains(&"task-accessibility".to_string()));
+    assert_eq!(scope.affected_task_ids.len(), 2);
+
+    // MATRIX 49A5: Deduplicated task preserved in historical tasks (not duplicated in budget/execution)
+    assert!(scope.preserved_task_ids.contains(&"task-decision-b".to_string()));
+    assert!(scope.preserved_task_ids.contains(&"task-automated".to_string()));
+    assert_eq!(scope.preserved_task_ids.len(), 2);
+
+    // MATRIX 49A7: Only one final HumanDecision obligation is requested across the correction
+    let hd_count = scope.proposed_tasks.iter()
+        .flat_map(|t| t.required_fresh_evidence.iter())
+        .filter(|e| e.starts_with("HUMAN_DECISION"))
+        .count();
+    assert_eq!(hd_count, 1);
+}
+
+#[test]
+fn test_defect_49_technical_correction_evidence_matrix() {
+    let (authority, current, store, _signing_key, temp) = create_phase5_test_fixture();
+
+    put_user_decision_fixture(
+        &store,
+        &authority,
+        &current,
+        "REQ-A-OUTCOME",
+        false,
+        "REJECTED: 1. Documentation falsely claims owner approval in docs. 2. State transitions unreliable in routing. 3. Current automated tests inadequate. 4. Accessibility blocked.",
+    );
+
+    let mut test_meta = test_metadata(
+        &authority,
+        &current,
+        "test-output-evidence-01",
+        EvidenceClass::TestOutput,
+        EvidenceResult::Pass,
+        EvidenceConfidence::StrongDeterministic,
+    );
+    test_meta.requirement_ids = vec!["REQ-TEST-AUTOMATED".into()];
+    store.put_test_fixture(test_meta, b"automated tests passed").unwrap();
+
+    let engine = VerificationEngine::new_for_test(
+        store.clone(),
+        authority.clone(),
+        current.clone(),
+        Vec::new(),
+    ).expect("engine");
+    let report = engine.evaluate(None).expect("evaluate");
+
+    let task_specs = vec![
+        ("task-decision-a", vec!["REQ-A-OUTCOME".to_string()]),
+        ("task-accessibility", vec!["REQ-ACCESSIBILITY".to_string()]),
+    ];
+    let run = multi_task_p7_execution_fixture(&authority, temp.path(), task_specs);
+
+    let contract_tasks = vec![
+        Task {
+            task_id: "task-decision-a".into(),
+            title: "Implement: User problem outcome".into(),
+            objective: "Implement transport health outcome".into(),
+            requirement_ids: vec!["REQ-A-OUTCOME".into()],
+            dependency_ids: vec![],
+            suggested_scope: "decision".into(),
+            risk: RequirementRisk::High,
+            evidence_obligations: vec![EvidenceObligation {
+                class: EvidenceClass::HumanDecision,
+                minimum_confidence: EvidenceConfidence::HumanAsserted,
+                rationale: "Human decision".into(),
+                required: true,
+            }],
+            status: RequirementStatus::Verified,
+            provenance: "contract".into(),
+        },
+        Task {
+            task_id: "task-accessibility".into(),
+            title: "Implement: NFR: accessibility".into(),
+            objective: "Implement accessibility".into(),
+            requirement_ids: vec!["REQ-ACCESSIBILITY".into()],
+            dependency_ids: vec![],
+            suggested_scope: "accessibility".into(),
+            risk: RequirementRisk::High,
+            evidence_obligations: vec![EvidenceObligation {
+                class: EvidenceClass::AccessibilityResult,
+                minimum_confidence: EvidenceConfidence::StrongDeterministic,
+                rationale: "Accessibility check".into(),
+                required: true,
+            }],
+            status: RequirementStatus::Blocked,
+            provenance: "contract".into(),
+        },
+    ];
+
+    let provenance = BTreeMap::from([
+        ("task-decision-a".into(), vec![
+            "crates/routing/src/lib.rs".into(),
+            "docs/PLAN.md".into(),
+            "tests/HealthTest.kt".into(),
+        ]),
+        ("task-accessibility".into(), vec![
+            "docs/ACCESSIBILITY.md".into(),
+            "tests/a11y.test.js".into(),
+        ]),
+    ]);
+
+    let originating_ev = report.requirement_statuses.iter()
+        .find(|s| s.requirement_id == "REQ-A-OUTCOME")
+        .and_then(|s| s.failed_evidence.first())
+        .cloned()
+        .unwrap_or_default();
+
+    let scope = derive_bounded_correction_scope(
+        &authority.revision.seal.mission_id,
+        authority.revision.revision,
+        &authority.revision.contract.requirement_graph.requirements,
+        &contract_tasks,
+        &[],
+        &report.requirement_statuses,
+        &run,
+        &originating_ev,
+        "REJECTED: 1. Documentation falsely claims owner approval in docs. 2. State transitions unreliable in routing. 3. Current automated tests inadequate. 4. Accessibility blocked.",
+        &provenance,
+    ).expect("derive bounded correction scope");
+
+    // MATRIX 49B1: Human rejects due to technical implementation defect -> HumanDecision alone CANNOT satisfy correction
+    let task_decision_preview = scope.proposed_tasks.iter().find(|t| t.task_id == "task-decision-a").unwrap();
+    let has_technical_evidence = task_decision_preview.required_fresh_evidence.iter().any(|e| e.starts_with("TEST_OUTPUT"));
+    assert!(has_technical_evidence, "Technical implementation defect must require technical evidence");
+
+    // MATRIX 49B6: Accessibility blocker requires AccessibilityResult
+    let task_a11y_preview = scope.proposed_tasks.iter().find(|t| t.task_id == "task-accessibility").unwrap();
+    assert!(task_a11y_preview.required_fresh_evidence.iter().any(|e| e.starts_with("ACCESSIBILITY_RESULT")));
+
+    // MATRIX 49B7: Documentation defect requires test/policy inspection evidence
+    let doc_unit = scope.correction_units.iter().find(|u| u.semantic_finding.to_lowercase().contains("documentation")).unwrap();
+    assert!(doc_unit.required_fresh_evidence.iter().any(|e| e.contains("TEST_OUTPUT") || e.contains("inspection")));
+
+    // Zero technical findings with only HumanDecision evidence
+    assert_eq!(scope.technical_findings_with_only_humandecision_evidence, 0);
+
+    // MATRIX 49B5: When provenance paths cannot be safely derived, refinement is required
+    let empty_provenance = BTreeMap::new();
+    let empty_scope = derive_bounded_correction_scope(
+        &authority.revision.seal.mission_id,
+        authority.revision.revision,
+        &authority.revision.contract.requirement_graph.requirements,
+        &contract_tasks,
+        &[],
+        &report.requirement_statuses,
+        &run,
+        &originating_ev,
+        "REJECTED: Unmapped failure without bounds.",
+        &empty_provenance,
+    ).expect("scope derived");
+    assert!(empty_scope.human_refinement_required, "Missing boundary provenance must require human refinement");
+    assert!(empty_scope.project_wide_unbounded_authority, "Without provenance paths, authority cannot be bounded");
+}
+
+#[test]
+fn test_defect_49_authorization_precision_matrix() {
+    let (authority, current, store, _signing_key, temp) = create_phase5_test_fixture();
+
+    put_user_decision_fixture(
+        &store,
+        &authority,
+        &current,
+        "REQ-A-OUTCOME",
+        false,
+        "REJECTED: 1. Documentation fabricated. 2. State transitions unreliable. 3. Inadequate automated tests. 4. Accessibility blocked.",
+    );
+
+    let mut test_meta = test_metadata(
+        &authority,
+        &current,
+        "test-output-evidence-01",
+        EvidenceClass::TestOutput,
+        EvidenceResult::Pass,
+        EvidenceConfidence::StrongDeterministic,
+    );
+    test_meta.requirement_ids = vec!["REQ-TEST-AUTOMATED".into()];
+    store.put_test_fixture(test_meta, b"automated tests passed").unwrap();
+
+    let engine = VerificationEngine::new_for_test(
+        store.clone(),
+        authority.clone(),
+        current.clone(),
+        Vec::new(),
+    ).expect("engine");
+    let report = engine.evaluate(None).expect("evaluate");
+
+    let task_specs = vec![
+        ("task-decision-a", vec!["REQ-A-OUTCOME".to_string()]),
+        ("task-decision-b", vec!["REQ-B-PURPOSE".to_string()]),
+        ("task-accessibility", vec!["REQ-ACCESSIBILITY".to_string()]),
+        ("task-automated", vec!["REQ-TEST-AUTOMATED".to_string()]),
+    ];
+    let mut run = multi_task_p7_execution_fixture(&authority, temp.path(), task_specs);
+
+    let contract_tasks = vec![
+        Task {
+            task_id: "task-decision-a".into(),
+            title: "Implement: User problem outcome".into(),
+            objective: "Implement transport health outcome".into(),
+            requirement_ids: vec!["REQ-A-OUTCOME".into()],
+            dependency_ids: vec![],
+            suggested_scope: "decision".into(),
+            risk: RequirementRisk::High,
+            evidence_obligations: vec![EvidenceObligation {
+                class: EvidenceClass::HumanDecision,
+                minimum_confidence: EvidenceConfidence::HumanAsserted,
+                rationale: "Human decision".into(),
+                required: true,
+            }],
+            status: RequirementStatus::Verified,
+            provenance: "contract".into(),
+        },
+        Task {
+            task_id: "task-decision-b".into(),
+            title: "Implement: User product purpose".into(),
+            objective: "Implement transport health purpose".into(),
+            requirement_ids: vec!["REQ-B-PURPOSE".into()],
+            dependency_ids: vec![],
+            suggested_scope: "decision".into(),
+            risk: RequirementRisk::High,
+            evidence_obligations: vec![EvidenceObligation {
+                class: EvidenceClass::HumanDecision,
+                minimum_confidence: EvidenceConfidence::HumanAsserted,
+                rationale: "Human decision".into(),
+                required: true,
+            }],
+            status: RequirementStatus::Verified,
+            provenance: "contract".into(),
+        },
+        Task {
+            task_id: "task-accessibility".into(),
+            title: "Implement: NFR: accessibility".into(),
+            objective: "Implement accessibility".into(),
+            requirement_ids: vec!["REQ-ACCESSIBILITY".into()],
+            dependency_ids: vec![],
+            suggested_scope: "accessibility".into(),
+            risk: RequirementRisk::High,
+            evidence_obligations: vec![EvidenceObligation {
+                class: EvidenceClass::AccessibilityResult,
+                minimum_confidence: EvidenceConfidence::StrongDeterministic,
+                rationale: "Accessibility check".into(),
+                required: true,
+            }],
+            status: RequirementStatus::Blocked,
+            provenance: "contract".into(),
+        },
+        Task {
+            task_id: "task-automated".into(),
+            title: "Implement: automated tests".into(),
+            objective: "Implement tests".into(),
+            requirement_ids: vec!["REQ-TEST-AUTOMATED".into()],
+            dependency_ids: vec![],
+            suggested_scope: "functional".into(),
+            risk: RequirementRisk::Medium,
+            evidence_obligations: vec![EvidenceObligation {
+                class: EvidenceClass::TestOutput,
+                minimum_confidence: EvidenceConfidence::StrongDeterministic,
+                rationale: "Automated test".into(),
+                required: true,
+            }],
+            status: RequirementStatus::Verified,
+            provenance: "contract".into(),
+        },
+    ];
+
+    let provenance = BTreeMap::from([
+        ("task-decision-a".into(), vec![
+            "crates/routing/src/lib.rs".into(),
+            "docs/PLAN.md".into(),
+            "tests/HealthTest.kt".into(),
+        ]),
+        ("task-accessibility".into(), vec![
+            "docs/ACCESSIBILITY.md".into(),
+            "tests/a11y.test.js".into(),
+        ]),
+    ]);
+
+    let originating_ev = report.requirement_statuses.iter()
+        .find(|s| s.requirement_id == "REQ-A-OUTCOME")
+        .and_then(|s| s.failed_evidence.first())
+        .cloned()
+        .unwrap_or_default();
+
+    let scope = derive_bounded_correction_scope(
+        &authority.revision.seal.mission_id,
+        authority.revision.revision,
+        &authority.revision.contract.requirement_graph.requirements,
+        &contract_tasks,
+        &[],
+        &report.requirement_statuses,
+        &run,
+        &originating_ev,
+        "REJECTED: 1. Documentation fabricated. 2. State transitions unreliable. 3. Inadequate automated tests. 4. Accessibility blocked.",
+        &provenance,
+    ).expect("derive bounded correction scope");
+
+    // All 5 Authorization Precision criteria:
+    // 1. SEMANTIC_CORRECTION_AUTHORITIES == 1
+    assert_eq!(scope.semantic_correction_authorities, 1);
+
+    // 2. DUPLICATE_CORRECTION_WORK == 0
+    assert_eq!(scope.duplicate_correction_work, 0);
+
+    // 3. UNRELATED_TASKS == 0
+    assert_eq!(scope.unrelated_tasks, 0);
+
+    // 4. PROJECT_WIDE_UNBOUNDED_AUTHORITY == NO (false)
+    assert_eq!(scope.project_wide_unbounded_authority, false);
+    for t in &scope.proposed_tasks {
+        assert!(t.authorized_scope.is_bounded, "Task {} must be bounded", t.task_id);
+        assert_eq!(t.authorized_scope.authority_boundary_type, "PROVENANCE_BOUNDED");
+        assert!(!t.authorized_scope.bounded_file_scopes.is_empty());
+    }
+
+    // 5. TECHNICAL_FINDINGS_WITH_ONLY_HUMANDECISION_EVIDENCE == 0
+    assert_eq!(scope.technical_findings_with_only_humandecision_evidence, 0);
+
+    // When authorized via canonical affected tasks:
+    let known_requirements = run.tasks.values().flat_map(|t| t.requirement_ids.iter().cloned()).collect::<BTreeSet<_>>();
+    let target_reqs: BTreeSet<String> = scope.affected_task_ids.iter()
+        .filter_map(|tid| run.tasks.get(tid))
+        .flat_map(|t| t.requirement_ids.iter().cloned())
+        .filter(|r| known_requirements.contains(r))
+        .collect();
+
+    let affected = run.authorize_verification_correction(&target_reqs, 2000).expect("authorize");
+    assert_eq!(affected.len(), 2);
+    assert!(affected.contains(&"task-decision-a".to_string()));
+    assert!(affected.contains(&"task-accessibility".to_string()));
+    assert!(!affected.contains(&"task-decision-b".to_string()), "Deduplicated task must NOT be reopened");
+    assert!(!affected.contains(&"task-automated".to_string()), "Unaffected task must NOT be reopened");
+
+    // Execution state: only canonical tasks are Pending/runnable
+    assert_eq!(run.tasks["task-decision-a"].state, ExecutionTaskState::Pending);
+    assert_eq!(run.tasks["task-accessibility"].state, ExecutionTaskState::Pending);
+    assert_eq!(run.tasks["task-decision-b"].state, ExecutionTaskState::FinishedAwaitingVerification);
+    assert_eq!(run.tasks["task-automated"].state, ExecutionTaskState::FinishedAwaitingVerification);
+
+    let runnable = run.runnable_tasks();
+    assert_eq!(runnable.len(), 2);
+    assert!(runnable.contains(&"task-decision-a".to_string()));
+    assert!(runnable.contains(&"task-accessibility".to_string()));
+}

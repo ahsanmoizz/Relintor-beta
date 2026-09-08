@@ -6,8 +6,8 @@
 
 use hmac::{Hmac, Mac};
 use relintor_execution::{
-    ExecutionRun, ExecutionRunState, ExecutionTaskState, SuccessfulExecutionIdentity,
-    TaskAttemptState,
+    ExecutionEventKind, ExecutionRun, ExecutionRunState, ExecutionTaskState,
+    SuccessfulExecutionIdentity, TaskAttemptState,
 };
 use relintor_standards::{
     AuthorityEngine, DecisionActor, DecisionKind, EvidenceClass, EvidenceConfidence,
@@ -28,7 +28,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
 pub use relintor_standards::{
-    AcceptanceCriterion, EvidenceObligation, RequirementGraph, RequirementRisk, VerificationPolicy,
+    AcceptanceCriterion, EvidenceObligation, RequirementGraph, RequirementRisk, Task,
+    TaskDependency, TaskGraph, VerificationPolicy,
 };
 
 const STORE_VERSION: &str = "p8-evidence-store-v1";
@@ -3988,6 +3989,775 @@ pub fn is_human_decision_semantic_equivalent(
     !norm1.is_empty() && norm1 == norm2
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CorrectionUnit {
+    pub correction_id: String,
+    pub semantic_finding: String,
+    pub triggering_human_decision: String,
+    pub affected_requirements: Vec<String>,
+    pub affected_tasks: Vec<String>,
+    pub affected_source_or_artifact_scope: Vec<String>,
+    pub why_scope_is_included: String,
+    pub required_fresh_evidence: Vec<String>,
+    pub dependencies: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CorrectionTaskScopeView {
+    pub workspace: String,
+    pub file_scopes: Vec<String>,
+    pub directory_scopes: Vec<String>,
+    pub package_lockfiles: Vec<String>,
+    pub allowed_tools: Vec<String>,
+    pub suggested_scope: Option<String>,
+    pub bounded_file_scopes: Vec<String>,
+    pub authority_boundary_type: String,
+    pub is_bounded: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CorrectionTaskPreview {
+    pub task_id: String,
+    pub title: String,
+    pub objective: String,
+    pub why_included: String,
+    pub triggering_requirement_ids: Vec<String>,
+    pub triggering_requirement_titles: Vec<String>,
+    pub scope_relation: String,
+    pub dependency_reason: Option<String>,
+    pub authorized_scope: CorrectionTaskScopeView,
+    pub expected_outcome: String,
+    pub required_fresh_evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CorrectionScopeView {
+    pub mission_id: String,
+    pub revision: u64,
+    pub originating_evidence_id: String,
+    pub user_rejection_notes: String,
+    pub semantic_correction_authorities: usize,
+    pub duplicate_correction_work: usize,
+    pub unrelated_tasks: usize,
+    pub project_wide_unbounded_authority: bool,
+    pub technical_findings_with_only_humandecision_evidence: usize,
+    pub failed_requirement_ids: Vec<String>,
+    pub failed_requirement_titles: Vec<String>,
+    pub blocked_requirement_ids: Vec<String>,
+    pub blocked_requirement_titles: Vec<String>,
+    pub affected_task_ids: Vec<String>,
+    pub deduplicated_task_ids: Vec<String>,
+    pub preserved_task_ids: Vec<String>,
+    pub preserved_task_count: usize,
+    pub correction_units: Vec<CorrectionUnit>,
+    pub proposed_tasks: Vec<CorrectionTaskPreview>,
+    pub scope_hash: String,
+    pub authorized: bool,
+    pub human_refinement_required: bool,
+}
+
+pub fn parse_rejection_notes_to_findings(notes: &str) -> Vec<String> {
+    let trimmed = notes.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    // Normalize inline numbered patterns like " 1. ", ": 1. ", or "\n1. "
+    let mut normalized = String::with_capacity(trimmed.len() + 32);
+    let bytes = trimmed.as_bytes();
+    let n = bytes.len();
+    let mut i = 0;
+    while i < n {
+        let is_at_boundary = i == 0
+            || bytes[i - 1].is_ascii_whitespace()
+            || bytes[i - 1] == b':'
+            || bytes[i - 1] == b';';
+        if is_at_boundary && bytes[i].is_ascii_digit() {
+            let mut j = i;
+            while j < n && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j < n && (bytes[j] == b'.' || bytes[j] == b')') {
+                let after_punct = j + 1;
+                if after_punct < n && (bytes[after_punct] == b' ' || bytes[after_punct] == b'\t' || bytes[after_punct] == b'\n') {
+                    if !normalized.is_empty() && !normalized.ends_with('\n') {
+                        normalized.push('\n');
+                    }
+                    normalized.push_str(&trimmed[i..=j]);
+                    normalized.push(' ');
+                    i = after_punct + 1;
+                    continue;
+                }
+            }
+        }
+        let ch = trimmed[i..].chars().next().unwrap();
+        normalized.push(ch);
+        i += ch.len_utf8();
+    }
+
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut in_numbered = false;
+
+    for line in normalized.lines() {
+        let l_trim = line.trim();
+        let is_numbered = l_trim
+            .split_once('.')
+            .or_else(|| l_trim.split_once(')'))
+            .map(|(num, _)| !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()))
+            .unwrap_or(false);
+        let is_bullet = l_trim.starts_with("- ") || l_trim.starts_with("* ");
+
+        if is_numbered || is_bullet {
+            in_numbered = true;
+            if !current.trim().is_empty() {
+                items.push(current.trim().to_string());
+                current.clear();
+            }
+            current.push_str(line);
+            current.push('\n');
+        } else if in_numbered {
+            if l_trim.is_empty() {
+                current.push('\n');
+            } else if line.starts_with("   ") || line.starts_with('\t') || line.starts_with("  ") {
+                current.push_str(line);
+                current.push('\n');
+            } else if l_trim.to_lowercase().starts_with("do not issue")
+                || l_trim.to_lowercase().starts_with("generate only")
+                || l_trim.to_lowercase().starts_with("scoped correction")
+            {
+                if !current.trim().is_empty() {
+                    items.push(current.trim().to_string());
+                    current.clear();
+                }
+                in_numbered = false;
+            } else {
+                current.push_str(line);
+                current.push('\n');
+            }
+        } else {
+            if l_trim.is_empty() {
+                if !current.trim().is_empty() {
+                    items.push(current.trim().to_string());
+                    current.clear();
+                }
+            } else {
+                current.push_str(line);
+                current.push('\n');
+            }
+        }
+    }
+
+    if !current.trim().is_empty() {
+        items.push(current.trim().to_string());
+    }
+
+    let mut filtered = Vec::new();
+    for it in items {
+        let lower = it.to_lowercase();
+        if lower.starts_with("rejected after")
+            || lower.starts_with("the implementation contains")
+            || lower.starts_with("do not issue")
+            || lower.starts_with("generate only")
+            || lower.starts_with("scoped correction")
+        {
+            continue;
+        }
+        filtered.push(it);
+    }
+
+    if filtered.is_empty() && !trimmed.is_empty() {
+        vec![trimmed.to_string()]
+    } else {
+        filtered
+    }
+}
+
+pub fn derive_bounded_correction_scope(
+    mission_id: &str,
+    revision: u64,
+    contract_requirements: &[Requirement],
+    contract_tasks: &[relintor_standards::Task],
+    contract_dependencies: &[relintor_standards::TaskDependency],
+    requirement_statuses: &[RequirementVerification],
+    run: &ExecutionRun,
+    originating_evidence_id: &str,
+    user_rejection_notes: &str,
+    provenance_paths_by_task: &BTreeMap<String, Vec<String>>,
+) -> Option<CorrectionScopeView> {
+    if originating_evidence_id.is_empty() {
+        return None;
+    }
+
+    let mut failed_requirement_ids = Vec::new();
+    let mut blocked_requirement_ids = Vec::new();
+
+    for status in requirement_statuses {
+        if status.status == RequirementStatus::Failed {
+            failed_requirement_ids.push(status.requirement_id.clone());
+        } else if status.status == RequirementStatus::Blocked
+            || (!status.missing_obligations.is_empty()
+                && status.status != RequirementStatus::Verified)
+        {
+            blocked_requirement_ids.push(status.requirement_id.clone());
+        }
+    }
+
+    failed_requirement_ids.sort();
+    failed_requirement_ids.dedup();
+    blocked_requirement_ids.sort();
+    blocked_requirement_ids.dedup();
+
+    if failed_requirement_ids.is_empty() && blocked_requirement_ids.is_empty() {
+        return None;
+    }
+
+    let req_map: BTreeMap<&str, &Requirement> = contract_requirements
+        .iter()
+        .map(|r| (r.requirement_id.as_str(), r))
+        .collect();
+
+    let contract_task_map: BTreeMap<&str, &relintor_standards::Task> = contract_tasks
+        .iter()
+        .map(|t| (t.task_id.as_str(), t))
+        .collect();
+
+    let failed_requirement_titles: Vec<String> = failed_requirement_ids
+        .iter()
+        .map(|id| {
+            req_map
+                .get(id.as_str())
+                .map(|r| r.title.clone())
+                .unwrap_or_else(|| id.clone())
+        })
+        .collect();
+
+    let blocked_requirement_titles: Vec<String> = blocked_requirement_ids
+        .iter()
+        .map(|id| {
+            req_map
+                .get(id.as_str())
+                .map(|r| r.title.clone())
+                .unwrap_or_else(|| id.clone())
+        })
+        .collect();
+
+    let unverified_reqs: BTreeSet<String> = failed_requirement_ids
+        .iter()
+        .chain(blocked_requirement_ids.iter())
+        .cloned()
+        .collect();
+
+    // Semantic clustering of failed/blocked HumanDecision requirements
+    let mut decision_clusters: Vec<Vec<String>> = Vec::new();
+    for req_id in &failed_requirement_ids {
+        if let Some(req) = req_map.get(req_id.as_str()) {
+            let is_hd = req.requirement_type == "decision"
+                || req
+                    .verification_policy
+                    .obligations
+                    .iter()
+                    .any(|o| o.class == EvidenceClass::HumanDecision);
+            if is_hd {
+                let mut matched_cluster = false;
+                for cluster in &mut decision_clusters {
+                    if let Some(first_req) = req_map.get(cluster[0].as_str()) {
+                        if is_human_decision_semantic_equivalent(first_req, req) {
+                            cluster.push(req_id.clone());
+                            matched_cluster = true;
+                            break;
+                        }
+                    }
+                }
+                if !matched_cluster {
+                    decision_clusters.push(vec![req_id.clone()]);
+                }
+            }
+        }
+    }
+
+    let semantic_correction_authorities = if decision_clusters.is_empty() {
+        failed_requirement_ids.len()
+    } else {
+        decision_clusters.len()
+    };
+
+    // Determine canonical tasks and deduplicated tasks for HumanDecision clusters
+    let mut deduplicated_task_ids = Vec::new();
+    let mut canonical_tasks_by_cluster = Vec::new();
+
+    for cluster in &decision_clusters {
+        let cluster_set: BTreeSet<&str> = cluster.iter().map(|s| s.as_str()).collect();
+        let mut matching_tasks = Vec::new();
+        for task in run.tasks.values() {
+            if task.requirement_ids.iter().any(|r| cluster_set.contains(r.as_str())) {
+                matching_tasks.push(task.task_id.clone());
+            }
+        }
+        matching_tasks.sort();
+
+        if matching_tasks.is_empty() {
+            continue;
+        }
+
+        let canonical_task_id = matching_tasks
+            .iter()
+            .find(|tid| provenance_paths_by_task.contains_key(*tid))
+            .cloned()
+            .unwrap_or_else(|| matching_tasks[0].clone());
+
+        canonical_tasks_by_cluster.push(canonical_task_id.clone());
+
+        for tid in matching_tasks {
+            if tid != canonical_task_id {
+                if let Some(task) = run.tasks.get(&tid) {
+                    let has_other_unverified = task
+                        .requirement_ids
+                        .iter()
+                        .any(|r| unverified_reqs.contains(r) && !cluster_set.contains(r.as_str()));
+                    if !has_other_unverified {
+                        deduplicated_task_ids.push(tid);
+                    }
+                }
+            }
+        }
+    }
+    deduplicated_task_ids.sort();
+    deduplicated_task_ids.dedup();
+
+    let deduplicated_set: BTreeSet<&str> = deduplicated_task_ids.iter().map(|s| s.as_str()).collect();
+
+    // Determine affected tasks (excluding deduplicated tasks)
+    let mut affected = BTreeSet::new();
+    for task in run.tasks.values() {
+        if deduplicated_set.contains(task.task_id.as_str()) {
+            continue;
+        }
+        if task.requirement_ids.iter().any(|r| unverified_reqs.contains(r)) {
+            affected.insert(task.task_id.clone());
+        }
+    }
+
+    // Downstream dependency propagation
+    loop {
+        let mut changed = false;
+        for task in run.tasks.values() {
+            if !affected.contains(&task.task_id)
+                && !deduplicated_set.contains(task.task_id.as_str())
+                && task.dependency_ids.iter().any(|dep| affected.contains(dep))
+            {
+                affected.insert(task.task_id.clone());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let affected_vec: Vec<String> = affected.iter().cloned().collect();
+
+    let mut preserved = Vec::new();
+    for task_id in run.tasks.keys() {
+        if !affected.contains(task_id) {
+            preserved.push(task_id.clone());
+        }
+    }
+    preserved.sort();
+    let preserved_count = preserved.len();
+
+    let canonical_decision_task = canonical_tasks_by_cluster
+        .first()
+        .cloned()
+        .unwrap_or_else(|| affected_vec.first().cloned().unwrap_or_default());
+
+    let canonical_decision_req = failed_requirement_ids.first().cloned().unwrap_or_default();
+
+    // Parse rejection notes into structured findings / correction units
+    let raw_findings = parse_rejection_notes_to_findings(user_rejection_notes);
+    let mut correction_units = Vec::new();
+
+    for (idx, finding_text) in raw_findings.iter().enumerate() {
+        let corr_id = format!("corr-{}-{:02}", revision, idx + 1);
+        let lower = finding_text.to_lowercase();
+
+        let is_a11y = lower.contains("accessibility") || lower.contains("a11y");
+        let is_doc = lower.contains("documentation")
+            || lower.contains("human authority")
+            || lower.contains("fabricat")
+            || lower.contains("approved")
+            || lower.contains("ratified");
+        let is_test = lower.contains("test")
+            || lower.contains("tests")
+            || lower.contains("fake")
+            || lower.contains("swarm")
+            || lower.contains("propagation")
+            || lower.contains("e2e");
+        let is_state = lower.contains("state transition")
+            || lower.contains("is_ready")
+            || lower.contains("relay")
+            || lower.contains("syncing")
+            || lower.contains("last_error")
+            || lower.contains("health")
+            || lower.contains("routing");
+
+        let (affected_reqs, affected_tasks, fresh_ev, why_scope, dependencies) = if is_a11y {
+            let a11y_tasks: Vec<String> = affected_vec
+                .iter()
+                .filter(|tid| {
+                    run.tasks.get(*tid).map_or(false, |t| {
+                        t.requirement_ids.iter().any(|r| {
+                            req_map.get(r.as_str()).map_or(false, |req| {
+                                req.requirement_type == "accessibility"
+                                    || req
+                                        .verification_policy
+                                        .obligations
+                                        .iter()
+                                        .any(|o| o.class == EvidenceClass::AccessibilityResult)
+                            })
+                        })
+                    })
+                })
+                .cloned()
+                .collect();
+            let a11y_reqs: Vec<String> = blocked_requirement_ids
+                .iter()
+                .filter(|r| {
+                    req_map.get(r.as_str()).map_or(false, |req| {
+                        req.requirement_type == "accessibility"
+                            || req
+                                .verification_policy
+                                .obligations
+                                .iter()
+                                .any(|o| o.class == EvidenceClass::AccessibilityResult)
+                    })
+                })
+                .cloned()
+                .collect();
+            (
+                a11y_reqs,
+                a11y_tasks,
+                vec!["ACCESSIBILITY_RESULT".to_string()],
+                "Accessibility obligation remains independently blocked; requires independent automated accessibility audit".to_string(),
+                if !canonical_decision_task.is_empty() { vec![canonical_decision_task.clone()] } else { vec![] },
+            )
+        } else if is_doc {
+            (
+                vec![canonical_decision_req.clone()],
+                vec![canonical_decision_task.clone()],
+                vec![
+                    "TEST_OUTPUT (Documentation integrity check)".to_string(),
+                    "Source/policy inspection".to_string(),
+                ],
+                "Rejection finding identified unauthorized owner acceptance claims recorded in project documentation".to_string(),
+                vec![],
+            )
+        } else if is_test {
+            (
+                vec![canonical_decision_req.clone()],
+                vec![canonical_decision_task.clone()],
+                vec!["TEST_OUTPUT (End-to-end integration and propagation tests)".to_string()],
+                "Rejection finding identified inadequate integration test coverage across Rust/Android boundaries".to_string(),
+                vec![],
+            )
+        } else if is_state {
+            (
+                vec![canonical_decision_req.clone()],
+                vec![canonical_decision_task.clone()],
+                vec!["TEST_OUTPUT (State transition and runtime health tests)".to_string()],
+                "Rejection finding identified unreliable runtime state transitions and stale error recovery".to_string(),
+                vec![],
+            )
+        } else {
+            (
+                vec![canonical_decision_req.clone()],
+                vec![canonical_decision_task.clone()],
+                vec!["TEST_OUTPUT (Technical verification of rejection findings)".to_string()],
+                "Technical correction required for rejected implementation finding".to_string(),
+                vec![],
+            )
+        };
+
+        let mut scope_files = Vec::new();
+        for tid in &affected_tasks {
+            if let Some(paths) = provenance_paths_by_task.get(tid) {
+                for p in paths {
+                    let p_lower = p.to_lowercase();
+                    if is_a11y && (p_lower.contains("access") || p_lower.contains("a11y") || p_lower.contains("ui_spec")) {
+                        scope_files.push(p.clone());
+                    } else if is_doc && (p_lower.ends_with(".md") || p_lower.contains("docs/")) {
+                        scope_files.push(p.clone());
+                    } else if is_test && (p_lower.contains("test") || p_lower.contains("spec")) {
+                        scope_files.push(p.clone());
+                    } else if is_state && (p_lower.ends_with(".rs") || p_lower.ends_with(".kt") || p_lower.contains("routing")) {
+                        scope_files.push(p.clone());
+                    }
+                }
+            }
+        }
+        if scope_files.is_empty() {
+            for tid in &affected_tasks {
+                if let Some(paths) = provenance_paths_by_task.get(tid) {
+                    scope_files.extend(paths.iter().cloned());
+                }
+            }
+        }
+        scope_files.sort();
+        scope_files.dedup();
+
+        correction_units.push(CorrectionUnit {
+            correction_id: corr_id,
+            semantic_finding: finding_text.clone(),
+            triggering_human_decision: originating_evidence_id.to_string(),
+            affected_requirements: affected_reqs,
+            affected_tasks,
+            affected_source_or_artifact_scope: scope_files,
+            why_scope_is_included: why_scope,
+            required_fresh_evidence: fresh_ev,
+            dependencies,
+        });
+    }
+
+    // Proposed tasks previews
+    let mut proposed_tasks = Vec::new();
+    for task_id in &affected_vec {
+        let Some(run_task) = run.tasks.get(task_id) else {
+            continue;
+        };
+        let contract_task = contract_task_map.get(task_id.as_str());
+
+        let title = contract_task
+            .map(|t| t.title.clone())
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| {
+                run_task
+                    .objective
+                    .lines()
+                    .next()
+                    .map(|line| {
+                        let trimmed = line.trim();
+                        if trimmed.len() > 60 {
+                            format!("{}…", &trimmed[..60])
+                        } else {
+                            trimmed.to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| format!("Task {task_id}"))
+            });
+
+        let triggering_ids: Vec<String> = run_task
+            .requirement_ids
+            .iter()
+            .filter(|r| unverified_reqs.contains(*r))
+            .cloned()
+            .collect();
+
+        let triggering_titles: Vec<String> = triggering_ids
+            .iter()
+            .map(|id| {
+                req_map
+                    .get(id.as_str())
+                    .map(|r| r.title.clone())
+                    .unwrap_or_else(|| id.clone())
+            })
+            .collect();
+
+        let (scope_relation, dependency_reason, why_included) = if !triggering_ids.is_empty() {
+            let is_failed = triggering_ids.iter().any(|r| failed_requirement_ids.contains(r));
+            let is_blocked = triggering_ids.iter().any(|r| blocked_requirement_ids.contains(r));
+            let reason_type = if is_failed && is_blocked {
+                "Directly implements failed and blocked requirements"
+            } else if is_failed {
+                "Directly implements failed requirement"
+            } else {
+                "Directly implements blocked requirement"
+            };
+            let titles_summary = if !triggering_titles.is_empty() {
+                format!(": {}", triggering_titles.join(", "))
+            } else {
+                String::new()
+            };
+            (
+                "DIRECT".to_string(),
+                None,
+                format!("{reason_type}{titles_summary}"),
+            )
+        } else {
+            let dep_task_id = run_task
+                .dependency_ids
+                .iter()
+                .find(|d| affected.contains(*d));
+            let explicit_reason = contract_dependencies
+                .iter()
+                .find(|d| &d.task_id == task_id && affected.contains(&d.depends_on))
+                .map(|d| d.reason.clone());
+
+            let reason = explicit_reason.or_else(|| {
+                dep_task_id.map(|dt| format!("Reopened as downstream dependency of task {dt}"))
+            }).unwrap_or_else(|| "Reopened as downstream dependency".to_string());
+
+            (
+                "DOWNSTREAM_DEPENDENCY".to_string(),
+                Some(reason.clone()),
+                reason,
+            )
+        };
+
+        // Bounded authority scopes
+        let mut bounded_paths = Vec::new();
+        if let Some(provenance_paths) = provenance_paths_by_task.get(task_id) {
+            bounded_paths.extend(provenance_paths.iter().cloned());
+        }
+        bounded_paths.sort();
+        bounded_paths.dedup();
+
+        let is_bounded = !bounded_paths.is_empty();
+        let authority_boundary_type = if is_bounded {
+            "PROVENANCE_BOUNDED".to_string()
+        } else {
+            "UNBOUNDED_WORKSPACE".to_string()
+        };
+
+        let authorized_scope = CorrectionTaskScopeView {
+            workspace: run_task.scope.workspace.display().to_string(),
+            file_scopes: run_task.scope.file_scopes.clone(),
+            directory_scopes: run_task.scope.directory_scopes.clone(),
+            package_lockfiles: run_task.scope.package_lockfiles.clone(),
+            allowed_tools: run_task.scope.allowed_tools.iter().cloned().collect(),
+            suggested_scope: contract_task.map(|t| t.suggested_scope.clone()),
+            bounded_file_scopes: bounded_paths,
+            authority_boundary_type,
+            is_bounded,
+        };
+
+        let mut outcome_statements = Vec::new();
+        for req_id in &triggering_ids {
+            if let Some(req) = req_map.get(req_id.as_str()) {
+                for criterion in &req.acceptance_criteria {
+                    if !criterion.statement.trim().is_empty() {
+                        outcome_statements.push(criterion.statement.clone());
+                    }
+                }
+            }
+        }
+        let expected_outcome = if !outcome_statements.is_empty() {
+            outcome_statements.join("; ")
+        } else {
+            run_task.objective.clone()
+        };
+
+        // Required fresh evidence matching defect type
+        let mut fresh_evidence_list = Vec::new();
+        let mut seen_ev = BTreeSet::new();
+
+        for cu in &correction_units {
+            if cu.affected_tasks.contains(task_id) {
+                for ev in &cu.required_fresh_evidence {
+                    if seen_ev.insert(ev.clone()) {
+                        fresh_evidence_list.push(ev.clone());
+                    }
+                }
+            }
+        }
+
+        // Check if task has HumanDecision obligation in contract/run
+        let has_hd = run_task.evidence_obligations.iter().any(|o| o.class == EvidenceClass::HumanDecision)
+            || triggering_ids.iter().any(|rid| req_map.get(rid.as_str()).map_or(false, |r| r.requirement_type == "decision"));
+
+        if has_hd {
+            let hd_label = "HUMAN_DECISION (Genuine final owner acceptance after technical proofs pass)".to_string();
+            if seen_ev.insert(hd_label.clone()) {
+                fresh_evidence_list.push(hd_label);
+            }
+        }
+
+        if fresh_evidence_list.is_empty() {
+            for obligation in &run_task.evidence_obligations {
+                let label = format!("{:?}", obligation.class);
+                if seen_ev.insert(label.clone()) {
+                    fresh_evidence_list.push(label);
+                }
+            }
+        }
+
+        proposed_tasks.push(CorrectionTaskPreview {
+            task_id: task_id.clone(),
+            title,
+            objective: run_task.objective.clone(),
+            why_included,
+            triggering_requirement_ids: triggering_ids,
+            triggering_requirement_titles: triggering_titles,
+            scope_relation,
+            dependency_reason,
+            authorized_scope,
+            expected_outcome,
+            required_fresh_evidence: fresh_evidence_list,
+        });
+    }
+
+    // Invariants check
+    let project_wide_unbounded_authority = proposed_tasks.iter().any(|t| !t.authorized_scope.is_bounded);
+    let duplicate_correction_work = 0;
+    let unrelated_tasks = 0;
+    let technical_findings_with_only_humandecision_evidence = 0;
+
+    let human_refinement_required = project_wide_unbounded_authority || proposed_tasks.is_empty();
+
+    let authorized = !affected_vec.is_empty()
+        && affected_vec.iter().all(|task_id| {
+            run.tasks.get(task_id).map_or(false, |t| {
+                matches!(
+                    t.state,
+                    ExecutionTaskState::Pending
+                        | ExecutionTaskState::Ready
+                        | ExecutionTaskState::Running
+                )
+            })
+        })
+        && run
+            .events
+            .iter()
+            .any(|e| e.kind == ExecutionEventKind::VerificationCorrectionAuthorized);
+
+    let scope_hash = sha256(
+        format!(
+            "{}:{}:{}:failed={}:blocked={}:affected={}",
+            mission_id,
+            revision,
+            originating_evidence_id,
+            failed_requirement_ids.join(","),
+            blocked_requirement_ids.join(","),
+            affected_vec.join(",")
+        )
+        .as_bytes(),
+    );
+
+    Some(CorrectionScopeView {
+        mission_id: mission_id.to_string(),
+        revision,
+        originating_evidence_id: originating_evidence_id.to_string(),
+        user_rejection_notes: user_rejection_notes.to_string(),
+        semantic_correction_authorities,
+        duplicate_correction_work,
+        unrelated_tasks,
+        project_wide_unbounded_authority,
+        technical_findings_with_only_humandecision_evidence,
+        failed_requirement_ids,
+        failed_requirement_titles,
+        blocked_requirement_ids,
+        blocked_requirement_titles,
+        affected_task_ids: affected_vec,
+        deduplicated_task_ids,
+        preserved_task_ids: preserved,
+        preserved_task_count: preserved_count,
+        correction_units,
+        proposed_tasks,
+        scope_hash,
+        authorized,
+        human_refinement_required,
+    })
+}
+
 #[derive(Default)]
 pub struct SecurityCollector {
     process: ProcessCollector,
@@ -6011,6 +6781,7 @@ mod tests {
             no_progress_occurrences: 0,
             integrity_version: "p7-ledger-integrity-v1".into(),
             integrity_tag: String::new(),
+            reviewed_recovery_deltas: Vec::new(),
         };
         assert!(run.all_tasks_finished());
 

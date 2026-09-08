@@ -306,6 +306,18 @@ export type VerificationStatus = {
   detail: string;
 };
 
+export type CorrectionUnit = {
+  correction_id: string;
+  semantic_finding: string;
+  triggering_human_decision: string;
+  affected_requirements: string[];
+  affected_tasks: string[];
+  affected_source_or_artifact_scope: string[];
+  why_scope_is_included: string;
+  required_fresh_evidence: string[];
+  dependencies: string[];
+};
+
 export type CorrectionTaskScope = {
   workspace: string;
   file_scopes: string[];
@@ -313,6 +325,9 @@ export type CorrectionTaskScope = {
   package_lockfiles: string[];
   allowed_tools: string[];
   suggested_scope?: string | null;
+  bounded_file_scopes?: string[];
+  authority_boundary_type?: string;
+  is_bounded?: boolean;
 };
 
 export type CorrectionTaskPreview = {
@@ -339,11 +354,19 @@ export type CorrectionScope = {
   blocked_requirement_ids: string[];
   blocked_requirement_titles?: string[];
   affected_task_ids: string[];
+  deduplicated_task_ids?: string[];
   preserved_task_ids: string[];
   preserved_task_count?: number;
+  correction_units?: CorrectionUnit[];
   proposed_tasks?: CorrectionTaskPreview[];
   scope_hash: string;
   authorized: boolean;
+  human_refinement_required?: boolean;
+  semantic_correction_authorities?: number;
+  duplicate_correction_work?: number;
+  unrelated_tasks?: number;
+  project_wide_unbounded_authority?: boolean;
+  technical_findings_with_only_humandecision_evidence?: number;
 };
 
 export type VerificationEvidence = {

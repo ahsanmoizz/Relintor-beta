@@ -1771,7 +1771,48 @@ export function MissionCockpit({
                   </li>
                 )}
               </ul>
+
+              {verification.correction_scope.correction_units && verification.correction_scope.correction_units.length > 0 && (
+                <div className="correction-units-section" data-testid="correction-units-section">
+                  <h4>Structured Rejection Findings ({verification.correction_scope.correction_units.length})</h4>
+                  <ul className="correction-units-list">
+                    {verification.correction_scope.correction_units.map((unit) => (
+                      <li key={unit.correction_id} className="correction-unit-item">
+                        <div className="unit-header">
+                          <span className="unit-id"><code>{unit.correction_id}</code></span>
+                          <strong>{unit.semantic_finding}</strong>
+                        </div>
+                        <div className="unit-details">
+                          <span className="unit-label">Why included:</span> <em>{unit.why_scope_is_included}</em>
+                        </div>
+                        <div className="unit-details">
+                          <span className="unit-label">Required evidence:</span> <code>{unit.required_fresh_evidence.join(", ")}</code>
+                        </div>
+                        {unit.affected_source_or_artifact_scope.length > 0 && (
+                          <div className="unit-details">
+                            <span className="unit-label">Bounded file scope:</span> <code>{unit.affected_source_or_artifact_scope.join(", ")}</code>
+                          </div>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
+
+            {verification.correction_scope.deduplicated_task_ids && verification.correction_scope.deduplicated_task_ids.length > 0 && (
+              <div className="correction-deduplication-notice" data-testid="correction-deduplication-notice">
+                <strong>Semantic Deduplication Applied:</strong> {verification.correction_scope.deduplicated_task_ids.length} semantically duplicate {verification.correction_scope.deduplicated_task_ids.length === 1 ? "task" : "tasks"} (<code>{verification.correction_scope.deduplicated_task_ids.join(", ")}</code>) excluded from execution to prevent duplicate work. Duplicate correction work: 0.
+              </div>
+            )}
+
+            {verification.correction_scope.human_refinement_required && (
+              <div className="panel attention-panel" role="alert" data-testid="human-refinement-required-alert">
+                <span className="panel-kicker">HUMAN REFINEMENT REQUIRED</span>
+                <h4>HUMAN_SCOPE_REFINEMENT_REQUIRED</h4>
+                <p>The proposed correction boundaries could not be safely derived from execution provenance alone. Refine task boundaries before authorization can proceed.</p>
+              </div>
+            )}
 
             <div className="correction-scope-actions-summary">
               <h4>Proposed correction boundary</h4>
@@ -1828,6 +1869,10 @@ export function MissionCockpit({
                       <div className="correction-task-section">
                         <span className="section-label">Authorized scope boundary:</span>
                         <div className="task-scope-box">
+                          <div><span className="scope-field-name">Boundary type:</span> <code className={task.authorized_scope.is_bounded ? "badge-bounded" : "badge-unbounded"}>{task.authorized_scope.authority_boundary_type || (task.authorized_scope.is_bounded ? "PROVENANCE_BOUNDED" : "UNBOUNDED_WORKSPACE")}</code></div>
+                          {task.authorized_scope.bounded_file_scopes && task.authorized_scope.bounded_file_scopes.length > 0 && (
+                            <div><span className="scope-field-name">Bounded files:</span> <code>{task.authorized_scope.bounded_file_scopes.join(", ")}</code></div>
+                          )}
                           <div><span className="scope-field-name">Workspace:</span> <code>{task.authorized_scope.workspace}</code></div>
                           {task.authorized_scope.file_scopes && task.authorized_scope.file_scopes.length > 0 && (
                             <div><span className="scope-field-name">File scope:</span> <code>{task.authorized_scope.file_scopes.join(", ")}</code></div>
@@ -1882,14 +1927,14 @@ export function MissionCockpit({
                 <button
                   className="primary-button"
                   type="button"
-                  disabled={busy}
+                  disabled={busy || Boolean(verification.correction_scope.human_refinement_required)}
                   onClick={() => {
                     if (verification?.correction_scope) {
                       onAuthorizeCorrection?.(verification.correction_scope.scope_hash);
                     }
                   }}
                 >
-                  {busy ? "Authorizing correction…" : "Authorize scoped correction"}
+                  {busy ? "Authorizing correction…" : verification.correction_scope.human_refinement_required ? "Human scope refinement required" : "Authorize scoped correction"}
                 </button>
               )}
             </div>
