@@ -665,6 +665,7 @@ struct VerificationStatusView {
     workflow_stage: String,
     summary: String,
     human_decisions: Vec<HumanDecisionPromptView>,
+    evidence_items: Vec<HumanDecisionEvidenceItemView>,
     collector_activity: Vec<String>,
     collection_failures: Vec<String>,
     detail: String,
@@ -5454,12 +5455,12 @@ fn evaluate_p8(
     Ok((context, report, manifest, collection))
 }
 
-fn human_decision_prompts(
+fn build_verification_evidence_items(
     context: &P8VerificationContext,
     report: &relintor_evidence::VerificationReport,
-) -> Vec<HumanDecisionPromptView> {
+) -> Vec<HumanDecisionEvidenceItemView> {
     let all_artifacts = context.store.list().unwrap_or_default();
-    let evidence_items: Vec<HumanDecisionEvidenceItemView> = context
+    context
         .authority
         .revision
         .contract
@@ -5478,7 +5479,9 @@ fn human_decision_prompts(
                     "FAIL".to_string()
                 } else if req_status.missing_obligations.contains(&EvidenceClass::HumanDecision) {
                     "PENDING_DECISION".to_string()
-                } else if !req_status.missing_obligations.is_empty() || !req_status.missing_acceptance_criteria.is_empty() {
+                } else if !req_status.missing_obligations.is_empty()
+                    || !req_status.missing_acceptance_criteria.is_empty()
+                {
                     "BLOCKED".to_string()
                 } else {
                     "MISSING".to_string()
@@ -5486,12 +5489,42 @@ fn human_decision_prompts(
             } else {
                 "MISSING".to_string()
             };
+
             let matching_art = all_artifacts
                 .iter()
-                .find(|art| art.metadata.requirement_ids.contains(&req.requirement_id));
+                .find(|art| art.metadata.requirement_ids.contains(&req.requirement_id))
+                .or_else(|| {
+                    req_status_opt
+                        .and_then(|s| s.failed_evidence.first())
+                        .and_then(|id| all_artifacts.iter().find(|art| &art.metadata.evidence_id == id))
+                })
+                .or_else(|| {
+                    req_status_opt
+                        .and_then(|s| s.evidence_ids.first())
+                        .and_then(|id| all_artifacts.iter().find(|art| &art.metadata.evidence_id == id))
+                })
+                .or_else(|| {
+                    all_artifacts.iter().find(|art| {
+                        context
+                            .authority
+                            .revision
+                            .contract
+                            .requirement_graph
+                            .requirements
+                            .iter()
+                            .any(|other| {
+                                other.requirement_id != req.requirement_id
+                                    && art.metadata.requirement_ids.contains(&other.requirement_id)
+                                    && relintor_evidence::is_human_decision_semantic_equivalent(req, other)
+                            })
+                    })
+                });
+
             if let Some(art) = matching_art {
                 let class_str = format!("{:?}", art.metadata.class);
-                let command = if art.metadata.class == EvidenceClass::SecurityScan {
+                let command = if art.metadata.class == EvidenceClass::HumanDecision {
+                    "Explicit User Decision".to_string()
+                } else if art.metadata.class == EvidenceClass::SecurityScan {
                     "npm run security-scan".to_string()
                 } else if art.metadata.class == EvidenceClass::TestOutput {
                     "npm run test".to_string()
@@ -5513,7 +5546,40 @@ fn human_decision_prompts(
                     art.digest
                 );
                 let is_pass = art.metadata.result == relintor_evidence::EvidenceResult::Pass;
-                let detail_snippet = if is_pass {
+                let detail_snippet = if art.metadata.class == EvidenceClass::HumanDecision {
+                    let user_notes = context
+                        .store
+                        .load(&art.metadata.evidence_id)
+                        .ok()
+                        .and_then(|stored| {
+                            if let Ok(obs) = serde_json::from_slice::<
+                                relintor_evidence::ExplicitUserDecisionObservation,
+                            >(&stored.bytes)
+                            {
+                                let n = obs.notes.trim().to_string();
+                                if !n.is_empty() {
+                                    return Some(n);
+                                }
+                            }
+                            let raw = String::from_utf8_lossy(&stored.bytes).trim().to_string();
+                            if !raw.is_empty() && !raw.starts_with('{') {
+                                Some(raw)
+                            } else {
+                                None
+                            }
+                        });
+                    if is_pass {
+                        match user_notes {
+                            Some(notes) => format!("User approved: {}", notes),
+                            None => "User approved the completed result.".to_string(),
+                        }
+                    } else {
+                        match user_notes {
+                            Some(notes) => format!("User rejected: {}", notes),
+                            None => "User rejected the completed result.".to_string(),
+                        }
+                    }
+                } else if is_pass {
                     format!("{} passed deterministically with exit code 0", class_str)
                 } else {
                     format!("{} evaluated with result {:?}", class_str, art.metadata.result)
@@ -5538,16 +5604,36 @@ fn human_decision_prompts(
                     detail_snippet,
                 }
             } else {
+                let default_class = req
+                    .verification_policy
+                    .obligations
+                    .first()
+                    .map(|o| format!("{:?}", o.class))
+                    .unwrap_or_default();
+                let detail_snippet = if status == "BLOCKED" {
+                    format!(
+                        "Blocked: missing {} evidence or collector dependency",
+                        default_class
+                    )
+                } else if status == "PENDING_DECISION" {
+                    "Awaiting explicit user decision.".to_string()
+                } else {
+                    "No automated evidence collector is bound to this requirement.".to_string()
+                };
                 HumanDecisionEvidenceItemView {
                     requirement_id: req.requirement_id.clone(),
                     requirement_title: req.title.clone(),
                     intent: req.intent.clone(),
-                    status,
+                    status: status.clone(),
                     evidence_id: String::new(),
-                    evidence_class: String::new(),
+                    evidence_class: default_class,
                     command: String::new(),
                     exit_code: None,
-                    result: String::new(),
+                    result: if status == "BLOCKED" {
+                        "Blocked".to_string()
+                    } else {
+                        status
+                    },
                     relevant_files: Vec::new(),
                     artifact_path: String::new(),
                     mission_id: context.authority.revision.seal.mission_id.clone(),
@@ -5555,12 +5641,17 @@ fn human_decision_prompts(
                     source_fingerprint: context.authority.workspace_fingerprint.clone(),
                     environment_fingerprint: context.authority.environment_fingerprint.clone(),
                     timestamp_ms: 0,
-                    detail_snippet: String::new(),
+                    detail_snippet,
                 }
             }
         })
-        .collect();
+        .collect()
+}
 
+fn human_decision_prompts(
+    context: &P8VerificationContext,
+    report: &relintor_evidence::VerificationReport,
+) -> Vec<HumanDecisionPromptView> {
     let any_user_rejected = report.requirement_statuses.iter().any(|status| {
         status.failed_evidence.iter().any(|evidence_id| {
             context
@@ -5572,6 +5663,7 @@ fn human_decision_prompts(
     if any_user_rejected {
         return Vec::new();
     }
+    let evidence_items = build_verification_evidence_items(context, report);
 
     report
         .requirement_statuses
@@ -5658,6 +5750,7 @@ fn verification_view(
         })
         .collect::<Vec<_>>();
     let human_decisions = human_decision_prompts(context, report);
+    let evidence_items = build_verification_evidence_items(context, report);
     let failed_count = report
         .requirement_statuses
         .iter()
@@ -5674,19 +5767,23 @@ fn verification_view(
     let collection_failures = collection
         .blocked_external
         .iter()
-        .map(|item| {
+        .filter_map(|item| {
             if item.contains("TestOutput") {
-                "The project test command could not be completed.".to_string()
+                Some("The project test command could not be completed.".to_string())
             } else if item.contains("AccessibilityResult") {
-                "The accessibility check could not be completed.".to_string()
+                Some("The accessibility check could not be completed.".to_string())
             } else if item.contains("PerformanceResult") {
-                "The performance check could not be completed.".to_string()
+                Some("The performance check could not be completed.".to_string())
             } else if item.contains("SecurityScan") {
-                "The security check could not be completed.".to_string()
+                Some("The security check could not be completed.".to_string())
             } else if item.contains("HumanDecision") {
-                "Relintor is waiting for your decision.".to_string()
+                if user_rejected {
+                    None
+                } else {
+                    Some("Relintor is waiting for your decision.".to_string())
+                }
             } else {
-                "A required automated verification check could not be completed.".to_string()
+                Some("A required automated verification check could not be completed.".to_string())
             }
         })
         .collect::<BTreeSet<_>>()
@@ -5757,7 +5854,13 @@ fn verification_view(
             .blocked_external
             .iter()
             .map(|item| format!("{}: {}", item.requirement_id, item.reason))
-            .chain(collection.blocked_external.iter().cloned())
+            .chain(collection.blocked_external.iter().filter_map(|item| {
+                if user_rejected && (item.contains("HUMAN_DECISION") || item.contains("HumanDecision")) {
+                    None
+                } else {
+                    Some(item.clone())
+                }
+            }))
             .collect(),
         accepted_risks: report
             .decision
@@ -5774,6 +5877,7 @@ fn verification_view(
         workflow_stage: stage.into(),
         summary: summary.into(),
         human_decisions,
+        evidence_items,
         collector_activity: collection
             .executed
             .iter()

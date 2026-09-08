@@ -1,7 +1,7 @@
 import type { ExecutionStatus, VerificationStatus } from "./backend";
 
 export type SemanticTone = "neutral" | "info" | "success" | "warning" | "danger";
-export type MissionPrimaryAction = "none" | "setup" | "run" | "continue" | "recover" | "verify" | "view_verification";
+export type MissionPrimaryAction = "none" | "setup" | "run" | "continue" | "recover" | "verify" | "view_verification" | "review_correction";
 
 export type MissionPresentation = {
   headline: string;
@@ -262,7 +262,7 @@ export function missionPresentation(
         supporting: verification.summary,
         badge: "Needs attention",
         tone: "warning",
-        primaryAction: "none",
+        primaryAction: "review_correction",
         recoveryRequired: false,
         verifiedComplete: false,
       };

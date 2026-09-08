@@ -1305,3 +1305,36 @@ h2 {
   font-style: italic;
   color: var(--warning);
 }
+
+.correction-panel {
+  border-left: 4px solid var(--warning);
+}
+
+.correction-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin: 12px 0 16px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.correction-facts div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.correction-facts span {
+  font: 11px "IBM Plex Mono", "Courier New", monospace;
+  text-transform: uppercase;
+  color: var(--muted);
+  letter-spacing: .05em;
+}
+
+.correction-facts strong {
+  font-size: 13px;
+  color: var(--ink);
+}
+

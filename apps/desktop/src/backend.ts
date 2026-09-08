@@ -299,6 +299,7 @@ export type VerificationStatus = {
     criterion_ids: string[];
     evidence_items?: HumanDecisionEvidenceItem[];
   }>;
+  evidence_items?: HumanDecisionEvidenceItem[];
   collector_activity: string[];
   collection_failures: string[];
   detail: string;

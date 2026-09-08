@@ -49,6 +49,7 @@ import {
   type ProjectSummary,
   type VerificationStatus,
   type VerificationEvidence,
+  type HumanDecisionEvidenceItem,
   type AntigravityHealth,
   type AntigravitySetupView,
 } from "./backend";
@@ -764,7 +765,20 @@ function VerificationSection({ projectId }: { projectId: string }) {
         <div><span className="panel-kicker">CURRENT RESULT</span><strong>{verificationView.label}</strong><p>{verificationView.supporting}</p></div>
         <div className="verification-stages" aria-label="Completion stages"><span><small>Execution</small><strong>{status.execution_run_id !== "browser-preview" ? "Recorded" : "Waiting"}</strong></span><span><small>Evidence</small><strong>{status.evidence_count > 0 ? "Captured" : "Waiting"}</strong></span><span><small>Verification</small><strong>{verificationView.verifiedComplete ? "Passed" : attentionItems.length ? "Needs attention" : "Waiting"}</strong></span></div>
       </div>}
-      {!verificationView.verifiedComplete && attentionItems.length > 0 && <section className="attention-list" aria-labelledby="verification-attention-title"><h3 id="verification-attention-title">What needs attention</h3><p>{status?.summary || "Relintor needs more evidence before this mission can be complete."}</p><details className="technical-details"><summary>Technical evidence details</summary><ul>{attentionItems.map((item) => <li key={item}>{item}</li>)}</ul></details></section>}
+      {!verificationView.verifiedComplete && attentionItems.length > 0 && (
+        <section className="attention-list" aria-labelledby="verification-attention-title">
+          <h3 id="verification-attention-title">What needs attention</h3>
+          <p>{status?.summary || "Relintor needs more evidence before this mission can be complete."}</p>
+          {status?.evidence_items && status.evidence_items.length > 0 ? (
+            <TechnicalEvidenceReview items={status.evidence_items} />
+          ) : (
+            <details className="technical-details">
+              <summary>Technical evidence details</summary>
+              <ul>{attentionItems.map((item) => <li key={item}>{item}</li>)}</ul>
+            </details>
+          )}
+        </section>
+      )}
       {!canStart && !verificationView.verifiedComplete && <p className="info-callout">Waiting for execution evidence.</p>}
       <div className="result-actions">
         {!verificationView.verifiedComplete && <button className="primary-button" type="button" disabled={busy || !canStart} onClick={() => void runVerification()}>{busy ? "Verifying…" : "Verify work"}</button>}
@@ -1455,6 +1469,80 @@ function AntigravitySetupCard({ health, onRefresh }: { health: AntigravityHealth
   </section>;
 }
 
+export function TechnicalEvidenceReview({
+  items,
+  fallback,
+}: {
+  items?: HumanDecisionEvidenceItem[];
+  fallback?: { requirement_id: string; criterion_ids: string[] };
+}) {
+  const count = items?.length ?? 0;
+  return (
+    <details className="technical-details" open>
+      <summary>Technical Evidence Review ({count} {count === 1 ? "requirement" : "requirements"})</summary>
+      {items && items.length > 0 ? (
+        <div className="evidence-digest-list">
+          {items.map((item) => (
+            <div key={`${item.requirement_id}-${item.evidence_id || "no-evidence"}`} className="evidence-item-card">
+              <div className="evidence-item-header">
+                <span className={`status-badge tone-${item.status === "PASS" ? "success" : item.status === "PENDING_DECISION" ? "warning" : item.status === "FAIL" ? "danger" : "neutral"}`}>
+                  {item.status}
+                </span>
+                <strong className="evidence-item-title">{item.requirement_title}</strong>
+              </div>
+              <p className="evidence-item-intent">{item.intent}</p>
+              {item.evidence_id ? (
+                <div className="evidence-item-support">
+                  <div className="evidence-meta-row">
+                    <span>Type: <code>{item.evidence_class}</code></span>
+                    <span>Command: <code>{item.command}</code></span>
+                    {item.exit_code !== null && <span>Exit: <code>{item.exit_code}</code></span>}
+                    <span>Result: <code>{item.result}</code></span>
+                  </div>
+                  {item.relevant_files.length > 0 && (
+                    <p className="evidence-files-summary">
+                      Files: <code>{item.relevant_files.slice(0, 4).join(", ")}{item.relevant_files.length > 4 ? ` +${item.relevant_files.length - 4} more` : ""}</code>
+                    </p>
+                  )}
+                  <details className="evidence-provenance-details">
+                    <summary>Provenance &amp; Artifact Details</summary>
+                    <dl className="technical-list">
+                      <div><dt>Evidence ID</dt><dd><code>{item.evidence_id}</code></dd></div>
+                      <div><dt>Artifact</dt><dd><code>{item.artifact_path}</code></dd></div>
+                      <div><dt>Mission / Rev</dt><dd><code>{item.mission_id} (rev {item.revision})</code></dd></div>
+                      <div><dt>Source Fingerprint</dt><dd><code>{item.source_fingerprint}</code></dd></div>
+                      <div><dt>Environment</dt><dd><code>{item.environment_fingerprint}</code></dd></div>
+                      <div><dt>Timestamp</dt><dd>{item.timestamp_ms ? new Date(item.timestamp_ms).toISOString() : "N/A"}</dd></div>
+                      {item.detail_snippet && <div><dt>Collector Output</dt><dd><span>{item.detail_snippet}</span></dd></div>}
+                    </dl>
+                  </details>
+                </div>
+              ) : (
+                <div className="evidence-item-support">
+                  <div className="evidence-meta-row">
+                    {item.evidence_class && <span>Type: <code>{item.evidence_class}</code></span>}
+                    <span>Result: <code>{item.result || "Missing"}</code></span>
+                  </div>
+                  <p className="evidence-pending-note">
+                    {item.detail_snippet || (item.status === "PENDING_DECISION" ? "Awaiting your explicit Human Decision (Approve / Reject above)." : "No automated evidence collector is bound to this requirement.")}
+                  </p>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : fallback ? (
+        <dl>
+          <div><dt>Requirement</dt><dd><code>{fallback.requirement_id}</code></dd></div>
+          <div><dt>Criteria</dt><dd><code>{fallback.criterion_ids.join(", ")}</code></dd></div>
+        </dl>
+      ) : (
+        <p className="form-hint">No technical evidence items recorded.</p>
+      )}
+    </details>
+  );
+}
+
 export function MissionCockpit({ status, verification, antigravity, busy, revalidating, verificationNotice, onCommand, onVerify, onDecision, onRefresh }: { status: ExecutionStatus; verification: VerificationStatus | null; antigravity: AntigravityHealth | null; busy: boolean; revalidating: boolean; verificationNotice: string | null; onCommand: (command: (id: string) => Promise<ExecutionStatus>) => Promise<void>; onVerify: () => void; onDecision: (requirementId: string, approved: boolean, notes: string) => void; onRefresh: () => void }) {
   const [decisionNotes, setDecisionNotes] = useState("");
   const executorReady = antigravity?.adapter_ready === true;
@@ -1465,7 +1553,9 @@ export function MissionCockpit({ status, verification, antigravity, busy, revali
   const currentTaskId = status.active_task || status.recovery_task_id || status.runnable_tasks[0] || null;
   const currentTask = status.active_task
     ? status.current_task_objective || "Current authorized task"
-    : status.recovery_task_objective || status.current_task_objective || (currentTaskId ? "Next authorized task" : "No runnable task is available");
+    : verification?.workflow_stage === "USER_DECISION_REJECTED"
+      ? "Correction review required before next task"
+      : status.recovery_task_objective || status.current_task_objective || (currentTaskId ? "Next authorized task" : "No runnable task is available");
   const taskNumber = Math.min(status.total_tasks, status.finished_tasks + 1);
   const remainingTasks = Math.max(0, status.total_tasks - status.finished_tasks - (running ? 1 : 0));
   const recoveryMessage = revalidating
@@ -1503,6 +1593,7 @@ export function MissionCockpit({ status, verification, antigravity, busy, revali
       : null;
 
   const primaryControl = (() => {
+    if (presentation.primaryAction === "review_correction") return <button className="primary-button" type="button" onClick={() => document.getElementById("correction-scope-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}>Review correction scope</button>;
     if (presentation.primaryAction === "run") return <button className="primary-button" type="button" disabled={busy} onClick={() => void onCommand(stepExecution)}>Run next task</button>;
     if (presentation.primaryAction === "continue") return <button className="primary-button" type="button" disabled={busy} onClick={() => void onCommand(continueExecution)}>Continue mission</button>;
     if (presentation.primaryAction === "recover") {
@@ -1522,7 +1613,7 @@ export function MissionCockpit({ status, verification, antigravity, busy, revali
 
     <section className="panel current-task-panel" aria-labelledby="current-task-title">
       <div className="task-heading"><div><span className="panel-kicker">{running ? "CURRENT TASK" : "NEXT TASK"}</span><h3 id="current-task-title">{currentTask}</h3></div>{status.total_tasks > 0 && <span className="task-position">Task {taskNumber} of {status.total_tasks}</span>}</div>
-      <p>{status.finished_tasks} completed · {running ? "1 running · " : ""}{remainingTasks} remaining</p>
+      <p>{status.finished_tasks} completed · {running ? "1 running · " : ""}{verification?.workflow_stage === "USER_DECISION_REJECTED" ? "0 ready (correction review required)" : `${remainingTasks} remaining`}</p>
       {completedTaskMessage && <p className="success-text">{completedTaskMessage}</p>}
       {(running || currentTaskId) && <p className="form-hint">Relintor continues while the executor shows healthy progress and ownership. Watchdog, no-progress, lease, and adapter safety boundaries still stop an unsafe or stalled attempt.</p>}
       <div className="primary-action-row">{primaryControl}{presentation.primaryAction === "setup" && <span className="action-guidance">Use Set up Antigravity above. Relintor will enable execution after readiness is verified.</span>}{running && <button className="danger-button" type="button" disabled={busy} onClick={() => void onCommand(stopExecution)}>Stop safely</button>}</div>
@@ -1565,66 +1656,32 @@ export function MissionCockpit({ status, verification, antigravity, busy, revali
           </button>
         </div>
         <p className="form-hint">Only your action can satisfy this decision. Relintor and Antigravity cannot approve it for you.</p>
-        <details className="technical-details" open>
-          <summary>Technical Evidence Review ({pendingDecision.evidence_items?.length ?? 0} requirements)</summary>
-          {pendingDecision.evidence_items && pendingDecision.evidence_items.length > 0 ? (
-            <div className="evidence-digest-list">
-              {pendingDecision.evidence_items.map((item) => (
-                <div key={`${item.requirement_id}-${item.evidence_id}`} className="evidence-item-card">
-                  <div className="evidence-item-header">
-                    <span className={`status-badge tone-${item.status === "PASS" ? "success" : item.status === "PENDING_DECISION" ? "warning" : item.status === "FAIL" ? "danger" : "neutral"}`}>
-                      {item.status}
-                    </span>
-                    <strong className="evidence-item-title">{item.requirement_title}</strong>
-                  </div>
-                  <p className="evidence-item-intent">{item.intent}</p>
-                  {item.evidence_id ? (
-                    <div className="evidence-item-support">
-                      <div className="evidence-meta-row">
-                        <span>Type: <code>{item.evidence_class}</code></span>
-                        <span>Command: <code>{item.command}</code></span>
-                        {item.exit_code !== null && <span>Exit: <code>{item.exit_code}</code></span>}
-                        <span>Result: <code>{item.result}</code></span>
-                      </div>
-                      {item.relevant_files.length > 0 && (
-                        <p className="evidence-files-summary">
-                          Files: <code>{item.relevant_files.slice(0, 4).join(", ")}{item.relevant_files.length > 4 ? ` +${item.relevant_files.length - 4} more` : ""}</code>
-                        </p>
-                      )}
-                      <details className="evidence-provenance-details">
-                        <summary>Provenance &amp; Artifact Details</summary>
-                        <dl className="technical-list">
-                          <div><dt>Evidence ID</dt><dd><code>{item.evidence_id}</code></dd></div>
-                          <div><dt>Artifact</dt><dd><code>{item.artifact_path}</code></dd></div>
-                          <div><dt>Mission / Rev</dt><dd><code>{item.mission_id} (rev {item.revision})</code></dd></div>
-                          <div><dt>Source Fingerprint</dt><dd><code>{item.source_fingerprint}</code></dd></div>
-                          <div><dt>Environment</dt><dd><code>{item.environment_fingerprint}</code></dd></div>
-                          <div><dt>Timestamp</dt><dd>{item.timestamp_ms ? new Date(item.timestamp_ms).toISOString() : "N/A"}</dd></div>
-                          {item.detail_snippet && <div><dt>Collector Output</dt><dd><span>{item.detail_snippet}</span></dd></div>}
-                        </dl>
-                      </details>
-                    </div>
-                  ) : (
-                    <p className="evidence-pending-note">
-                      {item.status === "PENDING_DECISION" ? "Awaiting your explicit Human Decision (Approve / Reject above)." : "No automated evidence collector is bound to this requirement."}
-                    </p>
-                  )}
-                </div>
-              ))}
-            </div>
-          ) : (
-            <dl>
-              <div><dt>Requirement</dt><dd><code>{pendingDecision.requirement_id}</code></dd></div>
-              <div><dt>Criteria</dt><dd><code>{pendingDecision.criterion_ids.join(", ")}</code></dd></div>
-            </dl>
-          )}
-        </details>
+        <TechnicalEvidenceReview
+          items={pendingDecision.evidence_items || verification?.evidence_items}
+          fallback={{ requirement_id: pendingDecision.requirement_id, criterion_ids: pendingDecision.criterion_ids }}
+        />
       </section>
     )}
-    {!presentation.verifiedComplete && !pendingDecision && (verificationAttention.length > 0 || (verification && verificationView.tone === "warning")) && <section className="panel attention-panel" aria-labelledby="verification-blocker-title"><span className="panel-kicker">VERIFICATION</span><h3 id="verification-blocker-title">Verification needs attention</h3><p>{verification?.summary || verificationView.supporting}</p>{verification?.collection_failures.length ? <ul>{verification.collection_failures.map((item) => <li key={item}>{item}</li>)}</ul> : null}{verificationAttention.length > 0 && <details className="technical-details"><summary>Technical evidence details</summary><ul>{verificationAttention.map((item) => <li key={item}>{item}</li>)}</ul></details>}</section>}
+    {verification?.workflow_stage === "USER_DECISION_REJECTED" && (
+      <section className="panel attention-panel correction-panel" id="correction-scope-panel" aria-labelledby="correction-scope-title">
+        <span className="panel-kicker">CORRECTION SCOPE</span>
+        <h3 id="correction-scope-title">Human Rejection Recorded — Review Correction Scope</h3>
+        <p>You rejected the completed result. Relintor halted automatic execution to preserve human authority and will not launch an unguided worker or issue a completion certificate.</p>
+        <div className="correction-facts">
+          <div><span>Execution state</span><strong>{status.finished_tasks} of {status.total_tasks} tasks completed · Preserved</strong></div>
+          <div><span>Recovery state</span><strong>{status.recovery_state}</strong></div>
+          <div><span>Next step</span><strong>Prepare authorized correction</strong></div>
+        </div>
+        <p className="form-hint">
+          All {status.finished_tasks} historical task attempts remain completed and recorded in the tamper-evident ledger. Relintor will not restart execution or retry tasks without explicit human review and governance.
+        </p>
+        <TechnicalEvidenceReview items={verification.evidence_items || []} />
+      </section>
+    )}
+    {!presentation.verifiedComplete && !pendingDecision && verification?.workflow_stage !== "USER_DECISION_REJECTED" && (verificationAttention.length > 0 || (verification && verificationView.tone === "warning")) && <section className="panel attention-panel" aria-labelledby="verification-blocker-title"><span className="panel-kicker">VERIFICATION</span><h3 id="verification-blocker-title">Verification needs attention</h3><p>{verification?.summary || verificationView.supporting}</p>{verification?.collection_failures.length ? <ul>{verification.collection_failures.map((item) => <li key={item}>{item}</li>)}</ul> : null}{verificationAttention.length > 0 && <details className="technical-details"><summary>Technical evidence details</summary><ul>{verificationAttention.map((item) => <li key={item}>{item}</li>)}</ul></details>}</section>}
 
     <div className="mission-summary-grid" aria-label="Mission summary">
-      <section><span>Progress</span><strong>{status.finished_tasks} of {status.total_tasks} complete</strong><small>{status.runnable_tasks.length} ready to run</small></section>
+      <section><span>Progress</span><strong>{status.finished_tasks} of {status.total_tasks} complete</strong><small>{verification?.workflow_stage === "USER_DECISION_REJECTED" ? "Correction required" : `${status.runnable_tasks.length} ready to run`}</small></section>
       <section><span>Executor</span><strong>{executorReady ? "Antigravity ready" : "Setup required"}</strong><small>{running ? "Working now" : humanStatus(status.watchdog_state, "Waiting")}</small></section>
       <section><span>Verification</span><strong>{verificationView.label}</strong><small>{verificationView.supporting}</small></section>
     </div>

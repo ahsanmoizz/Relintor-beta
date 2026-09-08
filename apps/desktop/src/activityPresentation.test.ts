@@ -408,7 +408,7 @@ describe("user-visible mission state model", () => {
       const m = missionPresentation(exec, ver, true);
       expect(m.headline).toBe("Correction required");
       expect(m.badge).toBe("Needs attention");
-      expect(m.primaryAction).toBe("none");
+      expect(m.primaryAction).toBe("review_correction");
       expect(m.verifiedComplete).toBe(false);
     });
   });
