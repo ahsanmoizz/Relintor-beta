@@ -1666,7 +1666,7 @@ export function MissionCockpit({
     ...(verification?.missing_evidence || []),
     ...(verification?.failed_checks || []),
   ];
-  const pendingDecision = verification?.workflow_stage === "WAITING_FOR_USER_DECISION"
+  const pendingDecision = verification?.workflow_stage === "WAITING_FOR_USER_DECISION" && (verification?.final_human_acceptance_eligible ?? true)
     ? verification.human_decisions[0] || null
     : null;
   const decisionIdentity = pendingDecision

@@ -31,9 +31,10 @@ use relintor_execution::{
 };
 use relintor_standards::{
     builtin_registry, scope_fingerprint, AcceptanceCriterion, ApplicabilityContext,
-    AuthorityEngine, EvidenceClass, EvidenceConfidence, EvidenceObligation, FactValue,
-    ProjectAuthorityInput, ProjectRequirementSeed, RequirementPriority, RequirementRisk,
-    RequirementSource, RequirementStatus, TrustedSigner, TrustedSignerSet, VerificationPolicy,
+    ApplicabilityOutcome, AuthorityEngine, EvidenceClass, EvidenceConfidence, EvidenceObligation,
+    FactValue, ProjectAuthorityInput, ProjectRequirementSeed, Requirement, RequirementPriority,
+    RequirementRisk, RequirementSource, RequirementStatus, TrustedSigner, TrustedSignerSet,
+    VerificationPolicy,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -1923,3 +1924,577 @@ fn test_defect_51_scope_refinement_matrix() {
     assert_eq!(authorized_run.tasks["task-decision-a"].state, ExecutionTaskState::Pending);
     assert_eq!(authorized_run.tasks["task-accessibility"].state, ExecutionTaskState::Pending);
 }
+
+fn to_requirement(seed: &ProjectRequirementSeed) -> Requirement {
+    Requirement {
+        requirement_id: seed.requirement_id.clone().unwrap_or_default(),
+        title: seed.title.clone(),
+        intent: seed.intent.clone(),
+        source: seed.source.clone(),
+        priority: seed.priority,
+        applicability: ApplicabilityOutcome::Applicable,
+        acceptance_criteria: seed.acceptance_criteria.clone(),
+        verification_policy: seed.verification_policy.clone(),
+        dependencies: seed.dependencies.clone(),
+        risk: seed.risk,
+        status: RequirementStatus::Verified,
+        implementation_links: Vec::new(),
+        evidence_links: Vec::new(),
+        explicit_exceptions: Vec::new(),
+        sealed_hash: None,
+        requirement_type: seed.requirement_type.clone(),
+        origin_rule_id: None,
+        revision: 1,
+        schema_version: 1,
+    }
+}
+
+#[test]
+fn test_defect_52_acceptance_ordering_matrix() {
+    let req_decision = seed_decision_req("REQ-DECISION", "Final Owner Outcome", "Owner intent");
+    let req_a11y = seed_machine_req("REQ-A11Y", "Accessibility", EvidenceClass::AccessibilityResult);
+    let req_test = seed_machine_req("REQ-TEST", "Unit and Integration Tests", EvidenceClass::TestOutput);
+    let req_build = seed_machine_req("REQ-BUILD", "Build Compilation", EvidenceClass::BuildOutput);
+
+    let contract_reqs = vec![
+        to_requirement(&req_decision),
+        to_requirement(&req_a11y),
+        to_requirement(&req_test),
+        to_requirement(&req_build),
+    ];
+
+    // CASE 1: 15/15 complete, Accessibility BLOCKED -> FINAL_HUMAN_PROMPT: NO, TECHNICAL_CORRECTION: YES
+    let report_case1 = VerificationReport {
+        verification_run_id: "v-case1".into(),
+        authority_digest: "auth1".into(),
+        requirement_statuses: vec![
+            RequirementVerification {
+                requirement_id: "REQ-A11Y".into(),
+                status: RequirementStatus::Blocked,
+                evidence_ids: vec![],
+                missing_obligations: vec![],
+                missing_acceptance_criteria: vec![],
+                stale_evidence: vec![],
+                failed_evidence: vec![],
+                reason: "accessibility collector blocked".into(),
+            },
+            RequirementVerification {
+                requirement_id: "REQ-TEST".into(),
+                status: RequirementStatus::Verified,
+                evidence_ids: vec!["ev-test".into()],
+                missing_obligations: vec![],
+                missing_acceptance_criteria: vec![],
+                stale_evidence: vec![],
+                failed_evidence: vec![],
+                reason: "verified".into(),
+            },
+            RequirementVerification {
+                requirement_id: "REQ-BUILD".into(),
+                status: RequirementStatus::Verified,
+                evidence_ids: vec!["ev-build".into()],
+                missing_obligations: vec![],
+                missing_acceptance_criteria: vec![],
+                stale_evidence: vec![],
+                failed_evidence: vec![],
+                reason: "verified".into(),
+            },
+            RequirementVerification {
+                requirement_id: "REQ-DECISION".into(),
+                status: RequirementStatus::ImplementedUnverified,
+                evidence_ids: vec![],
+                missing_obligations: vec![EvidenceClass::HumanDecision],
+                missing_acceptance_criteria: vec!["REQ-DECISION-criterion".into()],
+                stale_evidence: vec![],
+                failed_evidence: vec![],
+                reason: "waiting".into(),
+            },
+        ],
+        decision: CompletionDecision {
+            state: CompletionState::BlockedExternal,
+            reason: "blocked".into(),
+            deterministic_gates: vec![],
+            accepted_risks: vec![],
+            blocked_external: vec![BlockedExternalRecord {
+                requirement_id: "REQ-A11Y".into(),
+                dependency: "collector".into(),
+                reason: "blocked".into(),
+            }],
+        },
+        builder_claim: None,
+        coverage_total: 4,
+        coverage_accounted: 2,
+        evidence_manifest_hash: "man1".into(),
+        p7_ledger_digest: None,
+        ai_judgements: vec![],
+        integrity_tag: "tag1".into(),
+    };
+
+    let elig_case1 = is_final_human_acceptance_eligible(&contract_reqs, &report_case1, &["REQ-A11Y: blocked".into()], 0, 0, true, true);
+    assert!(!elig_case1.eligible, "Case 1: blocked accessibility MUST suppress final human prompt");
+    assert!(!elig_case1.required_machine_requirements_verified);
+    assert!(elig_case1.technical_blockers_count > 0);
+
+    // CASE 2: 15/15 complete, required technical TestOutput missing -> FINAL_HUMAN_PROMPT: NO
+    let mut report_case2 = report_case1.clone();
+    report_case2.requirement_statuses[0].status = RequirementStatus::Verified;
+    report_case2.requirement_statuses[1].status = RequirementStatus::ImplementedUnverified;
+    report_case2.requirement_statuses[1].missing_obligations = vec![EvidenceClass::TestOutput];
+    report_case2.decision.blocked_external = vec![];
+    report_case2.decision.state = CompletionState::StoppedIncomplete;
+
+    let elig_case2 = is_final_human_acceptance_eligible(&contract_reqs, &report_case2, &[], 0, 0, true, true);
+    assert!(!elig_case2.eligible, "Case 2: missing TestOutput MUST suppress final human prompt");
+    assert!(elig_case2.missing_required_evidence_count > 0);
+
+    // CASE 3: 15/15 complete, stale evidence -> FINAL_HUMAN_PROMPT: NO
+    let mut report_case3 = report_case1.clone();
+    report_case3.requirement_statuses[0].status = RequirementStatus::Verified;
+    report_case3.requirement_statuses[1].stale_evidence = vec!["ev-test-stale".into()];
+    report_case3.decision.blocked_external = vec![];
+    report_case3.decision.state = CompletionState::StoppedIncomplete;
+
+    let elig_case3 = is_final_human_acceptance_eligible(&contract_reqs, &report_case3, &[], 0, 0, true, true);
+    assert!(!elig_case3.eligible, "Case 3: stale evidence MUST suppress final human prompt");
+    assert!(elig_case3.stale_required_evidence_count > 0);
+
+    // CASE 4: 15/15 complete, failed test -> FINAL_HUMAN_PROMPT: NO
+    let mut report_case4 = report_case1.clone();
+    report_case4.requirement_statuses[0].status = RequirementStatus::Verified;
+    report_case4.requirement_statuses[1].status = RequirementStatus::Failed;
+    report_case4.requirement_statuses[1].failed_evidence = vec!["ev-test-failed".into()];
+    report_case4.decision.blocked_external = vec![];
+    report_case4.decision.state = CompletionState::FailedVerification;
+
+    let elig_case4 = is_final_human_acceptance_eligible(&contract_reqs, &report_case4, &[], 0, 0, true, true);
+    assert!(!elig_case4.eligible, "Case 4: failed test MUST suppress final human prompt");
+    assert!(elig_case4.failed_required_evidence_count > 0);
+
+    // CASE 5: 15/15 complete, failed build -> FINAL_HUMAN_PROMPT: NO
+    let mut report_case5 = report_case1.clone();
+    report_case5.requirement_statuses[0].status = RequirementStatus::Verified;
+    report_case5.requirement_statuses[2].status = RequirementStatus::Failed;
+    report_case5.requirement_statuses[2].failed_evidence = vec!["ev-build-failed".into()];
+    report_case5.decision.blocked_external = vec![];
+    report_case5.decision.state = CompletionState::FailedVerification;
+
+    let elig_case5 = is_final_human_acceptance_eligible(&contract_reqs, &report_case5, &[], 0, 0, true, true);
+    assert!(!elig_case5.eligible, "Case 5: failed build MUST suppress final human prompt");
+    assert!(elig_case5.failed_required_evidence_count > 0);
+
+    // CASE 6: all machine requirements verified, human acceptance exists -> FINAL_HUMAN_PROMPT: YES
+    let mut report_case6 = report_case1.clone();
+    report_case6.requirement_statuses[0].status = RequirementStatus::Verified;
+    report_case6.requirement_statuses[1].status = RequirementStatus::Verified;
+    report_case6.requirement_statuses[2].status = RequirementStatus::Verified;
+    report_case6.requirement_statuses[3].status = RequirementStatus::ImplementedUnverified;
+    report_case6.decision.blocked_external = vec![];
+    report_case6.decision.state = CompletionState::StoppedIncomplete;
+
+    let elig_case6 = is_final_human_acceptance_eligible(&contract_reqs, &report_case6, &[], 0, 0, true, true);
+    assert!(elig_case6.eligible, "Case 6: all machine requirements verified MUST enable human prompt");
+    assert!(elig_case6.required_machine_requirements_verified);
+    assert_eq!(elig_case6.technical_blockers_count, 0);
+
+    // CASE 7: all machine requirements verified, no human requirement in contract -> VERIFIED COMPLETE eligibility: YES
+    let machine_only_reqs = vec![
+        to_requirement(&req_a11y),
+        to_requirement(&req_test),
+        to_requirement(&req_build),
+    ];
+    let report_case7 = VerificationReport {
+        verification_run_id: "v-case7".into(),
+        authority_digest: "auth7".into(),
+        requirement_statuses: vec![
+            RequirementVerification {
+                requirement_id: "REQ-A11Y".into(),
+                status: RequirementStatus::Verified,
+                evidence_ids: vec!["ev-a11y".into()],
+                missing_obligations: vec![],
+                missing_acceptance_criteria: vec![],
+                stale_evidence: vec![],
+                failed_evidence: vec![],
+                reason: "verified".into(),
+            },
+            RequirementVerification {
+                requirement_id: "REQ-TEST".into(),
+                status: RequirementStatus::Verified,
+                evidence_ids: vec!["ev-test".into()],
+                missing_obligations: vec![],
+                missing_acceptance_criteria: vec![],
+                stale_evidence: vec![],
+                failed_evidence: vec![],
+                reason: "verified".into(),
+            },
+            RequirementVerification {
+                requirement_id: "REQ-BUILD".into(),
+                status: RequirementStatus::Verified,
+                evidence_ids: vec!["ev-build".into()],
+                missing_obligations: vec![],
+                missing_acceptance_criteria: vec![],
+                stale_evidence: vec![],
+                failed_evidence: vec![],
+                reason: "verified".into(),
+            },
+        ],
+        decision: CompletionDecision {
+            state: CompletionState::VerifiedComplete,
+            reason: "all verified".into(),
+            deterministic_gates: vec![],
+            accepted_risks: vec![],
+            blocked_external: vec![],
+        },
+        builder_claim: None,
+        coverage_total: 3,
+        coverage_accounted: 3,
+        evidence_manifest_hash: "man7".into(),
+        p7_ledger_digest: None,
+        ai_judgements: vec![],
+        integrity_tag: "tag7".into(),
+    };
+
+    let elig_case7 = is_final_human_acceptance_eligible(&machine_only_reqs, &report_case7, &[], 0, 0, true, true);
+    assert!(elig_case7.eligible, "Case 7: all machine verified enables completion eligibility");
+    assert_eq!(report_case7.decision.state, CompletionState::VerifiedComplete, "VerifiedComplete directly reachable with zero artificial human prompt");
+}
+
+#[test]
+fn test_defect_53_and_55_executor_cannot_self_certify() {
+    let (authority, current, store, signing_key, temp) = create_phase5_test_fixture();
+
+    // 1. Executor claims "success" or "approved" in text, but test fails
+    let mut metadata = test_metadata(
+        &authority,
+        &current,
+        "test-failure-meta",
+        EvidenceClass::TestOutput,
+        EvidenceResult::Fail,
+        EvidenceConfidence::StrongDeterministic,
+    );
+    metadata.requirement_ids = vec!["REQ-TEST-AUTOMATED".into()];
+    metadata.accepted_criteria.insert("REQ-TEST-AUTOMATED-criterion".into());
+    store.put_test_fixture(metadata, b"{\"test\":\"failed\",\"executor_claim\":\"tests passed completely approved\"}").expect("put failure");
+
+    let engine = VerificationEngine::new_for_test(
+        store.clone(),
+        authority.clone(),
+        current.clone(),
+        Vec::new(),
+    ).expect("engine");
+
+    let report = engine.evaluate(Some("executor claim: completely done and approved by owner".into())).expect("eval");
+    assert_ne!(report.decision.state, CompletionState::VerifiedComplete, "Executor self-claim CANNOT override failing test");
+    assert_eq!(report.decision.state, CompletionState::FailedVerification);
+    let test_status = report.requirement_statuses.iter().find(|s| s.requirement_id == "REQ-TEST-AUTOMATED").expect("test status");
+    assert_eq!(test_status.status, RequirementStatus::Failed, "Automated test MUST be recorded as Failed despite executor claim");
+
+    // 2. Executor-generated completion certificate without verified authority is rejected
+    let p7 = p7_execution_fixture(
+        &authority,
+        temp.path(),
+        vec!["REQ-TEST-AUTOMATED".into()],
+    );
+    let comp_auth = CompletionAuthority::new(signing_key.to_bytes().as_ref()).expect("comp auth");
+    let cert_result = comp_auth.issue_with_p7_execution(&report, &authority, &p7);
+    assert!(cert_result.is_err(), "Issuing certificate on unverified state MUST fail");
+}
+
+#[test]
+fn test_defect_54_and_56_autonomous_technical_correction_and_ux() {
+    let (authority, _current, _store, _signing_key, temp) = create_phase5_test_fixture();
+
+    let task_specs = vec![
+        ("task-decision-a", vec!["REQ-A-OUTCOME".to_string()]),
+        ("task-decision-b", vec!["REQ-B-PURPOSE".to_string()]),
+        ("task-accessibility", vec!["REQ-ACCESSIBILITY".to_string()]),
+        ("task-automated", vec!["REQ-TEST-AUTOMATED".to_string()]),
+    ];
+    let run = multi_task_p7_execution_fixture(&authority, temp.path(), task_specs);
+
+    let contract_tasks = vec![
+        Task {
+            task_id: "task-accessibility".into(),
+            title: "Implement: NFR: accessibility".into(),
+            objective: "Primary flows must be keyboard navigable and accessible".into(),
+            requirement_ids: vec!["REQ-ACCESSIBILITY".into()],
+            dependency_ids: vec![],
+            suggested_scope: "accessibility".into(),
+            risk: RequirementRisk::High,
+            evidence_obligations: vec![EvidenceObligation {
+                class: EvidenceClass::AccessibilityResult,
+                minimum_confidence: EvidenceConfidence::StrongDeterministic,
+                rationale: "Accessibility check".into(),
+                required: true,
+            }],
+            status: RequirementStatus::Blocked,
+            provenance: "contract".into(),
+        },
+    ];
+
+    let report = VerificationReport {
+        verification_run_id: "v-a11y".into(),
+        authority_digest: "auth".into(),
+        requirement_statuses: vec![
+            RequirementVerification {
+                requirement_id: "REQ-ACCESSIBILITY".into(),
+                status: RequirementStatus::Blocked,
+                evidence_ids: vec![],
+                missing_obligations: vec![],
+                missing_acceptance_criteria: vec![],
+                stale_evidence: vec![],
+                failed_evidence: vec![],
+                reason: "accessibility blocked".into(),
+            },
+        ],
+        decision: CompletionDecision {
+            state: CompletionState::BlockedExternal,
+            reason: "blocked".into(),
+            deterministic_gates: vec![],
+            accepted_risks: vec![],
+            blocked_external: vec![BlockedExternalRecord {
+                requirement_id: "REQ-ACCESSIBILITY".into(),
+                dependency: "collector".into(),
+                reason: "blocked".into(),
+            }],
+        },
+        builder_claim: None,
+        coverage_total: 1,
+        coverage_accounted: 0,
+        evidence_manifest_hash: "man".into(),
+        p7_ledger_digest: None,
+        ai_judgements: vec![],
+        integrity_tag: "tag".into(),
+    };
+
+    // Autonomous derivation: task-accessibility has no provenance for itself, but project provenance contains accessibility paths
+    let mut provenance = BTreeMap::new();
+    provenance.insert("task-other".into(), vec![
+        "docs/ACCESSIBILITY.md".into(),
+        "apps/ui/AccessibilityScan.kt".into(),
+        "tests/a11y.test.js".into(),
+    ]);
+
+    let scope = derive_bounded_correction_scope(
+        &authority.revision.seal.mission_id,
+        authority.revision.revision,
+        &authority.revision.contract.requirement_graph.requirements,
+        &contract_tasks,
+        &[],
+        &report.requirement_statuses,
+        &run,
+        "ev-origin",
+        "REJECTED: accessibility blocked",
+        &provenance,
+        None, // Normal user flow with NO manual refinement entered
+    ).expect("derive bounded correction scope");
+
+    // NORMAL USER DOES NOT ENTER PATHS:
+    // Autonomous boundary derivation successfully bounds task-accessibility to safe files!
+    let a11y_task = scope.proposed_tasks.iter().find(|t| t.task_id == "task-accessibility").expect("proposed task");
+    assert!(a11y_task.authorized_scope.is_bounded, "Task must be autonomously bounded");
+    assert_eq!(a11y_task.authorized_scope.authority_boundary_type, "AUTONOMOUS_BOUNDED");
+    assert!(!scope.human_refinement_required, "Normal user flow MUST NOT require human scope refinement");
+    assert_eq!(scope.missing_provenance_tasks.len(), 0);
+    assert!(a11y_task.authorized_scope.bounded_file_scopes.contains(&"docs/ACCESSIBILITY.md".to_string()));
+    assert!(a11y_task.authorized_scope.bounded_file_scopes.contains(&"tests/a11y.test.js".to_string()));
+}
+
+#[test]
+fn test_defect_57_and_58_human_escalation_boundary_and_progress_guard() {
+    let mut guard = CorrectionProgressGuard::default();
+
+    // 1. Initial attempt fails
+    assert!(guard.evaluate_progress("signature-failure-a").is_ok());
+
+    // 2. Repeat failure with same signature increments count
+    assert!(guard.evaluate_progress("signature-failure-a").is_ok());
+
+    // 3. Repeat failure 3 times triggers technical delivery blocked escalation
+    let blocked_err = guard.evaluate_progress("signature-failure-a").expect_err("must block");
+    assert!(blocked_err.contains("TECHNICAL_DELIVERY_BLOCKED"), "Escalation must be TECHNICAL_DELIVERY_BLOCKED");
+    assert!(blocked_err.contains("Identical failure repeated"));
+}
+
+#[test]
+fn test_defect_59_phase5_safe_fixture_lifecycle() {
+    let (authority, _current, _store, _signing_key, temp) = create_phase5_test_fixture();
+
+    let contract_reqs = vec![
+        to_requirement(&seed_decision_req("REQ-A-OUTCOME", "User problem outcome", "Problem solved")),
+        to_requirement(&seed_decision_req("REQ-B-PURPOSE", "User product purpose", "Product purpose met")),
+        to_requirement(&seed_machine_req("REQ-ACCESSIBILITY", "NFR: accessibility", EvidenceClass::AccessibilityResult)),
+        to_requirement(&seed_machine_req("REQ-TEST-AUTOMATED", "NFR: tests", EvidenceClass::TestOutput)),
+    ];
+
+    // INITIAL PHASE5 STATE:
+    // Historical rejection exists, accessibility blocked, 15 tasks completed
+    let report_initial = VerificationReport {
+        verification_run_id: "v-init".into(),
+        authority_digest: "auth".into(),
+        requirement_statuses: vec![
+            RequirementVerification {
+                requirement_id: "REQ-A-OUTCOME".into(),
+                status: RequirementStatus::Failed,
+                evidence_ids: vec!["ev-user-rejection".into()],
+                missing_obligations: vec![],
+                missing_acceptance_criteria: vec![],
+                stale_evidence: vec![],
+                failed_evidence: vec!["ev-user-rejection".into()],
+                reason: "human rejected".into(),
+            },
+            RequirementVerification {
+                requirement_id: "REQ-B-PURPOSE".into(),
+                status: RequirementStatus::Failed,
+                evidence_ids: vec!["ev-user-rejection".into()],
+                missing_obligations: vec![],
+                missing_acceptance_criteria: vec![],
+                stale_evidence: vec![],
+                failed_evidence: vec!["ev-user-rejection".into()],
+                reason: "human rejected".into(),
+            },
+            RequirementVerification {
+                requirement_id: "REQ-ACCESSIBILITY".into(),
+                status: RequirementStatus::Blocked,
+                evidence_ids: vec![],
+                missing_obligations: vec![],
+                missing_acceptance_criteria: vec![],
+                stale_evidence: vec![],
+                failed_evidence: vec![],
+                reason: "accessibility blocked".into(),
+            },
+            RequirementVerification {
+                requirement_id: "REQ-TEST-AUTOMATED".into(),
+                status: RequirementStatus::Verified,
+                evidence_ids: vec!["ev-tests".into()],
+                missing_obligations: vec![],
+                missing_acceptance_criteria: vec![],
+                stale_evidence: vec![],
+                failed_evidence: vec![],
+                reason: "verified".into(),
+            },
+        ],
+        decision: CompletionDecision {
+            state: CompletionState::FailedVerification,
+            reason: "rejection and blocked checks".into(),
+            deterministic_gates: vec![],
+            accepted_risks: vec![],
+            blocked_external: vec![BlockedExternalRecord {
+                requirement_id: "REQ-ACCESSIBILITY".into(),
+                dependency: "collector".into(),
+                reason: "blocked".into(),
+            }],
+        },
+        builder_claim: None,
+        coverage_total: 4,
+        coverage_accounted: 1,
+        evidence_manifest_hash: "man".into(),
+        p7_ledger_digest: None,
+        ai_judgements: vec![],
+        integrity_tag: "tag".into(),
+    };
+
+    let elig_init = is_final_human_acceptance_eligible(&contract_reqs, &report_initial, &["REQ-ACCESSIBILITY: blocked".into()], 0, 1, true, true);
+    assert!(!elig_init.eligible, "Initial Phase 5 state MUST NOT be eligible for final human acceptance");
+    assert!(!elig_init.required_machine_requirements_verified);
+    assert!(elig_init.technical_blockers_count > 0);
+
+    // AFTER SIMULATED CORRECTION:
+    // Technical defects fixed, fresh accessibility proof collected, fresh tests collected
+    let mut report_corrected = VerificationReport {
+        verification_run_id: "v-corr".into(),
+        authority_digest: "auth".into(),
+        requirement_statuses: vec![
+            RequirementVerification {
+                requirement_id: "REQ-A-OUTCOME".into(),
+                status: RequirementStatus::ImplementedUnverified,
+                evidence_ids: vec![],
+                missing_obligations: vec![EvidenceClass::HumanDecision],
+                missing_acceptance_criteria: vec!["REQ-OUTCOME-criterion".into()],
+                stale_evidence: vec![],
+                failed_evidence: vec![],
+                reason: "waiting fresh human approval".into(),
+            },
+            RequirementVerification {
+                requirement_id: "REQ-B-PURPOSE".into(),
+                status: RequirementStatus::ImplementedUnverified,
+                evidence_ids: vec![],
+                missing_obligations: vec![EvidenceClass::HumanDecision],
+                missing_acceptance_criteria: vec!["REQ-PURPOSE-criterion".into()],
+                stale_evidence: vec![],
+                failed_evidence: vec![],
+                reason: "waiting fresh human approval".into(),
+            },
+            RequirementVerification {
+                requirement_id: "REQ-ACCESSIBILITY".into(),
+                status: RequirementStatus::Verified,
+                evidence_ids: vec!["ev-fresh-a11y".into()],
+                missing_obligations: vec![],
+                missing_acceptance_criteria: vec![],
+                stale_evidence: vec![],
+                failed_evidence: vec![],
+                reason: "verified fresh proof".into(),
+            },
+            RequirementVerification {
+                requirement_id: "REQ-TEST-AUTOMATED".into(),
+                status: RequirementStatus::Verified,
+                evidence_ids: vec!["ev-fresh-tests".into()],
+                missing_obligations: vec![],
+                missing_acceptance_criteria: vec![],
+                stale_evidence: vec![],
+                failed_evidence: vec![],
+                reason: "verified fresh proof".into(),
+            },
+        ],
+        decision: CompletionDecision {
+            state: CompletionState::StoppedIncomplete,
+            reason: "human decision pending".into(),
+            deterministic_gates: vec![],
+            accepted_risks: vec![],
+            blocked_external: vec![],
+        },
+        builder_claim: None,
+        coverage_total: 4,
+        coverage_accounted: 2,
+        evidence_manifest_hash: "man-corr".into(),
+        p7_ledger_digest: None,
+        ai_judgements: vec![],
+        integrity_tag: "tag-corr".into(),
+    };
+
+    let elig_corrected = is_final_human_acceptance_eligible(&contract_reqs, &report_corrected, &[], 0, 0, true, true);
+    assert!(elig_corrected.eligible, "After machine correction, final human acceptance MUST become eligible");
+    assert!(elig_corrected.required_machine_requirements_verified);
+    assert_eq!(elig_corrected.technical_blockers_count, 0);
+
+    let p7 = p7_execution_fixture(
+        &authority,
+        temp.path(),
+        vec!["REQ-A-OUTCOME".into(), "REQ-B-PURPOSE".into()],
+    );
+
+    let auth_key = b"p8-test-local-key";
+    report_corrected.p7_ledger_digest = Some(p7.ledger_digest.clone());
+    report_corrected.authority_digest = authority.identity_digest().unwrap();
+    report_corrected.authenticate(auth_key).expect("authenticate");
+
+    // Historical rejection preserved in store
+    let comp_auth = CompletionAuthority::new(auth_key).expect("comp auth");
+    // Certificate still denied until new human decision is approved
+    assert!(comp_auth.issue_with_p7_execution(&report_corrected, &authority, &p7).is_err(), "Certificate MUST remain denied while human decision pending");
+
+    // AFTER GENUINE NEW APPROVAL:
+    let mut report_approved = report_corrected.clone();
+    report_approved.requirement_statuses[0].status = RequirementStatus::Verified;
+    report_approved.requirement_statuses[0].missing_obligations = vec![];
+    report_approved.requirement_statuses[0].missing_acceptance_criteria = vec![];
+    report_approved.requirement_statuses[1].status = RequirementStatus::Verified;
+    report_approved.requirement_statuses[1].missing_obligations = vec![];
+    report_approved.requirement_statuses[1].missing_acceptance_criteria = vec![];
+    report_approved.decision.state = CompletionState::VerifiedComplete;
+    report_approved.p7_ledger_digest = Some(p7.ledger_digest.clone());
+    report_approved.authority_digest = authority.identity_digest().unwrap();
+    report_approved.authenticate(auth_key).expect("authenticate");
+
+    let cert = comp_auth.issue_with_p7_execution(&report_approved, &authority, &p7).expect("certificate issue");
+    assert_eq!(cert.final_state, CompletionState::VerifiedComplete);
+}
+

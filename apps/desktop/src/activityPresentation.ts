@@ -234,7 +234,18 @@ export function missionPresentation(
         verifiedComplete: false,
       };
     }
-    if (verification.workflow_stage === "WAITING_FOR_USER_DECISION") {
+    if (verification.workflow_stage === "TECHNICAL_DELIVERY_BLOCKED") {
+      return {
+        headline: "Technical delivery blocked",
+        supporting: verification.summary || "Relintor cannot currently complete the sealed mission because technical correction stalled.",
+        badge: "Blocked",
+        tone: "warning",
+        primaryAction: "view_verification",
+        recoveryRequired: false,
+        verifiedComplete: false,
+      };
+    }
+    if (verification.workflow_stage === "WAITING_FOR_USER_DECISION" && verification.final_human_acceptance_eligible !== false) {
       return {
         headline: "Your decision is needed",
         supporting: verification.summary,

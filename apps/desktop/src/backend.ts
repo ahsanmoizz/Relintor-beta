@@ -299,6 +299,8 @@ export type VerificationStatus = {
     criterion_ids: string[];
     evidence_items?: HumanDecisionEvidenceItem[];
   }>;
+  final_human_acceptance_eligible?: boolean;
+  final_human_acceptance_reasons?: string[];
   evidence_items?: HumanDecisionEvidenceItem[];
   correction_scope?: CorrectionScope | null;
   collector_activity: string[];

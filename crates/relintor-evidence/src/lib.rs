@@ -4886,12 +4886,59 @@ pub fn derive_bounded_correction_scope(
             }
         }
 
+        let mut autonomous_bounded = false;
+        if bounded_paths.is_empty() {
+            // Autonomous safe boundary analysis:
+            // 1. From matching correction units affecting this task
+            for cu in &correction_units {
+                if cu.affected_tasks.contains(task_id) {
+                    bounded_paths.extend(cu.affected_source_or_artifact_scope.iter().cloned());
+                }
+            }
+            // 2. From tasks sharing the triggering requirements
+            if bounded_paths.is_empty() {
+                for (other_tid, other_task) in &run.tasks {
+                    if other_tid != task_id && other_task.requirement_ids.iter().any(|r| triggering_ids.contains(r)) {
+                        if let Some(paths) = provenance_paths_by_task.get(other_tid) {
+                            bounded_paths.extend(paths.iter().cloned());
+                        }
+                    }
+                }
+            }
+            // 3. From keyword matching against triggering requirements (e.g. accessibility, tests) across all provenance
+            if bounded_paths.is_empty() {
+                let is_a11y = triggering_titles.iter().any(|t| t.to_lowercase().contains("access") || t.to_lowercase().contains("a11y"))
+                    || run_task.objective.to_lowercase().contains("keyboard")
+                    || run_task.objective.to_lowercase().contains("access")
+                    || run_task.evidence_obligations.iter().any(|o| o.class == EvidenceClass::AccessibilityResult);
+                let is_test = triggering_titles.iter().any(|t| t.to_lowercase().contains("test"))
+                    || run_task.evidence_obligations.iter().any(|o| o.class == EvidenceClass::TestOutput);
+
+                for paths in provenance_paths_by_task.values() {
+                    for p in paths {
+                        let pl = p.to_lowercase();
+                        if is_a11y && (pl.contains("access") || pl.contains("a11y") || pl.contains("ui_spec")) {
+                            bounded_paths.push(p.clone());
+                        } else if is_test && (pl.contains("test") || pl.contains("spec")) {
+                            bounded_paths.push(p.clone());
+                        }
+                    }
+                }
+            }
+
+            if !bounded_paths.is_empty() {
+                autonomous_bounded = true;
+            }
+        }
+
         bounded_paths.sort();
         bounded_paths.dedup();
 
         let is_bounded = !bounded_paths.is_empty();
         let authority_boundary_type = if !task_refinement_entries.is_empty() {
             "HUMAN_REFINED_BOUNDED".to_string()
+        } else if autonomous_bounded {
+            "AUTONOMOUS_BOUNDED".to_string()
         } else if is_bounded {
             "PROVENANCE_BOUNDED".to_string()
         } else {
@@ -5064,6 +5111,274 @@ pub fn derive_bounded_correction_scope(
         human_scope_refinement: refinement.cloned(),
         missing_provenance_tasks,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinalHumanAcceptanceEligibility {
+    pub eligible: bool,
+    pub required_machine_requirements_verified: bool,
+    pub technical_blockers_count: usize,
+    pub missing_required_evidence_count: usize,
+    pub stale_required_evidence_count: usize,
+    pub failed_required_evidence_count: usize,
+    pub active_corrections_count: usize,
+    pub unresolved_corrections_count: usize,
+    pub authority_available: bool,
+    pub current_source_binding_valid: bool,
+    pub all_human_decision_prerequisites_verified: bool,
+    pub reasons: Vec<String>,
+}
+
+pub fn is_final_human_acceptance_eligible(
+    contract_requirements: &[Requirement],
+    report: &VerificationReport,
+    collection_blocked_external: &[String],
+    active_corrections_count: usize,
+    unresolved_corrections_count: usize,
+    authority_valid: bool,
+    source_binding_valid: bool,
+) -> FinalHumanAcceptanceEligibility {
+    let mut reasons = Vec::new();
+
+    // 1. Check machine-verifiable requirements
+    let mut required_machine_requirements_verified = true;
+    for req in contract_requirements {
+        let has_machine_obligation = req
+            .verification_policy
+            .obligations
+            .iter()
+            .any(|o| o.class != EvidenceClass::HumanDecision && o.required);
+        let has_machine_criteria = req
+            .acceptance_criteria
+            .iter()
+            .any(|c| c.machine_checkable);
+        let is_machine_verifiable = req.requirement_type != "decision"
+            || has_machine_obligation
+            || has_machine_criteria;
+
+        if is_machine_verifiable {
+            let status = report
+                .requirement_statuses
+                .iter()
+                .find(|s| s.requirement_id == req.requirement_id);
+            match status {
+                Some(s) if s.status == RequirementStatus::Verified
+                    || s.status == RequirementStatus::NotApplicable
+                    || s.status == RequirementStatus::DeferredByExplicitDecision => {}
+                Some(s) => {
+                    required_machine_requirements_verified = false;
+                    reasons.push(format!(
+                        "Machine-verifiable requirement {} is {:?}",
+                        req.requirement_id, s.status
+                    ));
+                }
+                None => {
+                    required_machine_requirements_verified = false;
+                    reasons.push(format!(
+                        "Machine-verifiable requirement {} has no verification status",
+                        req.requirement_id
+                    ));
+                }
+            }
+        }
+    }
+
+    // 2. Check technical blockers (blocked machine requirements / blocked external collectors)
+    let blocked_requirements = report
+        .requirement_statuses
+        .iter()
+        .filter(|s| s.status == RequirementStatus::Blocked)
+        .count();
+    let blocked_machine_collectors = collection_blocked_external
+        .iter()
+        .filter(|item| !item.contains("HumanDecision") && !item.contains("HUMAN_DECISION"))
+        .count();
+    let blocked_report_external = report
+        .decision
+        .blocked_external
+        .iter()
+        .filter(|b| {
+            let req = contract_requirements
+                .iter()
+                .find(|r| r.requirement_id == b.requirement_id);
+            req.map_or(true, |r| r.requirement_type != "decision")
+        })
+        .count();
+    let technical_blockers_count = blocked_requirements + blocked_machine_collectors + blocked_report_external;
+    if technical_blockers_count > 0 {
+        reasons.push(format!("{technical_blockers_count} technical blocker(s) present"));
+    }
+
+    // 3. Missing required evidence
+    let mut missing_required_evidence_count = 0;
+    for s in &report.requirement_statuses {
+        let req = contract_requirements
+            .iter()
+            .find(|r| r.requirement_id == s.requirement_id);
+        let is_machine = req.map_or(true, |r| r.requirement_type != "decision");
+        if is_machine {
+            let missing_machine = s
+                .missing_obligations
+                .iter()
+                .filter(|c| **c != EvidenceClass::HumanDecision)
+                .count();
+            missing_required_evidence_count += missing_machine + s.missing_acceptance_criteria.len();
+        }
+    }
+    if missing_required_evidence_count > 0 {
+        reasons.push(format!("{missing_required_evidence_count} required machine evidence item(s) missing"));
+    }
+
+    // 4. Stale required evidence
+    let stale_required_evidence_count = report
+        .requirement_statuses
+        .iter()
+        .filter(|s| {
+            let req = contract_requirements
+                .iter()
+                .find(|r| r.requirement_id == s.requirement_id);
+            req.map_or(true, |r| r.requirement_type != "decision")
+        })
+        .map(|s| s.stale_evidence.len())
+        .sum();
+    if stale_required_evidence_count > 0 {
+        reasons.push(format!("{stale_required_evidence_count} stale evidence item(s) present"));
+    }
+
+    // 5. Failed required evidence (machine evidence failure)
+    let failed_required_evidence_count = report
+        .requirement_statuses
+        .iter()
+        .filter(|s| {
+            let req = contract_requirements
+                .iter()
+                .find(|r| r.requirement_id == s.requirement_id);
+            req.map_or(true, |r| r.requirement_type != "decision")
+        })
+        .map(|s| s.failed_evidence.len())
+        .sum();
+    if failed_required_evidence_count > 0 {
+        reasons.push(format!("{failed_required_evidence_count} failed machine evidence item(s) present"));
+    }
+
+    // 6. Active corrections
+    if active_corrections_count > 0 {
+        reasons.push(format!("{active_corrections_count} active correction(s) running"));
+    }
+
+    // 7. Unresolved corrections
+    let effective_unresolved_corrections = if unresolved_corrections_count > 0 {
+        unresolved_corrections_count
+    } else if !required_machine_requirements_verified
+        || technical_blockers_count > 0
+        || missing_required_evidence_count > 0
+        || stale_required_evidence_count > 0
+        || failed_required_evidence_count > 0
+    {
+        1
+    } else {
+        0
+    };
+    if effective_unresolved_corrections > 0 {
+        reasons.push(format!("{effective_unresolved_corrections} unresolved correction(s)"));
+    }
+
+    // 8. Authority availability
+    if !authority_valid {
+        reasons.push("Sealed authority is invalid or unavailable".to_string());
+    }
+
+    // 9. Current source binding
+    if !source_binding_valid {
+        reasons.push("Current source binding is invalid or stale".to_string());
+    }
+
+    // 10. Human decision prerequisites
+    let all_human_decision_prerequisites_verified = required_machine_requirements_verified
+        && technical_blockers_count == 0
+        && missing_required_evidence_count == 0
+        && stale_required_evidence_count == 0
+        && failed_required_evidence_count == 0;
+    if !all_human_decision_prerequisites_verified {
+        reasons.push("Not all human decision prerequisites are verified".to_string());
+    }
+
+    let eligible = required_machine_requirements_verified
+        && technical_blockers_count == 0
+        && missing_required_evidence_count == 0
+        && stale_required_evidence_count == 0
+        && failed_required_evidence_count == 0
+        && active_corrections_count == 0
+        && effective_unresolved_corrections == 0
+        && authority_valid
+        && source_binding_valid
+        && all_human_decision_prerequisites_verified;
+
+    FinalHumanAcceptanceEligibility {
+        eligible,
+        required_machine_requirements_verified,
+        technical_blockers_count,
+        missing_required_evidence_count,
+        stale_required_evidence_count,
+        failed_required_evidence_count,
+        active_corrections_count,
+        unresolved_corrections_count: effective_unresolved_corrections,
+        authority_available: authority_valid,
+        current_source_binding_valid: source_binding_valid,
+        all_human_decision_prerequisites_verified,
+        reasons,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorrectionProgressGuard {
+    pub correction_generation: u32,
+    pub max_generations: u32,
+    pub last_failure_signature: String,
+    pub repeat_failure_count: u32,
+    pub max_repeat_failures: u32,
+}
+
+impl Default for CorrectionProgressGuard {
+    fn default() -> Self {
+        Self {
+            correction_generation: 0,
+            max_generations: 5,
+            last_failure_signature: String::new(),
+            repeat_failure_count: 0,
+            max_repeat_failures: 3,
+        }
+    }
+}
+
+impl CorrectionProgressGuard {
+    pub fn evaluate_progress(
+        &mut self,
+        current_failure_signature: &str,
+    ) -> Result<(), String> {
+        self.correction_generation += 1;
+        if self.correction_generation > self.max_generations {
+            return Err(format!(
+                "TECHNICAL_DELIVERY_BLOCKED: Maximum correction generations ({}) exceeded without reaching technical closure.",
+                self.max_generations
+            ));
+        }
+
+        if !self.last_failure_signature.is_empty() && self.last_failure_signature == current_failure_signature {
+            self.repeat_failure_count += 1;
+            if self.repeat_failure_count >= self.max_repeat_failures {
+                return Err(format!(
+                    "TECHNICAL_DELIVERY_BLOCKED: Identical failure repeated {} times with signature '{}' without progress.",
+                    self.repeat_failure_count, current_failure_signature
+                ));
+            }
+        } else {
+            self.last_failure_signature = current_failure_signature.to_string();
+            self.repeat_failure_count = 1;
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -5389,7 +5704,7 @@ impl VerificationReport {
         ))
     }
 
-    fn authenticate(&mut self, key: &[u8]) -> Result<(), EvidenceError> {
+    pub fn authenticate(&mut self, key: &[u8]) -> Result<(), EvidenceError> {
         self.integrity_tag = hmac_hex(key, &self.signing_body()?)?;
         Ok(())
     }

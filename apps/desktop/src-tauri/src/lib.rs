@@ -12,8 +12,8 @@ use relintor_evidence::{
     environment_fingerprint, export_manifest, fingerprint_workspace, AiVerifierInput,
     AuthenticatedP7Execution, CollectorOrchestrationResult, CompletionAuthority,
     CompletionCertificate, EvidenceManifest, EvidenceStore, EvidenceSummary,
-    ExplicitUserDecisionInput, ExplicitUserDecisionRecorder, FreshnessContext,
-    HumanScopeRefinement, ProductionAiProvider,
+    ExplicitUserDecisionInput, ExplicitUserDecisionRecorder,
+    FreshnessContext, HumanScopeRefinement, is_final_human_acceptance_eligible, ProductionAiProvider,
     validate_and_canonicalize_scope_path, VerificationAuthority,
     VerificationCollectorOrchestrator, VerificationCollectorPlan, VerificationEngine,
 };
@@ -667,6 +667,8 @@ struct VerificationStatusView {
     workflow_stage: String,
     summary: String,
     human_decisions: Vec<HumanDecisionPromptView>,
+    final_human_acceptance_eligible: bool,
+    final_human_acceptance_reasons: Vec<String>,
     evidence_items: Vec<HumanDecisionEvidenceItemView>,
     correction_scope: Option<CorrectionScopeView>,
     collector_activity: Vec<String>,
@@ -5668,6 +5670,27 @@ fn human_decision_prompts(
     if any_user_rejected {
         return Vec::new();
     }
+
+    let blocked_strings: Vec<String> = report
+        .decision
+        .blocked_external
+        .iter()
+        .map(|b| format!("{}: {}", b.requirement_id, b.reason))
+        .collect();
+
+    let eligibility = is_final_human_acceptance_eligible(
+        &context.authority.revision.contract.requirement_graph.requirements,
+        report,
+        &blocked_strings,
+        0,
+        if any_user_rejected { 1 } else { 0 },
+        context.authority.validate().is_ok(),
+        true,
+    );
+    if !eligibility.eligible {
+        return Vec::new();
+    }
+
     let evidence_items = build_verification_evidence_items(context, report);
 
     report
@@ -5719,14 +5742,16 @@ fn default_verification_workflow_stage(
         "USER_DECISION_REJECTED"
     } else if certificate_present {
         "VERIFIED_COMPLETE"
+    } else if *completion_state == relintor_evidence::CompletionState::FailedVerification || failed_count > 0 {
+        "VERIFICATION_NEEDS_ATTENTION"
+    } else if *completion_state == relintor_evidence::CompletionState::BlockedExternal {
+        "COLLECTION_BLOCKED"
     } else if human_decision_pending {
         "WAITING_FOR_USER_DECISION"
     } else if !evidence_present {
         "READY_TO_VERIFY"
-    } else if *completion_state == relintor_evidence::CompletionState::BlockedExternal {
-        "COLLECTION_BLOCKED"
-    } else if failed_count > 0 {
-        "VERIFICATION_NEEDS_ATTENTION"
+    } else if *completion_state == relintor_evidence::CompletionState::VerifiedComplete {
+        "VERIFIED_COMPLETE"
     } else {
         "VERIFICATION_FINISHED"
     }
@@ -5793,31 +5818,45 @@ fn derive_correction_scope_from_context(
                 if let Ok(file_str) = fs::read_to_string(&path) {
                     if let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&file_str) {
                         if let Some(meta) = envelope.get("artifact").and_then(|a| a.get("metadata")) {
-                            if let Some(task_id) = meta.get("task_id").and_then(|t| t.as_str()) {
-                                let mut paths = Vec::new();
-                                if let Some(execs) = meta.get("execution_identities").and_then(|e| e.as_array()) {
-                                    for exec in execs {
-                                        if let Some(changes) = exec.get("artifact_changes").and_then(|c| c.as_array()) {
-                                            for change in changes {
-                                                if let Some(p) = change.get("path").and_then(|s| s.as_str()) {
-                                                    paths.push(p.to_string());
-                                                }
+                            let mut paths = Vec::new();
+                            if let Some(execs) = meta.get("execution_identities").and_then(|e| e.as_array()) {
+                                for exec in execs {
+                                    if let Some(changes) = exec.get("artifact_changes").and_then(|c| c.as_array()) {
+                                        for change in changes {
+                                            if let Some(p) = change.get("path").and_then(|s| s.as_str()) {
+                                                paths.push(p.to_string());
                                             }
                                         }
                                     }
                                 }
-                                if let Some(rel_paths) = meta.get("relevant_paths").and_then(|r| r.as_array()) {
-                                    for p in rel_paths {
-                                        if let Some(s) = p.as_str() {
-                                            paths.push(s.to_string());
-                                        }
+                            }
+                            if let Some(rel_paths) = meta.get("relevant_paths").and_then(|r| r.as_array()) {
+                                for p in rel_paths {
+                                    if let Some(s) = p.as_str() {
+                                        paths.push(s.to_string());
                                     }
                                 }
-                                if !paths.is_empty() {
+                            }
+                            if !paths.is_empty() {
+                                if let Some(task_id) = meta.get("task_id").and_then(|t| t.as_str()) {
                                     provenance_paths_by_task
                                         .entry(task_id.to_string())
                                         .or_default()
-                                        .extend(paths);
+                                        .extend(paths.clone());
+                                }
+                                if let Some(req_ids) = meta.get("requirement_ids").and_then(|r| r.as_array()) {
+                                    for req_val in req_ids {
+                                        if let Some(req_id) = req_val.as_str() {
+                                            for task in &context.authority.revision.contract.task_graph.tasks {
+                                                if task.requirement_ids.iter().any(|r| r == req_id) {
+                                                    provenance_paths_by_task
+                                                        .entry(task.task_id.clone())
+                                                        .or_default()
+                                                        .extend(paths.clone());
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -5881,6 +5920,22 @@ fn verification_view(
                 .is_ok_and(|stored| stored.artifact.metadata.class == EvidenceClass::HumanDecision)
         })
     });
+    let blocked_strings: Vec<String> = report
+        .decision
+        .blocked_external
+        .iter()
+        .map(|b| format!("{}: {}", b.requirement_id, b.reason))
+        .chain(collection.blocked_external.iter().cloned())
+        .collect();
+    let eligibility = is_final_human_acceptance_eligible(
+        &context.authority.revision.contract.requirement_graph.requirements,
+        report,
+        &blocked_strings,
+        0,
+        if user_rejected { 1 } else { 0 },
+        context.authority.validate().is_ok(),
+        true,
+    );
     let collection_failures = collection
         .blocked_external
         .iter()
@@ -5999,6 +6054,8 @@ fn verification_view(
         workflow_stage: stage.into(),
         summary: summary.into(),
         human_decisions,
+        final_human_acceptance_eligible: eligibility.eligible,
+        final_human_acceptance_reasons: eligibility.reasons,
         evidence_items,
         correction_scope,
         collector_activity: collection
@@ -6347,14 +6404,14 @@ fn verification_start_inner(
             }
         }
     }
-    if !human_decision_prompts(&context, &report).is_empty() && workflow_stage.is_none() {
-        workflow_stage = Some("WAITING_FOR_USER_DECISION");
-    }
-    if !collection.blocked_external.is_empty()
-        && human_decision_prompts(&context, &report).is_empty()
+    if (!collection.blocked_external.is_empty()
+        || report.decision.state == relintor_evidence::CompletionState::BlockedExternal)
         && workflow_stage.is_none()
     {
         workflow_stage = Some("COLLECTION_BLOCKED");
+    }
+    if !human_decision_prompts(&context, &report).is_empty() && workflow_stage.is_none() {
+        workflow_stage = Some("WAITING_FOR_USER_DECISION");
     }
     Ok(verification_view(
         &project_id,
