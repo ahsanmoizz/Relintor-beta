@@ -636,6 +636,7 @@ describe("desktop shell foundation", () => {
       preserved_task_ids: ["task-2", "task-3"],
       scope_hash: "test-scope-hash-123",
       authorized: false,
+      user_reauthorization_required: true,
     };
 
     const rendered = render(
@@ -773,6 +774,7 @@ describe("desktop shell foundation", () => {
       ],
       scope_hash: "test-scope-hash-48",
       authorized: false,
+      user_reauthorization_required: true,
     };
 
     render(
@@ -1022,6 +1024,7 @@ describe("desktop shell foundation", () => {
       ],
       scope_hash: "test-scope-hash-49",
       authorized: false,
+      user_reauthorization_required: true,
     };
 
     const rendered = render(
@@ -1166,5 +1169,88 @@ describe("desktop shell foundation", () => {
         ]),
       }),
     );
+  });
+
+  it("does not expose ordinary technical reauthorization button or primary refinement controls when correction is autonomous under sealed authority (Defect #60)", () => {
+    const rejectedVer = pendingVerification();
+    rejectedVer.workflow_stage = "USER_DECISION_REJECTED";
+    rejectedVer.summary = "You rejected the completed result.";
+    rejectedVer.correction_scope = {
+      mission_id: "mission-sealed-test",
+      revision: 1,
+      originating_evidence_id: "p8-rejection-art",
+      user_rejection_notes: "1. Fix the accessibility issues in index.html (missing form labels, button names, contrast). 2. Make sure all unit and integration tests pass.",
+      failed_requirement_ids: ["REQ-A-OUTCOME"],
+      failed_requirement_titles: ["User problem outcome"],
+      blocked_requirement_ids: ["REQ-ACCESSIBILITY"],
+      blocked_requirement_titles: ["NFR: accessibility"],
+      affected_task_ids: ["task-accessibility"],
+      preserved_task_ids: ["task-1", "task-2", "task-3"],
+      preserved_task_count: 3,
+      scope_hash: "autonomous-hash-60",
+      authorized: false,
+      human_refinement_required: false,
+      user_reauthorization_required: false,
+      proposed_tasks: [
+        {
+          task_id: "task-accessibility",
+          title: "Implement: NFR: accessibility",
+          objective: "Fix accessibility issues in index.html.",
+          why_included: "Directly satisfies rejected accessibility requirement.",
+          triggering_requirement_ids: ["REQ-ACCESSIBILITY"],
+          triggering_requirement_titles: ["NFR: accessibility"],
+          scope_relation: "DirectTarget",
+          authorized_scope: {
+            workspace: "test-workspace",
+            file_scopes: ["index.html"],
+            directory_scopes: [],
+            package_lockfiles: [],
+            allowed_tools: ["file_edit"],
+            is_bounded: true,
+            authority_boundary_type: "AUTONOMOUS_BOUNDED",
+          },
+          expected_outcome: "A reviewable evidence record demonstrates: NFR: accessibility",
+          required_fresh_evidence: ["AccessibilityResult"],
+        },
+      ],
+    };
+
+    render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={rejectedVer}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+        onAuthorizeCorrection={vi.fn()}
+      />,
+    );
+
+    // 1. Heading explains bounded correction under sealed authority
+    expect(screen.getByRole("heading", { name: /Bounded Correction Under Sealed Authority/i })).toBeTruthy();
+
+    // 2. Next step does NOT demand user authorization
+    expect(screen.getByText("Autonomous technical correction")).toBeTruthy();
+    expect(screen.queryByText("Authorize bounded correction")).toBeNull();
+
+    // 3. Task status shows runnable under sealed authority
+    expect(screen.getByText("Runnable under sealed authority")).toBeTruthy();
+    expect(screen.queryByText("Will become runnable only after explicit user authorization")).toBeNull();
+
+    // 4. Normal UI does NOT expose Authorize scoped correction button
+    expect(screen.queryByRole("button", { name: "Authorize scoped correction" })).toBeNull();
+
+    // 5. Sealed mission delivery confirmation displayed
+    expect(screen.getByText(/Autonomous technical correction authorized under sealed mission authority/i)).toBeTruthy();
+
+    // 6. Manual scope refinement is NOT exposed directly on primary UI; it is inside advanced-controls
+    const advancedRefine = document.querySelector("details.scope-refinement-advanced");
+    expect(advancedRefine).toBeTruthy();
+    expect((advancedRefine as HTMLDetailsElement).open).toBe(false);
   });
 });

@@ -2498,3 +2498,355 @@ fn test_defect_59_phase5_safe_fixture_lifecycle() {
     assert_eq!(cert.final_state, CompletionState::VerifiedComplete);
 }
 
+#[test]
+fn test_defect_60_cases_a_through_g_sealed_authority_correction_matrix() {
+    let (authority, _current, _store, _signing_key, temp) = create_phase5_test_fixture();
+
+    let contract_reqs = vec![
+        to_requirement(&seed_decision_req("REQ-A-OUTCOME", "User problem outcome", "Problem solved")),
+        to_requirement(&seed_decision_req("REQ-B-PURPOSE", "User product purpose", "Product purpose met")),
+        to_requirement(&seed_machine_req("REQ-ACCESSIBILITY", "NFR: accessibility", EvidenceClass::AccessibilityResult)),
+        to_requirement(&seed_machine_req("REQ-TEST-AUTOMATED", "NFR: tests", EvidenceClass::TestOutput)),
+    ];
+
+    let contract_tasks = vec![
+        relintor_standards::Task {
+            task_id: "task-accessibility".into(),
+            title: "Implement: NFR: accessibility".into(),
+            objective: "Accessibility implementation".into(),
+            requirement_ids: vec!["REQ-ACCESSIBILITY".into()],
+            dependency_ids: vec![],
+            suggested_scope: "apps/ui/index.html".into(),
+            risk: RequirementRisk::Medium,
+            evidence_obligations: vec![EvidenceObligation {
+                class: EvidenceClass::AccessibilityResult,
+                minimum_confidence: EvidenceConfidence::StrongDeterministic,
+                rationale: "Accessibility result required".into(),
+                required: true,
+            }],
+            status: RequirementStatus::Blocked,
+            provenance: "contract".into(),
+        },
+    ];
+
+    let mut p7 = p7_execution_fixture(&authority, temp.path(), vec!["REQ-ACCESSIBILITY".into()]);
+    let mut sample_task = p7.run.tasks.values().next().unwrap().clone();
+    sample_task.task_id = "task-accessibility".into();
+    sample_task.requirement_ids = vec!["REQ-ACCESSIBILITY".into()];
+    sample_task.state = ExecutionTaskState::FinishedAwaitingVerification;
+    p7.run.tasks.clear();
+    p7.run.tasks.insert("task-accessibility".into(), sample_task);
+    p7.run.state = ExecutionRunState::ExecutionTasksFinishedAwaitingVerification;
+    let mut run = p7.run;
+
+    let mut provenance = BTreeMap::new();
+    provenance.insert("task-other".into(), vec![
+        "apps/ui/index.html".into(),
+        "tests/a11y.test.js".into(),
+    ]);
+
+    let report_initial = VerificationReport {
+        verification_run_id: "v-d60".into(),
+        authority_digest: "auth".into(),
+        requirement_statuses: vec![
+            RequirementVerification {
+                requirement_id: "REQ-ACCESSIBILITY".into(),
+                status: RequirementStatus::Blocked,
+                evidence_ids: vec![],
+                missing_obligations: vec![],
+                missing_acceptance_criteria: vec![],
+                stale_evidence: vec![],
+                failed_evidence: vec![],
+                reason: "accessibility check failed".into(),
+            },
+        ],
+        decision: CompletionDecision {
+            state: CompletionState::FailedVerification,
+            reason: "accessibility failed".into(),
+            deterministic_gates: vec![],
+            accepted_risks: vec![],
+            blocked_external: vec![],
+        },
+        builder_claim: None,
+        coverage_total: 1,
+        coverage_accounted: 0,
+        evidence_manifest_hash: "man".into(),
+        p7_ledger_digest: None,
+        ai_judgements: vec![],
+        integrity_tag: "tag".into(),
+    };
+
+    // ============================================================
+    // CASE A: sealed mission, machine-solvable correction, AUTONOMOUS_BOUNDED,
+    // inside workspace, non-destructive
+    // EXPECTED:
+    // USER_AUTHORIZATION_REQUIRED: NO
+    // TASK_RUNNABLE: YES
+    // AUTONOMOUS_CORRECTION_CONTINUES: YES
+    // ============================================================
+    let rejection_notes_a = "1. Fix the accessibility issues in index.html (missing form labels, button names). 2. Make sure tests pass.";
+    let scope_a = derive_bounded_correction_scope(
+        &authority.revision.seal.mission_id,
+        authority.revision.revision,
+        &contract_reqs,
+        &contract_tasks,
+        &[],
+        &report_initial.requirement_statuses,
+        &run,
+        "ev-origin-a",
+        rejection_notes_a,
+        &provenance,
+        None,
+    ).expect("derive scope A");
+
+    assert!(!scope_a.user_reauthorization_required, "CASE A: USER_AUTHORIZATION_REQUIRED MUST BE NO");
+    assert!(!scope_a.human_refinement_required, "CASE A: HUMAN_REFINEMENT_REQUIRED MUST BE NO");
+    assert_eq!(scope_a.escalation_reason, None);
+
+    // Relintor internally authorizes bounded correction under sealed authority
+    let mut target_reqs = BTreeSet::new();
+    target_reqs.insert("REQ-ACCESSIBILITY".into());
+    let affected = run.authorize_verification_correction(&target_reqs, 1000).expect("internal auth");
+    assert_eq!(affected, vec!["task-accessibility".to_string()]);
+
+    // TASK_RUNNABLE: YES
+    let task = run.tasks.get("task-accessibility").expect("task");
+    assert_eq!(task.state, ExecutionTaskState::Pending, "CASE A: TASK_RUNNABLE MUST BE YES (Pending)");
+    assert_eq!(run.state, ExecutionRunState::Ready, "CASE A: RUN STATE MUST BE READY");
+
+    // AUTONOMOUS_CORRECTION_CONTINUES: YES
+    let scope_a_after = derive_bounded_correction_scope(
+        &authority.revision.seal.mission_id,
+        authority.revision.revision,
+        &contract_reqs,
+        &contract_tasks,
+        &[],
+        &report_initial.requirement_statuses,
+        &run,
+        "ev-origin-a",
+        rejection_notes_a,
+        &provenance,
+        None,
+    ).expect("derive scope A after");
+    assert!(scope_a_after.authorized, "CASE A: AUTONOMOUS_CORRECTION_CONTINUES MUST BE YES (authorized = true)");
+
+    // ============================================================
+    // CASE B: correction widens outside sealed workspace
+    // EXPECTED:
+    // USER_AUTHORIZATION_REQUIRED: YES
+    // ============================================================
+    let mut tasks_unbounded = contract_tasks.clone();
+    tasks_unbounded[0].suggested_scope = "../../etc/passwd".into();
+    let empty_prov = BTreeMap::new();
+    let scope_b = derive_bounded_correction_scope(
+        &authority.revision.seal.mission_id,
+        authority.revision.revision,
+        &contract_reqs,
+        &tasks_unbounded,
+        &[],
+        &report_initial.requirement_statuses,
+        &run,
+        "ev-origin-b",
+        "Fix paths outside workspace",
+        &empty_prov,
+        None,
+    ).expect("derive scope B");
+
+    assert!(scope_b.user_reauthorization_required, "CASE B: USER_AUTHORIZATION_REQUIRED MUST BE YES for out-of-workspace");
+    assert!(scope_b.escalation_reason.is_some(), "CASE B: escalation reason must be present");
+
+    // ============================================================
+    // CASE C: destructive correction
+    // EXPECTED:
+    // USER_AUTHORIZATION_REQUIRED: YES
+    // ============================================================
+    let scope_c = derive_bounded_correction_scope(
+        &authority.revision.seal.mission_id,
+        authority.revision.revision,
+        &contract_reqs,
+        &contract_tasks,
+        &[],
+        &report_initial.requirement_statuses,
+        &run,
+        "ev-origin-c",
+        "Delete database tables and rm -rf old storage before proceeding",
+        &provenance,
+        None,
+    ).expect("derive scope C");
+
+    assert!(scope_c.user_reauthorization_required, "CASE C: USER_AUTHORIZATION_REQUIRED MUST BE YES for destructive action");
+    assert!(scope_c.escalation_reason.as_ref().unwrap().contains("destructive"));
+
+    // ============================================================
+    // CASE D: credentials required
+    // EXPECTED:
+    // USER_AUTHORIZATION_REQUIRED: YES
+    // ============================================================
+    let scope_d = derive_bounded_correction_scope(
+        &authority.revision.seal.mission_id,
+        authority.revision.revision,
+        &contract_reqs,
+        &contract_tasks,
+        &[],
+        &report_initial.requirement_statuses,
+        &run,
+        "ev-origin-d",
+        "Need production API secret key and auth token in .env",
+        &provenance,
+        None,
+    ).expect("derive scope D");
+
+    assert!(scope_d.user_reauthorization_required, "CASE D: USER_AUTHORIZATION_REQUIRED MUST BE YES for credentials");
+    assert!(scope_d.escalation_reason.as_ref().unwrap().contains("credentials"));
+
+    // ============================================================
+    // CASE E: subjective human decision required
+    // EXPECTED:
+    // USER_AUTHORIZATION_REQUIRED: YES
+    // ============================================================
+    let scope_e = derive_bounded_correction_scope(
+        &authority.revision.seal.mission_id,
+        authority.revision.revision,
+        &contract_reqs,
+        &contract_tasks,
+        &[],
+        &report_initial.requirement_statuses,
+        &run,
+        "ev-origin-e",
+        "Subjective visual choice: prefer warm minimalist aesthetic instead of modern clean",
+        &provenance,
+        None,
+    ).expect("derive scope E");
+
+    assert!(scope_e.user_reauthorization_required, "CASE E: USER_AUTHORIZATION_REQUIRED MUST BE YES for subjective decision");
+    assert!(scope_e.escalation_reason.as_ref().unwrap().contains("subjective"));
+
+    // ============================================================
+    // CASE F: restart after autonomous correction derivation
+    // EXPECTED:
+    // no return to "Authorize scoped correction"
+    // no duplicate authority
+    // no stale recovery
+    // correction resumes deterministically
+    // ============================================================
+    let auth_events_count_before = run.events.iter().filter(|e| e.kind == ExecutionEventKind::VerificationCorrectionAuthorized).count();
+    assert_eq!(auth_events_count_before, 1, "CASE F: Exactly one authorization event recorded");
+
+    // Simulating app restart / reload: re-deriving scope from the persisted run
+    let scope_f = derive_bounded_correction_scope(
+        &authority.revision.seal.mission_id,
+        authority.revision.revision,
+        &contract_reqs,
+        &contract_tasks,
+        &[],
+        &report_initial.requirement_statuses,
+        &run,
+        "ev-origin-a",
+        rejection_notes_a,
+        &provenance,
+        None,
+    ).expect("derive scope F");
+
+    assert!(scope_f.authorized, "CASE F: Scope must remain authorized after restart");
+    assert!(!scope_f.user_reauthorization_required, "CASE F: Reauthorization not required");
+    assert_eq!(
+        run.events.iter().filter(|e| e.kind == ExecutionEventKind::VerificationCorrectionAuthorized).count(),
+        1,
+        "CASE F: No duplicate authority event created"
+    );
+
+    // ============================================================
+    // CASE G: historical Phase 5 rejection fixture
+    // EXPECTED:
+    // 15/15 preserved
+    // rejection preserved
+    // AUTONOMOUS_BOUNDED preserved
+    // FINAL HUMAN PROMPT: NO
+    // USER CORRECTION AUTH BUTTON: NO
+    // AUTONOMOUS CORRECTION: YES
+    // certificate: DENIED
+    // ============================================================
+    let mut p5_tasks = Vec::new();
+    let p5_p7 = p7_execution_fixture(&authority, temp.path(), vec!["REQ-ACCESSIBILITY".into()]);
+    let base_exec_task = p5_p7.run.tasks.values().next().unwrap().clone();
+    let mut p5_run = p5_p7.run;
+    p5_run.tasks.clear();
+
+    for i in 1..=15 {
+        let tid = format!("task-{i:02}");
+        let reqs = if i == 1 {
+            vec!["REQ-ACCESSIBILITY".into()]
+        } else {
+            vec!["REQ-TEST-AUTOMATED".into()]
+        };
+        p5_tasks.push(relintor_standards::Task {
+            task_id: tid.clone(),
+            title: format!("Task {i}"),
+            objective: format!("Objective {i}"),
+            requirement_ids: reqs.clone(),
+            dependency_ids: vec![],
+            suggested_scope: "index.html".into(),
+            risk: RequirementRisk::Low,
+            evidence_obligations: vec![],
+            status: RequirementStatus::Verified,
+            provenance: "contract".into(),
+        });
+        let mut t = base_exec_task.clone();
+        t.task_id = tid.clone();
+        t.objective = format!("Objective {i}");
+        t.requirement_ids = reqs;
+        t.state = ExecutionTaskState::FinishedAwaitingVerification;
+        p5_run.tasks.insert(tid, t);
+    }
+    p5_run.state = ExecutionRunState::ExecutionTasksFinishedAwaitingVerification;
+
+    // 15/15 historical tasks preserved
+    assert_eq!(p5_run.tasks.len(), 15, "CASE G: 15/15 tasks must be preserved");
+    for task in p5_run.tasks.values() {
+        assert_eq!(task.state, ExecutionTaskState::FinishedAwaitingVerification);
+    }
+
+    let p5_rejection_notes = "1. Fix the accessibility issues in index.html (missing form labels, button names, contrast). 2. Make sure all unit and integration tests pass.";
+    let mut p5_provenance = BTreeMap::new();
+    p5_provenance.insert("task-other".into(), vec!["docs/ACCESSIBILITY.md".into(), "index.html".into()]);
+
+    let p5_scope = derive_bounded_correction_scope(
+        &authority.revision.seal.mission_id,
+        authority.revision.revision,
+        &contract_reqs,
+        &p5_tasks,
+        &[],
+        &report_initial.requirement_statuses,
+        &p5_run,
+        "ev-p5-rejection",
+        p5_rejection_notes,
+        &p5_provenance,
+        None,
+    ).expect("derive p5 scope");
+
+    // AUTONOMOUS_BOUNDED preserved
+    let a11y_p5 = p5_scope.proposed_tasks.iter().find(|t| t.task_id == "task-01").expect("p5 a11y task");
+    assert!(a11y_p5.authorized_scope.is_bounded, "CASE G: Task must be bounded");
+    assert_eq!(a11y_p5.authorized_scope.authority_boundary_type, "AUTONOMOUS_BOUNDED");
+
+    // USER CORRECTION AUTH BUTTON: NO
+    assert!(!p5_scope.user_reauthorization_required, "CASE G: USER CORRECTION AUTH BUTTON: NO (user_reauthorization_required = false)");
+
+    // FINAL HUMAN PROMPT: NO (cannot prompt while technical correction is needed)
+    let elig = is_final_human_acceptance_eligible(&contract_reqs, &report_initial, &[], 0, 0, true, true);
+    assert!(!elig.eligible, "CASE G: FINAL HUMAN PROMPT: NO (not eligible)");
+
+    // AUTONOMOUS CORRECTION: YES (internally authorized)
+    let mut p5_target = BTreeSet::new();
+    p5_target.insert("REQ-ACCESSIBILITY".into());
+    let reopened = p5_run.authorize_verification_correction(&p5_target, 2000).expect("authorize");
+    assert_eq!(reopened, vec!["task-01".to_string()]);
+    assert_eq!(p5_run.tasks.get("task-01").unwrap().state, ExecutionTaskState::Pending, "CASE G: Reopened task is Pending");
+    assert_eq!(p5_run.tasks.len(), 15, "CASE G: 15/15 task history preserved after reopen");
+
+    // certificate: DENIED
+    let p7 = p7_execution_fixture(&authority, temp.path(), vec!["REQ-ACCESSIBILITY".into()]);
+    let comp_auth = CompletionAuthority::new(b"p8-test-local-key").expect("comp auth");
+    assert!(comp_auth.issue_with_p7_execution(&report_initial, &authority, &p7).is_err(), "CASE G: certificate MUST be DENIED");
+}
+

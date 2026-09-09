@@ -4319,6 +4319,10 @@ pub struct CorrectionScopeView {
     pub human_scope_refinement: Option<HumanScopeRefinement>,
     #[serde(default)]
     pub missing_provenance_tasks: Vec<String>,
+    #[serde(default)]
+    pub user_reauthorization_required: bool,
+    #[serde(default)]
+    pub escalation_reason: Option<String>,
 }
 
 pub fn parse_rejection_notes_to_findings(notes: &str) -> Vec<String> {
@@ -5032,6 +5036,116 @@ pub fn derive_bounded_correction_scope(
 
     let human_refinement_required = project_wide_unbounded_authority || proposed_tasks.is_empty();
 
+    // Human Escalation Exceptions Evaluation (Defect #60 Doctrine)
+    let mut user_reauthorization_required = false;
+    let mut escalation_reason = None;
+
+    // Exception 1: Human refinement required (e.g. unbounded scope or no proposed tasks)
+    if human_refinement_required {
+        user_reauthorization_required = true;
+        escalation_reason = Some("The correction scope cannot be safely bounded without explicit human refinement.".into());
+    }
+
+    // Exception 2: Widening outside sealed workspace
+    if !user_reauthorization_required {
+        let widens_outside_workspace = proposed_tasks.iter().any(|t| {
+            !t.authorized_scope.is_bounded
+                || t.authorized_scope.authority_boundary_type == "UNBOUNDED_WORKSPACE"
+                || t.authorized_scope.file_scopes.iter().any(|p| {
+                    p.starts_with("..") || p.contains("/../") || p.contains("\\..\\")
+                })
+        });
+        if widens_outside_workspace {
+            user_reauthorization_required = true;
+            escalation_reason = Some("Correction scope widens outside the sealed workspace boundary.".into());
+        }
+    }
+
+    // Exception 3: Destructive operations
+    if !user_reauthorization_required {
+        let has_destructive_refinement = refinement.map_or(false, |r| {
+            r.entries.iter().any(|e| {
+                e.permitted_operations.contains(&PermittedOperation::Delete)
+            })
+        });
+        let notes_lower = user_rejection_notes.to_lowercase();
+        let destructive_keywords = [
+            "delete", "destroy", "drop database", "drop table", "rm -rf", "remove permanently", "purge", "destructive"
+        ];
+        let has_destructive_text = destructive_keywords.iter().any(|kw| notes_lower.contains(kw));
+        if has_destructive_refinement || has_destructive_text {
+            user_reauthorization_required = true;
+            escalation_reason = Some("Correction involves potentially destructive operations requiring explicit human authorization.".into());
+        }
+    }
+
+    // Exception 4: Credentials / secrets required
+    if !user_reauthorization_required {
+        let notes_lower = user_rejection_notes.to_lowercase();
+        let credential_keywords = [
+            "credential", "secret key", "api key", "password", "auth token", ".env", "private key"
+        ];
+        if credential_keywords.iter().any(|kw| notes_lower.contains(kw)) {
+            user_reauthorization_required = true;
+            escalation_reason = Some("Correction requires external credentials or secret keys.".into());
+        }
+    }
+
+    // Exception 5: Spending / payment
+    if !user_reauthorization_required {
+        let notes_lower = user_rejection_notes.to_lowercase();
+        let payment_keywords = [
+            "payment", "credit card", "billing", "purchase", "spend", "charge"
+        ];
+        if payment_keywords.iter().any(|kw| notes_lower.contains(kw)) {
+            user_reauthorization_required = true;
+            escalation_reason = Some("Correction involves spending or financial transactions.".into());
+        }
+    }
+
+    // Exception 6: Production deployment
+    if !user_reauthorization_required {
+        let notes_lower = user_rejection_notes.to_lowercase();
+        let deployment_keywords = [
+            "deploy to production", "production deployment", "publish to npm", "publish crate", "live release"
+        ];
+        if deployment_keywords.iter().any(|kw| notes_lower.contains(kw)) {
+            user_reauthorization_required = true;
+            escalation_reason = Some("Correction requires external production deployment authority.".into());
+        }
+    }
+
+    // Exception 7: Subjective human decision / impossible or conflicting requirements
+    if !user_reauthorization_required {
+        let notes_lower = user_rejection_notes.to_lowercase();
+        let subjective_keywords = [
+            "subjective", "unclear preference", "choose between", "conflicting requirement", "impossible requirement"
+        ];
+        let only_human_no_findings = failed_requirement_ids.iter().all(|req_id| {
+            req_map.get(req_id.as_str()).map_or(false, |r| {
+                r.verification_policy.obligations.iter().all(|o| o.class == EvidenceClass::HumanDecision)
+                    && r.acceptance_criteria.iter().all(|c| !c.machine_checkable)
+            })
+        }) && raw_findings.is_empty();
+
+        if subjective_keywords.iter().any(|kw| notes_lower.contains(kw)) || only_human_no_findings {
+            user_reauthorization_required = true;
+            escalation_reason = Some("Correction requires subjective human decision or resolution of conflicting requirements.".into());
+        }
+    }
+
+    // Exception 8: Material sealed-goal change
+    if !user_reauthorization_required {
+        let notes_lower = user_rejection_notes.to_lowercase();
+        let goal_change_keywords = [
+            "change goal", "alter mission", "out of scope", "different objective"
+        ];
+        if goal_change_keywords.iter().any(|kw| notes_lower.contains(kw)) {
+            user_reauthorization_required = true;
+            escalation_reason = Some("Correction requires modifying the sealed mission objective.".into());
+        }
+    }
+
     let authorized = !affected_vec.is_empty()
         && affected_vec.iter().all(|task_id| {
             run.tasks.get(task_id).map_or(false, |t| {
@@ -5110,6 +5224,8 @@ pub fn derive_bounded_correction_scope(
         human_refinement_required,
         human_scope_refinement: refinement.cloned(),
         missing_provenance_tasks,
+        user_reauthorization_required,
+        escalation_reason,
     })
 }
 

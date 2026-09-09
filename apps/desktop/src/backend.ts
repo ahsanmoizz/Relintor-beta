@@ -389,6 +389,8 @@ export type CorrectionScope = {
   human_refinement_required?: boolean;
   human_scope_refinement?: HumanScopeRefinement | null;
   missing_provenance_tasks?: string[];
+  user_reauthorization_required?: boolean;
+  escalation_reason?: string | null;
   semantic_correction_authorities?: number;
   duplicate_correction_work?: number;
   unrelated_tasks?: number;

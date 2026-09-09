@@ -5737,7 +5737,13 @@ fn default_verification_workflow_stage(
     completion_state: &relintor_evidence::CompletionState,
     user_rejected: bool,
     failed_count: usize,
+    correction_scope: Option<&relintor_evidence::CorrectionScopeView>,
 ) -> &'static str {
+    if let Some(scope) = correction_scope {
+        if scope.authorized || !scope.user_reauthorization_required {
+            return "CORRECTING_FAILED_REQUIREMENT";
+        }
+    }
     if user_rejected {
         "USER_DECISION_REJECTED"
     } else if certificate_present {
@@ -5961,6 +5967,11 @@ fn verification_view(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+    let correction_scope = if user_rejected {
+        derive_correction_scope_from_context(context, report)
+    } else {
+        None
+    };
     let stage = workflow_stage.unwrap_or_else(|| {
         default_verification_workflow_stage(
             certificate.is_some(),
@@ -5969,6 +5980,7 @@ fn verification_view(
             &report.decision.state,
             user_rejected,
             failed_count,
+            correction_scope.as_ref(),
         )
     });
     let summary = match stage {
@@ -5977,23 +5989,22 @@ fn verification_view(
             "Automated checks are complete. Relintor needs your decision before verification can continue."
         }
         "CORRECTING_FAILED_REQUIREMENT" => {
-            "A real automated check failed. Antigravity is correcting only the affected work before Relintor verifies again."
+            if user_rejected {
+                "You rejected the completed result. Relintor derived a bounded correction and continues under sealed authority."
+            } else {
+                "A real automated check failed. Antigravity is correcting only the affected work before Relintor verifies again."
+            }
         }
         "COLLECTION_BLOCKED" => {
             "Verification could not collect every required automated result. The mission remains safely incomplete."
         }
         "USER_DECISION_REJECTED" => {
-            "You rejected the completed result. Relintor preserved your decision and did not start an automatic correction or issue a certificate."
+            "You rejected the completed result. Relintor preserved your decision and halted execution pending required human review or scope refinement."
         }
         _ if failed_count > 0 => {
             "One or more automated checks failed. Relintor has not called the mission complete."
         }
         _ => "Verification finished. Relintor is waiting for all required evidence.",
-    };
-    let correction_scope = if user_rejected {
-        derive_correction_scope_from_context(context, report)
-    } else {
-        None
     };
     VerificationStatusView {
         project_id: project_id.into(),
@@ -6289,12 +6300,97 @@ fn authorize_and_launch_verification_correction(
     })
 }
 
+fn ensure_autonomous_correction_authorized(
+    app: &AppHandle,
+    project_id: &str,
+    context: &P8VerificationContext,
+    report: &relintor_evidence::VerificationReport,
+) -> Result<bool, String> {
+    let scope = match derive_correction_scope_from_context(context, report) {
+        Some(s) => s,
+        None => return Ok(false),
+    };
+
+    if scope.user_reauthorization_required || scope.authorized {
+        return Ok(false);
+    }
+
+    let canonical_id = canonical_project_id(project_id)?;
+    with_execution_mutation_lock(|| {
+        require_execution_not_active(&canonical_id)?;
+        let (mut run, ledger_path, rev, _handoff) = load_execution_run(app, &canonical_id)?;
+
+        if run.state != relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification {
+            return Ok(false);
+        }
+
+        let known_requirements = run
+            .tasks
+            .values()
+            .flat_map(|t| t.requirement_ids.iter().cloned())
+            .collect::<BTreeSet<_>>();
+
+        let target_reqs: BTreeSet<String> = scope
+            .affected_task_ids
+            .iter()
+            .filter_map(|tid| run.tasks.get(tid))
+            .flat_map(|t| t.requirement_ids.iter().cloned())
+            .filter(|r| known_requirements.contains(r))
+            .collect();
+
+        if target_reqs.is_empty() {
+            return Ok(false);
+        }
+
+        let affected = run
+            .authorize_verification_correction(&target_reqs, execution_now_ms())
+            .map_err(|error| format!("autonomous verification correction: {error}"))?;
+
+        let recovery = recovery_store(app, &rev)?;
+        persist_execution_boundary(
+            &run,
+            &ledger_path,
+            &recovery,
+            &rev,
+            &format!(
+                "autonomous bounded correction authorized under sealed authority for {}",
+                affected.join(",")
+            ),
+            CheckpointKind::AfterTaskPersistence,
+            Vec::new(),
+        )
+        .map_err(|error| format!("persist autonomous correction boundary: {error}"))?;
+
+        invalidate_p8_evaluation_cache(&canonical_id);
+        Ok(true)
+    })
+}
+
 fn automatic_verification_closure(app: &AppHandle, project_id: &str) -> Result<(), String> {
     with_verification_mutation_lock(|| automatic_verification_closure_inner(app, project_id))
 }
 
 fn automatic_verification_closure_inner(app: &AppHandle, project_id: &str) -> Result<(), String> {
     let (context, report, manifest, _) = evaluate_p8(app, project_id, true)?;
+    let user_rejected = report.requirement_statuses.iter().any(|status| {
+        status.failed_evidence.iter().any(|evidence_id| {
+            context
+                .store
+                .load(evidence_id)
+                .is_ok_and(|stored| stored.artifact.metadata.class == EvidenceClass::HumanDecision)
+        })
+    });
+    if user_rejected {
+        if let Ok(true) = ensure_autonomous_correction_authorized(app, project_id, &context, &report) {
+            let readiness = health_antigravity_for_app(Some(app));
+            if readiness.adapter_ready {
+                if let Some(cli_path) = configured_antigravity_cli(app) {
+                    let _ = launch_execution_worker(app.clone(), project_id.to_string(), cli_path);
+                }
+            }
+            return Ok(());
+        }
+    }
     match report.decision.state {
         relintor_evidence::CompletionState::VerifiedComplete => {
             ensure_verified_completion_certificate(app, &context, &report, &manifest)?;
@@ -6374,7 +6470,7 @@ fn verification_start_inner(
     app: AppHandle,
     project_id: String,
 ) -> Result<VerificationStatusView, String> {
-    let (context, report, manifest, collection) = evaluate_p8(&app, &project_id, true)?;
+    let (mut context, mut report, mut manifest, mut collection) = evaluate_p8(&app, &project_id, true)?;
     let certificate = ensure_verified_completion_certificate(&app, &context, &report, &manifest)?;
     let user_rejected = report.requirement_statuses.iter().any(|status| {
         status.failed_evidence.iter().any(|evidence_id| {
@@ -6386,7 +6482,22 @@ fn verification_start_inner(
     });
     let mut workflow_stage = None;
     if user_rejected {
-        workflow_stage = Some("USER_DECISION_REJECTED");
+        if let Ok(true) = ensure_autonomous_correction_authorized(&app, &project_id, &context, &report) {
+            workflow_stage = Some("CORRECTING_FAILED_REQUIREMENT");
+            if let Ok((c, r, m, col)) = evaluate_p8(&app, &project_id, false) {
+                context = c;
+                report = r;
+                manifest = m;
+                collection = col;
+            }
+        } else {
+            let scope = derive_correction_scope_from_context(&context, &report);
+            if scope.as_ref().map_or(false, |s| s.authorized || !s.user_reauthorization_required) {
+                workflow_stage = Some("CORRECTING_FAILED_REQUIREMENT");
+            } else {
+                workflow_stage = Some("USER_DECISION_REJECTED");
+            }
+        }
     } else if report.decision.state == relintor_evidence::CompletionState::FailedVerification
         || (!deterministic_failed_requirement_ids(&report, &context.store).is_empty()
             && human_decision_prompts(&context, &report).is_empty())
@@ -6429,7 +6540,15 @@ fn verification_status(
     app: AppHandle,
     project_id: String,
 ) -> Result<VerificationStatusView, String> {
-    let (context, report, manifest, collection) = evaluate_p8(&app, &project_id, false)?;
+    let (mut context, mut report, mut manifest, mut collection) = evaluate_p8(&app, &project_id, false)?;
+    if let Ok(true) = ensure_autonomous_correction_authorized(&app, &project_id, &context, &report) {
+        if let Ok((c, r, m, col)) = evaluate_p8(&app, &project_id, false) {
+            context = c;
+            report = r;
+            manifest = m;
+            collection = col;
+        }
+    }
     let certificate =
         if report.decision.state == relintor_evidence::CompletionState::VerifiedComplete {
             load_persisted_certificate(&app, &context, &manifest)?

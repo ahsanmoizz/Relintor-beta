@@ -1756,15 +1756,32 @@ export function MissionCockpit({
         />
       </section>
     )}
-    {verification?.workflow_stage === "USER_DECISION_REJECTED" && (
+    {(verification?.workflow_stage === "USER_DECISION_REJECTED" || (verification?.workflow_stage === "CORRECTING_FAILED_REQUIREMENT" && Boolean(verification?.correction_scope))) && (
       <section className="panel attention-panel correction-panel" id="correction-scope-panel" aria-labelledby="correction-scope-title">
         <span className="panel-kicker">CORRECTION SCOPE</span>
-        <h3 id="correction-scope-title">Human Rejection Recorded — Review Correction Scope</h3>
-        <p>You rejected the completed result. Relintor halted automatic execution to preserve human authority and will not launch an unguided worker or issue a completion certificate.</p>
+        <h3 id="correction-scope-title">
+          {verification.correction_scope?.authorized || !verification.correction_scope?.user_reauthorization_required
+            ? "Human Rejection Recorded — Bounded Correction Under Sealed Authority"
+            : "Human Rejection Recorded — Review Correction Scope"}
+        </h3>
+        <p>
+          {verification.correction_scope?.authorized || !verification.correction_scope?.user_reauthorization_required
+            ? "You rejected the completed result. Relintor derived a bounded correction and continues work under the authority of the original seal."
+            : "You rejected the completed result. Relintor halted automatic execution to preserve human authority and requires user authorization before proceeding."}
+        </p>
         <div className="correction-facts">
           <div><span>Execution state</span><strong>{status.finished_tasks} of {status.total_tasks} tasks completed · Preserved</strong></div>
           <div><span>Recovery state</span><strong>{status.recovery_state}</strong></div>
-          <div><span>Next step</span><strong>{verification.correction_scope?.authorized ? "Execute authorized correction" : "Authorize bounded correction"}</strong></div>
+          <div>
+            <span>Next step</span>
+            <strong>
+              {verification.correction_scope?.authorized
+                ? "Execute authorized correction"
+                : !verification.correction_scope?.user_reauthorization_required
+                ? "Autonomous technical correction"
+                : "Authorize bounded correction"}
+            </strong>
+          </div>
           {verification.correction_scope && (
             <div><span>Revision policy</span><strong>Same revision ({status.revision}) · Sealed scope</strong></div>
           )}
@@ -1944,7 +1961,12 @@ export function MissionCockpit({
                       )}
 
                       <div className="correction-task-status-row">
-                        <span className="status-label">Status:</span> <em>Will become runnable only after explicit user authorization</em>
+                        <span className="status-label">Status:</span>{" "}
+                        <em>
+                          {verification.correction_scope?.authorized || !verification.correction_scope?.user_reauthorization_required
+                            ? "Runnable under sealed authority"
+                            : "Will become runnable only after explicit user authorization"}
+                        </em>
                       </div>
                     </div>
                   ))}
@@ -1971,14 +1993,16 @@ export function MissionCockpit({
               </div>
             )}
 
-            <div className="scope-refinement-controls">
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() => setRefineMode(!refineMode)}
-              >
-                {refineMode ? "Hide scope refinement" : "Refine correction scope"}
-              </button>
+            {(() => {
+              const controls = (
+                <div className="scope-refinement-controls">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => setRefineMode(!refineMode)}
+                  >
+                    {refineMode ? "Hide scope refinement" : "Refine correction scope"}
+                  </button>
 
               {refineMode && (
                 <div className="scope-refinement-panel">
@@ -2161,11 +2185,21 @@ export function MissionCockpit({
                 </div>
               )}
             </div>
+          );
+              return verification.correction_scope.human_refinement_required ? (
+                controls
+              ) : (
+                <details className="advanced-controls scope-refinement-advanced">
+                  <summary>Advanced scope refinement</summary>
+                  {controls}
+                </details>
+              );
+            })()}
 
             <div className="correction-authorize-control">
               {verification.correction_scope.authorized ? (
-                <p className="success-text">Scoped correction authorized. Use the execution control above ("Run next task") to begin work under normal governance.</p>
-              ) : (
+                <p className="success-text">Scoped correction authorized. Work continues under sealed authority.</p>
+              ) : verification.correction_scope.user_reauthorization_required ? (
                 <button
                   className="primary-button"
                   type="button"
@@ -2178,6 +2212,8 @@ export function MissionCockpit({
                 >
                   {busy ? "Authorizing correction…" : verification.correction_scope.human_refinement_required ? "Human scope refinement required" : "Authorize scoped correction"}
                 </button>
+              ) : (
+                <p className="form-hint">Autonomous technical correction authorized under sealed mission authority.</p>
               )}
             </div>
           </div>
