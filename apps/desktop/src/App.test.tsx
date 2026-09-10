@@ -257,9 +257,8 @@ describe("desktop shell foundation", () => {
     expect(screen.getByText(/There is no frontend-only activity/)).toBeTruthy();
   });
 
-  it("routes Verify work through the P8 action callback after all tasks finish", () => {
-    const onVerify = vi.fn();
-    const rendered = render(
+  it("does not render a manual Verify work button after all tasks finish", () => {
+    render(
       <MissionCockpit
         status={finishedExecution()}
         verification={pendingVerification()}
@@ -268,14 +267,14 @@ describe("desktop shell foundation", () => {
         revalidating={false}
         verificationNotice={null}
         onCommand={vi.fn()}
-        onVerify={onVerify}
+        onVerify={vi.fn()}
         onDecision={vi.fn()}
         onRefresh={vi.fn()}
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Verify work" }));
-    expect(onVerify).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Verify work" })).toBeNull();
+    expect(screen.getByRole("button", { name: "View verification" })).toBeTruthy();
   });
 
   it("drives the native approval command through Tauri and renders the returned certificate state", async () => {

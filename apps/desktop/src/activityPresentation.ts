@@ -133,7 +133,8 @@ export function verificationPresentation(status: VerificationStatus | null): {
       status.requirements_verified !== status.requirements_total ||
       authoritySaysVerified)
   ) {
-    const humanDecisionRequired = [...status.missing_evidence, ...status.blocked_external].some((item) => /HUMAN[_ ]DECISION|explicit user decision/i.test(item));
+    const hasPendingHumanDecision = [...status.missing_evidence, ...status.blocked_external].some((item) => /HUMAN[_ ]DECISION|explicit user decision/i.test(item));
+    const humanDecisionRequired = Boolean(status.final_human_acceptance_eligible && hasPendingHumanDecision);
     return {
       label: "Verification needs attention",
       supporting: humanDecisionRequired
@@ -285,11 +286,11 @@ export function missionPresentation(
       };
     }
     return {
-      headline: verificationView.label === "Verification needs attention" ? verificationView.label : "Work finished — verify the evidence",
+      headline: verificationView.label === "Verification needs attention" ? verificationView.label : "Work finished — technical review required",
       supporting: verificationView.supporting,
       badge: verificationView.label === "Verification needs attention" ? "Needs attention" : "Evidence ready",
       tone: verificationView.tone,
-      primaryAction: "verify",
+      primaryAction: "view_verification",
       recoveryRequired: false,
       verifiedComplete: false,
     };

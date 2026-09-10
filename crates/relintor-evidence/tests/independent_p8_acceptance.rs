@@ -2149,3 +2149,34 @@ fn idempotent_repeated_verification_evaluation_produces_identical_reports() {
     drop(root);
 }
 
+#[test]
+fn test_discovers_accessibility_test_file_when_package_script_is_absent() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(
+        root.path().join("package.json"),
+        r#"{
+            "name": "omnichat-test",
+            "scripts": {
+                "test": "node --test tests/*.test.js"
+            }
+        }"#,
+    )
+    .unwrap();
+    fs::create_dir_all(root.path().join("tests")).unwrap();
+    fs::write(
+        root.path().join("tests").join("accessibility-result.test.js"),
+        "// accessibility test",
+    )
+    .unwrap();
+
+    let plan = VerificationCollectorPlan::discover(root.path()).expect("discover package scripts");
+    assert!(plan.for_class(EvidenceClass::AccessibilityResult).is_some());
+    let a11y_spec = plan.for_class(EvidenceClass::AccessibilityResult).unwrap();
+    assert_eq!(a11y_spec.command.as_ref().unwrap().program, "node");
+    assert_eq!(
+        a11y_spec.command.as_ref().unwrap().args,
+        vec!["--test", "tests/accessibility-result.test.js"]
+    );
+}
+
+

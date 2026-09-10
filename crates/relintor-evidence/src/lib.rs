@@ -1774,6 +1774,59 @@ impl VerificationCollectorPlan {
                     }
                 }
             }
+            if collectors.iter().all(|c| c.evidence_class != EvidenceClass::AccessibilityResult) {
+                let tests_dir = workspace_root.join("tests");
+                if tests_dir.is_dir() {
+                    if let Ok(entries) = fs::read_dir(&tests_dir) {
+                        let mut candidates = Vec::new();
+                        for entry in entries.filter_map(Result::ok) {
+                            let path = entry.path();
+                            if path.is_file() {
+                                let name = path.file_name().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
+                                if (name.contains("accessibility") || name.contains("a11y"))
+                                    && (name.ends_with(".test.js") || name.ends_with(".test.mjs") || name.ends_with(".test.cjs") || name.ends_with(".spec.js"))
+                                {
+                                    candidates.push(path);
+                                }
+                            }
+                        }
+                        candidates.sort();
+                        if let Some(first) = candidates.first() {
+                            let rel = first.strip_prefix(workspace_root).unwrap_or(first).to_string_lossy().replace('\\', "/");
+                            add_discovered_command(
+                                &mut collectors,
+                                EvidenceClass::AccessibilityResult,
+                                CommandSpec {
+                                    program: "node".into(),
+                                    args: vec!["--test".into(), rel.clone()],
+                                    working_directory: workspace_root.to_path_buf(),
+                                    environment: BTreeMap::new(),
+                                },
+                                &format!("discovered accessibility test: {rel}"),
+                            );
+                        }
+                    }
+                }
+                if collectors.iter().all(|c| c.evidence_class != EvidenceClass::AccessibilityResult) {
+                    for script_rel in &["scripts/accessibility-scan.js", "scripts/a11y-scan.js", "accessibility-scan.js", "a11y-scan.js"] {
+                        let script_path = workspace_root.join(script_rel);
+                        if script_path.is_file() {
+                            add_discovered_command(
+                                &mut collectors,
+                                EvidenceClass::AccessibilityResult,
+                                CommandSpec {
+                                    program: "node".into(),
+                                    args: vec![script_rel.to_string()],
+                                    working_directory: workspace_root.to_path_buf(),
+                                    environment: BTreeMap::new(),
+                                },
+                                &format!("discovered accessibility script: {script_rel}"),
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
             if project_kind == "unknown" {
                 project_kind = "node".into();
             } else {
@@ -1813,6 +1866,38 @@ impl VerificationCollectorPlan {
                     },
                     "pyproject.toml ruff configuration",
                 );
+            }
+        }
+        if collectors.iter().all(|c| c.evidence_class != EvidenceClass::AccessibilityResult) {
+            let tests_dir = workspace_root.join("tests");
+            if tests_dir.is_dir() {
+                if let Ok(entries) = fs::read_dir(&tests_dir) {
+                    let mut candidates = Vec::new();
+                    for entry in entries.filter_map(Result::ok) {
+                        let path = entry.path();
+                        if path.is_file() {
+                            let name = path.file_name().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
+                            if (name.contains("accessibility") || name.contains("a11y")) && name.ends_with(".py") {
+                                candidates.push(path);
+                            }
+                        }
+                    }
+                    candidates.sort();
+                    if let Some(first) = candidates.first() {
+                        let rel = first.strip_prefix(workspace_root).unwrap_or(first).to_string_lossy().replace('\\', "/");
+                        add_discovered_command(
+                            &mut collectors,
+                            EvidenceClass::AccessibilityResult,
+                            CommandSpec {
+                                program: "python".into(),
+                                args: vec!["-m".into(), "pytest".into(), rel.clone()],
+                                working_directory: workspace_root.to_path_buf(),
+                                environment: BTreeMap::new(),
+                            },
+                            &format!("discovered python accessibility test {rel}"),
+                        );
+                    }
+                }
             }
         }
         let gradle_wrapper = if cfg!(windows) {

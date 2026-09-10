@@ -5754,6 +5754,7 @@ fn human_decision_prompts(
 fn default_verification_workflow_stage(
     certificate_present: bool,
     human_decision_pending: bool,
+    final_human_acceptance_eligible: bool,
     evidence_present: bool,
     completion_state: &relintor_evidence::CompletionState,
     user_rejected: bool,
@@ -5773,8 +5774,10 @@ fn default_verification_workflow_stage(
         "VERIFICATION_NEEDS_ATTENTION"
     } else if *completion_state == relintor_evidence::CompletionState::BlockedExternal {
         "COLLECTION_BLOCKED"
-    } else if human_decision_pending {
+    } else if human_decision_pending && final_human_acceptance_eligible {
         "WAITING_FOR_USER_DECISION"
+    } else if *completion_state != relintor_evidence::CompletionState::VerifiedComplete && evidence_present {
+        "VERIFICATION_NEEDS_ATTENTION"
     } else if !evidence_present {
         "READY_TO_VERIFY"
     } else if *completion_state == relintor_evidence::CompletionState::VerifiedComplete {
@@ -5954,12 +5957,44 @@ fn verification_view(
         .map(|b| format!("{}: {}", b.requirement_id, b.reason))
         .chain(collection.blocked_external.iter().cloned())
         .collect();
+    let correction_scope = if user_rejected {
+        derive_correction_scope_from_context(context, report)
+    } else {
+        None
+    };
+    let unresolved_corrections_count = if user_rejected {
+        let has_unfinished_tasks = context.p7_execution.run.tasks.values().any(|t| {
+            matches!(
+                t.state,
+                relintor_execution::ExecutionTaskState::Pending
+                    | relintor_execution::ExecutionTaskState::Ready
+                    | relintor_execution::ExecutionTaskState::Running
+            )
+        });
+        let scope_unauthorized = correction_scope.as_ref().map_or(false, |s| {
+            s.human_refinement_required || (s.user_reauthorization_required && !s.authorized)
+        });
+        if has_unfinished_tasks || scope_unauthorized {
+            1
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+    let active_corrections_count = context
+        .p7_execution
+        .run
+        .tasks
+        .values()
+        .filter(|t| t.state == relintor_execution::ExecutionTaskState::Running)
+        .count();
     let eligibility = is_final_human_acceptance_eligible(
         &context.authority.revision.contract.requirement_graph.requirements,
         report,
         &blocked_strings,
-        0,
-        if user_rejected { 1 } else { 0 },
+        active_corrections_count,
+        unresolved_corrections_count,
         context.authority.validate().is_ok(),
         true,
     );
@@ -5975,12 +6010,8 @@ fn verification_view(
                 Some("The performance check could not be completed.".to_string())
             } else if item.contains("SecurityScan") {
                 Some("The security check could not be completed.".to_string())
-            } else if item.contains("HumanDecision") {
-                if user_rejected {
-                    None
-                } else {
-                    Some("Relintor is waiting for your decision.".to_string())
-                }
+            } else if item.contains("HumanDecision") || item.contains("HUMAN_DECISION") {
+                None
             } else {
                 Some("A required automated verification check could not be completed.".to_string())
             }
@@ -5988,15 +6019,11 @@ fn verification_view(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let correction_scope = if user_rejected {
-        derive_correction_scope_from_context(context, report)
-    } else {
-        None
-    };
     let stage = workflow_stage.unwrap_or_else(|| {
         default_verification_workflow_stage(
             certificate.is_some(),
             !human_decisions.is_empty(),
+            eligibility.eligible,
             !manifest.evidence.is_empty(),
             &report.decision.state,
             user_rejected,
@@ -6443,9 +6470,7 @@ fn automatic_verification_closure_inner(app: &AppHandle, project_id: &str) -> Re
         | relintor_evidence::CompletionState::RevalidationRequired
         | relintor_evidence::CompletionState::StoppedIncomplete
         | relintor_evidence::CompletionState::CompleteWithAcceptedRisks => {
-            if !deterministic_failed_requirement_ids(&report, &context.store).is_empty()
-                && human_decision_prompts(&context, &report).is_empty()
-            {
+            if !deterministic_failed_requirement_ids(&report, &context.store).is_empty() {
                 match authorize_and_launch_verification_correction(
                     app,
                     project_id,
@@ -7710,12 +7735,31 @@ mod tests {
             default_verification_workflow_stage(
                 false,
                 true,
+                true,
                 false,
                 &relintor_evidence::CompletionState::StoppedIncomplete,
                 false,
                 0,
+                None,
             ),
             "WAITING_FOR_USER_DECISION"
+        );
+    }
+
+    #[test]
+    fn machine_gates_precedence_blocks_human_decision_stage() {
+        assert_eq!(
+            default_verification_workflow_stage(
+                false,
+                true,
+                false,
+                true,
+                &relintor_evidence::CompletionState::StoppedIncomplete,
+                false,
+                0,
+                None,
+            ),
+            "VERIFICATION_NEEDS_ATTENTION"
         );
     }
 

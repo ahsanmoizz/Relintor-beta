@@ -148,11 +148,12 @@ describe("user-visible mission state model", () => {
     expect(view.tone).toBe("info");
   });
 
-  it("surfaces incomplete verification instead of reporting ready", () => {
+  it("surfaces incomplete verification with human decision when eligible", () => {
     const view = verificationPresentation(verification({
       requirements_verified: 2,
       requirements_total: 11,
       evidence_count: 2,
+      final_human_acceptance_eligible: true,
       missing_evidence: ["requirement-human: missing HUMAN_DECISION"],
     }));
     expect(view.label).toBe("Verification needs attention");
@@ -160,7 +161,21 @@ describe("user-visible mission state model", () => {
     expect(view.supporting).toMatch(/explicit human decision/i);
   });
 
-  it("keeps Verify work as the P8 action after all tasks finish", () => {
+  it("never prompts for human decision while machine-verifiable obligations remain incomplete", () => {
+    const view = verificationPresentation(verification({
+      requirements_verified: 2,
+      requirements_total: 11,
+      evidence_count: 2,
+      final_human_acceptance_eligible: false,
+      missing_evidence: ["requirement-human: missing HUMAN_DECISION", "requirement-a11y: missing ACCESSIBILITY_RESULT"],
+    }));
+    expect(view.label).toBe("Verification needs attention");
+    expect(view.tone).toBe("warning");
+    expect(view.supporting).not.toMatch(/explicit human decision/i);
+    expect(view.supporting).toMatch(/missing evidence|dependency issues/i);
+  });
+
+  it("routes to view_verification rather than exposing a manual verify CTA after all tasks finish", () => {
     const view = missionPresentation(
       execution({
         state: "ExecutionTasksFinishedAwaitingVerification",
@@ -177,7 +192,8 @@ describe("user-visible mission state model", () => {
       }),
       true,
     );
-    expect(view.primaryAction).toBe("verify");
+    expect(view.primaryAction).not.toBe("verify");
+    expect(view.primaryAction).toBe("view_verification");
     expect(view.headline).toBe("Verification needs attention");
   });
 
@@ -386,7 +402,7 @@ describe("user-visible mission state model", () => {
         true,
       );
       expect(m.verifiedComplete).toBe(false);
-      expect(m.primaryAction).toBe("verify");
+      expect(m.primaryAction).toBe("view_verification");
       expect(m.headline).toBe("Verification needs attention");
       expect(m.badge).not.toBe("Verified");
     });
