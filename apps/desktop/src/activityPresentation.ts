@@ -174,6 +174,9 @@ export function missionPresentation(
     !running &&
     !dispatching &&
     !executionFinished &&
+    status.recovery_state !== "NO_RECOVERY_REQUIRED" &&
+    status.recovery_state !== "PreExecutionRetryAuthorized" &&
+    (status.recovery_detected || status.recovery_action === "MANUAL_REVIEW_RETRY" || status.recovery_action === "CHECK_SAFETY") &&
     (["BLOCKEDEXTERNAL", "REVALIDATIONREQUIRED", "STOPPEDINCOMPLETE"].includes(state) ||
       ["P9RECOVERYUNAVAILABLE", "REVALIDATIONREQUIRED", "RECOVERYNOTALLOWED", "BLOCKEDEXTERNAL"].includes(recovery));
   const verificationView = verificationPresentation(verification);
@@ -201,9 +204,12 @@ export function missionPresentation(
     };
   }
   if (recoveryRequired) {
+    const manualRetry = status.recovery_action === "MANUAL_REVIEW_RETRY";
     return {
-      headline: "Recovery review required",
-      supporting: "Relintor must confirm the previous attempt's safety before another task can run.",
+      headline: manualRetry ? "Recovery reviewed — ready to retry" : "Recovery review required",
+      supporting: manualRetry
+        ? "Relintor confirmed the previous attempt. Review changes and retry to continue."
+        : "Relintor must confirm the previous attempt's safety before another task can run.",
       badge: "Needs attention",
       tone: "warning",
       primaryAction: "recover",
@@ -306,6 +312,17 @@ export function missionPresentation(
       badge: "Ready",
       tone: "neutral",
       primaryAction: "continue",
+      recoveryRequired: false,
+      verifiedComplete: false,
+    };
+  }
+  if (status.finished_tasks > 0 && status.finished_tasks < status.total_tasks) {
+    return {
+      headline: "Starting Antigravity",
+      supporting: "Relintor is continuing work under sealed authority.",
+      badge: "Continuing",
+      tone: "info",
+      primaryAction: "none",
       recoveryRequired: false,
       verifiedComplete: false,
     };

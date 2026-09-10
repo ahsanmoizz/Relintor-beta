@@ -28,10 +28,10 @@ use ed25519_dalek::SigningKey;
 use relintor_antigravity::MockAdapter;
 use relintor_execution::{
     check_low_disk_headroom, inventory_fingerprint, workspace_inventory, ActionRequest,
-    ActionResult, CheckpointContent, CheckpointKind, ExecutionEvent,
+    ActionResult, AttemptExecutionBoundary, CheckpointContent, CheckpointKind, ExecutionEvent,
     ExecutionEventKind, ExecutionRun, ExecutionRunState, ExecutionTaskState, FailureClass,
-    GitWorktreeSnapshot, ProgressSnapshot, RecoveryAttemptTarget, RecoveryAuthority, RecoveryStore,
-    ReviewedRecoveryDelta, SchedulerPolicy, TaskAttemptState, UntrackedFileSnapshot,
+    GitWorktreeSnapshot, ProgressSnapshot, RecoveryAttemptTarget, RecoveryAuthority, RecoveryDisposition,
+    RecoveryStore, ReviewedRecoveryDelta, SchedulerPolicy, TaskAttemptState, UntrackedFileSnapshot,
     WorkspaceSnapshot,
 };
 use relintor_standards::{
@@ -147,7 +147,13 @@ fn sealed_fixture(req_count: usize) -> (
 }
 
 fn temp_workspace(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
+    let base = std::env::var("CARGO_TARGET_TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/tmp")
+        });
+    let dir = base.join(format!(
         "relintor-p5-test-{}-{}-{}",
         name,
         std::process::id(),
@@ -1032,6 +1038,83 @@ fn test_26_restart_after_completion_preserves_clean_auto_continuation() {
         .expect("next task is available");
     assert_ne!(next_task, t1_id);
     assert!(restored.runnable_tasks().contains(&next_task));
+
+    let _ = fs::remove_dir_all(ws);
+}
+
+// -----------------------------------------------------------------------------
+// 27. PRE-EXECUTION FAILURE (NOT STARTED) DOES NOT REQUIRE HUMAN RECOVERY REVIEW
+// -----------------------------------------------------------------------------
+#[test]
+fn test_27_pre_execution_failure_not_started_does_not_require_human_recovery_review() {
+    let ws = temp_workspace("pre-exec-not-started");
+    let (mut run, revision, handoff) = seed_run_with_context(&ws, 2);
+    let mut adapter = MockAdapter::supported();
+
+    let t1_id = run.runnable_tasks()[0].clone();
+    run.execute_next_with_adapter(&mut adapter, &revision, &handoff, &ws, now_ms())
+        .expect("execute task 1");
+    assert_eq!(
+        run.tasks[&t1_id].state,
+        ExecutionTaskState::FinishedAwaitingVerification
+    );
+
+    // Auto-continue to Task 2
+    let t2_id = run
+        .authorize_next_task_continuation(&revision, &handoff, now_ms())
+        .expect("authorize continuation")
+        .expect("task 2 available");
+    assert_ne!(t1_id, t2_id);
+
+    // Task 2 starts but fails before external process boundary (e.g. disk full writing context)
+    let now = now_ms();
+    let packet = run.start_task(&t2_id, now).expect("start task 2");
+    {
+        let attempt = run.attempts.last_mut().unwrap();
+        attempt.state = TaskAttemptState::Failed;
+        attempt.ended_at_ms = Some(now + 5);
+        attempt.failure_class = Some(FailureClass::ExternalUnavailable);
+        attempt.failure_fingerprint = Some("disk-full".into());
+        attempt.termination_reason = Some("write bridge context: There is not enough space on the disk.".into());
+        attempt.execution_boundary = AttemptExecutionBoundary::NotStarted;
+    }
+    if let Some(task) = run.tasks.get_mut(&t2_id) {
+        task.state = ExecutionTaskState::BlockedExternal;
+    }
+    for lease in &mut run.leases {
+        if lease.lease_id == packet.lease_id {
+            lease.revoke().unwrap();
+        }
+    }
+    run.state = ExecutionRunState::BlockedExternal;
+
+    // INVARIANTS:
+    // 1. Must be identified as pre-execution failure
+    assert!(run.current_recovery_attempt_is_pre_execution());
+    // 2. Must NOT require human recovery review attention (NO "Check recovery safety" roadblock)
+    assert!(
+        !run.recovery_status_requires_attention(),
+        "Pre-execution attempt with boundary NOT_STARTED must never require human recovery review"
+    );
+
+    // Auto-resume pre-execution under sealed authority
+    run.resume_from_recovery(RecoveryDisposition::PreExecutionRetryAuthorized, now + 10)
+        .expect("resume pre-execution retry");
+    assert_eq!(run.state, ExecutionRunState::Ready);
+    assert_eq!(run.tasks[&t2_id].state, ExecutionTaskState::WaitingRetry);
+    assert!(run.has_pending_retry());
+    assert!(!run.recovery_status_requires_attention());
+    assert!(run.current_recovery_attempt().is_none());
+
+    // Task 2 retry succeeds
+    run.execute_next_with_adapter(&mut adapter, &revision, &handoff, &ws, now + 20)
+        .expect("execute task 2 retry");
+    assert_eq!(
+        run.tasks[&t2_id].state,
+        ExecutionTaskState::FinishedAwaitingVerification
+    );
+    assert!(run.current_recovery_attempt().is_none());
+    assert!(!run.recovery_status_requires_attention());
 
     let _ = fs::remove_dir_all(ws);
 }

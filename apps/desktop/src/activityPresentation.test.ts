@@ -411,5 +411,56 @@ describe("user-visible mission state model", () => {
       expect(m.primaryAction).toBe("review_correction");
       expect(m.verifiedComplete).toBe(false);
     });
+
+    it("forbids Run next task and Check recovery safety between healthy tasks (Defect #61)", () => {
+      const exec = execution({
+        finished_tasks: 14,
+        total_tasks: 15,
+        state: "Ready",
+        execution_phase: "READY",
+        recovery_state: "NO_RECOVERY_REQUIRED",
+        recovery_action: "NONE",
+        recovery_detected: false,
+      });
+      const m = missionPresentation(exec, null, true);
+      expect(m.badge).toBe("Continuing");
+      expect(m.headline).toBe("Starting Antigravity");
+      expect(m.supporting).toBe("Relintor is continuing work under sealed authority.");
+      expect(m.primaryAction).toBe("none");
+      expect(m.recoveryRequired).toBe(false);
+    });
+
+    it("does not demand recovery review when pre-execution retry is authorized (Defect #61)", () => {
+      const exec = execution({
+        finished_tasks: 14,
+        total_tasks: 15,
+        state: "Ready",
+        execution_phase: "READY",
+        recovery_state: "PreExecutionRetryAuthorized",
+        recovery_action: "NONE",
+        recovery_detected: false,
+      });
+      const m = missionPresentation(exec, null, true);
+      expect(m.recoveryRequired).toBe(false);
+      expect(m.primaryAction).toBe("none");
+      expect(m.badge).toBe("Continuing");
+    });
+
+    it("displays reviewed retry ready when recovery safety check passed (Defect #61)", () => {
+      const exec = execution({
+        finished_tasks: 14,
+        total_tasks: 15,
+        state: "RevalidationRequired",
+        execution_phase: "REVALIDATION_REQUIRED",
+        recovery_state: "REVALIDATION_REQUIRED",
+        recovery_action: "MANUAL_REVIEW_RETRY",
+        recovery_detected: true,
+      });
+      const m = missionPresentation(exec, null, true);
+      expect(m.recoveryRequired).toBe(true);
+      expect(m.primaryAction).toBe("recover");
+      expect(m.headline).toBe("Recovery reviewed — ready to retry");
+      expect(m.supporting).toContain("Review changes and retry to continue");
+    });
   });
 });

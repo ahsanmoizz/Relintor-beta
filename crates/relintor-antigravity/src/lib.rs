@@ -2336,6 +2336,62 @@ fn production_task_command(
     command
 }
 
+fn write_bridge_context(
+    session_id: &str,
+    session_root: &Path,
+    content: &[u8],
+) -> Result<PathBuf, std::io::Error> {
+    let file_name = format!("relintor-antigravity-context-{session_id}.json");
+    let mut candidates = Vec::new();
+
+    // 1. Standard system temp directory
+    candidates.push(env::temp_dir().join(&file_name));
+
+    // 2. Sibling directory to workspace root (keeps temporary files off git workspace)
+    if let Some(parent) = session_root.parent() {
+        candidates.push(parent.join(".relintor-antigravity-tmp").join(&file_name));
+    }
+
+    // 3. Fallback: inside workspace root under dedicated hidden folder
+    candidates.push(session_root.join(".relintor-tmp").join(&file_name));
+
+    let mut last_err = None;
+    for path in candidates {
+        if let Some(parent) = path.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                last_err = Some(e);
+                continue;
+            }
+        }
+        match fs::write(&path, content) {
+            Ok(()) => return Ok(path),
+            Err(e) => {
+                last_err = Some(e);
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "no valid candidate path for bridge context",
+        )
+    }))
+}
+
+fn cleanup_bridge_context(path: PathBuf) {
+    let _ = fs::remove_file(&path);
+    if let Some(parent) = path.parent() {
+        if parent
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map_or(false, |n| n == ".relintor-antigravity-tmp" || n == ".relintor-tmp")
+        {
+            let _ = fs::remove_dir(parent);
+        }
+    }
+}
+
 impl AntigravityAdapter for ProductionAdapter {
     fn detect(&self) -> CompatibilityReport {
         self.report.clone()
@@ -2430,12 +2486,12 @@ impl AntigravityAdapter for ProductionAdapter {
             ));
         }
         let packet_json = packet.to_json()?;
-        let context_path = env::temp_dir().join(format!(
-            "relintor-antigravity-context-{}.json",
-            session.session.execution_id
-        ));
-        fs::write(&context_path, packet_json.as_bytes())
-            .map_err(|error| BridgeError::Process(format!("write bridge context: {error}")))?;
+        let context_path = write_bridge_context(
+            &session.session.execution_id,
+            &session.root,
+            packet_json.as_bytes(),
+        )
+        .map_err(|error| BridgeError::Process(format!("write bridge context: {error}")))?;
         let command = production_task_command(executable, packet, &context_path, bridge_path);
         session.context_path = Some(context_path);
         let process = SupervisedProcess::start(&command, &session.root, MAX_OUTPUT_BYTES)?;
@@ -2473,7 +2529,7 @@ impl AntigravityAdapter for ProductionAdapter {
             })?);
         }
         if let Some(context_path) = session.context_path.take() {
-            let _ = fs::remove_file(context_path);
+            cleanup_bridge_context(context_path);
         }
         Ok(())
     }
@@ -2526,7 +2582,7 @@ impl AntigravityAdapter for ProductionAdapter {
         ));
         Self::parse_process_events(session, &safe_stdout)?;
         if let Some(context_path) = session.context_path.take() {
-            let _ = fs::remove_file(context_path);
+            cleanup_bridge_context(context_path);
         }
         Ok(result)
     }

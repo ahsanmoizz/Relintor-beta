@@ -3857,7 +3857,12 @@ impl ExecutionRun {
         }
         self.attempts.iter().rev().find(|attempt| {
             if let Some(task) = self.tasks.get(&attempt.task_id) {
-                if task.state == ExecutionTaskState::FinishedAwaitingVerification {
+                if matches!(
+                    task.state,
+                    ExecutionTaskState::FinishedAwaitingVerification
+                        | ExecutionTaskState::WaitingRetry
+                        | ExecutionTaskState::Pending
+                ) {
                     return false;
                 }
             }
@@ -3895,7 +3900,13 @@ impl ExecutionRun {
         {
             return false;
         }
-        self.current_recovery_attempt().is_some()
+        if self.has_pending_retry() {
+            return false;
+        }
+        let Some(target) = self.current_recovery_attempt() else {
+            return false;
+        };
+        target.execution_boundary == AttemptExecutionBoundary::ExternalProcessStarted
     }
 
     pub fn current_recovery_attempt_is_pre_execution(&self) -> bool {
@@ -4831,7 +4842,13 @@ mod recovery_boundary_tests {
 
     fn fixture_root(label: &str) -> PathBuf {
         let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
+        let base = std::env::var("CARGO_TARGET_TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../target/tmp")
+            });
+        let root = base.join(format!(
             "relintor-recovery-boundary-{label}-{}-{sequence}",
             std::process::id()
         ));

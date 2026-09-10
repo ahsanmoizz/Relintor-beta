@@ -4896,11 +4896,11 @@ fn p9_status_view(
         })
     });
     view.recovery_action = if revalidation_is_current
-        && target.as_ref().is_some_and(|target| {
+        && ((target.as_ref().is_some_and(|target| {
             target.execution_boundary
                 == relintor_execution::AttemptExecutionBoundary::ExternalProcessStarted
-        })
-        && processes_gone
+        }) && processes_gone)
+            || is_pre_execution)
     {
         "MANUAL_REVIEW_RETRY".into()
     } else {
@@ -5030,7 +5030,7 @@ fn load_execution_run(
             run.state = relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification;
             let _ = run.persist_snapshot(&ledger_path);
         }
-    } else if run.state == relintor_execution::ExecutionRunState::Ready
+    } else if (run.state == relintor_execution::ExecutionRunState::Ready || run.has_pending_retry())
         && active_execution(project_id)?.is_none()
         && run.current_recovery_attempt().is_none()
         && !run.recovery_status_requires_attention()
@@ -5041,6 +5041,27 @@ fn load_execution_run(
         if readiness.adapter_ready {
             if let Some(cli_path) = configured_antigravity_cli(app) {
                 let _ = launch_execution_worker(app.clone(), project_id.to_string(), cli_path);
+            }
+        }
+    } else if run.state == relintor_execution::ExecutionRunState::BlockedExternal
+        && run.current_recovery_attempt_is_pre_execution()
+        && !run.recovery_status_requires_attention()
+        && active_execution(project_id)?.is_none()
+    {
+        let now = execution_now_ms();
+        if run
+            .resume_from_recovery(
+                relintor_execution::RecoveryDisposition::PreExecutionRetryAuthorized,
+                now,
+            )
+            .is_ok()
+        {
+            let _ = run.persist_snapshot(&ledger_path);
+            let readiness = health_antigravity_for_app(Some(app));
+            if readiness.adapter_ready {
+                if let Some(cli_path) = configured_antigravity_cli(app) {
+                    let _ = launch_execution_worker(app.clone(), project_id.to_string(), cli_path);
+                }
             }
         }
     }
@@ -7346,7 +7367,8 @@ fn execution_retry_recovered_task_inner(
             && record.mission_revision == expected.mission_revision
             && record.p7_run_id == expected.p7_run_id
             && record.target == integrity.target
-            && record.disposition == RecoveryDisposition::RevalidationRequired
+            && (record.disposition == RecoveryDisposition::RevalidationRequired
+                || record.disposition == RecoveryDisposition::PreExecutionRetryAuthorized)
             && revalidation_record_is_current(record, latest.as_ref())
     });
     if !reviewed {
