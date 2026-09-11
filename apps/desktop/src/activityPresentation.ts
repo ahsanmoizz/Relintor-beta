@@ -103,9 +103,9 @@ export function verificationPresentation(status: VerificationStatus | null): {
   }
   if (status.workflow_stage === "WAITING_FOR_USER_DECISION") {
     return {
-      label: "Your decision is needed",
-      supporting: status.summary,
-      tone: "warning",
+      label: "Ready for your final decision",
+      supporting: status.summary || "Relintor independently verified all machine-checkable requirements. Your final acceptance is now required.",
+      tone: "info",
       verifiedComplete: false,
     };
   }
@@ -135,11 +135,18 @@ export function verificationPresentation(status: VerificationStatus | null): {
   ) {
     const hasPendingHumanDecision = [...status.missing_evidence, ...status.blocked_external].some((item) => /HUMAN[_ ]DECISION|explicit user decision/i.test(item));
     const humanDecisionRequired = Boolean(status.final_human_acceptance_eligible && hasPendingHumanDecision);
+    const hasMachineBlockers = status.failed_checks.length > 0 || status.blocked_external.some((b) => !/HUMAN[_ ]DECISION|explicit user decision/i.test(b));
+    if (humanDecisionRequired && !hasMachineBlockers) {
+      return {
+        label: "Ready for your final decision",
+        supporting: "Relintor independently verified all machine-checkable requirements. Your final acceptance is now required.",
+        tone: "info",
+        verifiedComplete: false,
+      };
+    }
     return {
       label: "Verification needs attention",
-      supporting: humanDecisionRequired
-        ? "An explicit human decision is required before Relintor can call this work complete. Relintor will not infer or manufacture that decision."
-        : "Relintor found missing evidence or dependency issues that must be resolved before completion can be claimed.",
+      supporting: "Relintor found missing evidence or dependency issues that must be resolved before completion can be claimed.",
       tone: "warning",
       verifiedComplete: false,
     };
@@ -252,12 +259,16 @@ export function missionPresentation(
         verifiedComplete: false,
       };
     }
-    if (verification.workflow_stage === "WAITING_FOR_USER_DECISION" && verification.final_human_acceptance_eligible !== false) {
+    const isWaitingForDecision =
+      (verification.workflow_stage === "WAITING_FOR_USER_DECISION" ||
+        (verification.final_human_acceptance_eligible && verification.human_decisions.length > 0)) &&
+      verification.final_human_acceptance_eligible !== false;
+    if (isWaitingForDecision) {
       return {
-        headline: "Your decision is needed",
-        supporting: verification.summary,
-        badge: "Waiting for you",
-        tone: "warning",
+        headline: "Ready for your final decision",
+        supporting: verification.summary || "Relintor independently verified all machine-checkable requirements. Your final acceptance is now required.",
+        badge: "Decision needed",
+        tone: "info",
         primaryAction: "none",
         recoveryRequired: false,
         verifiedComplete: false,

@@ -2850,3 +2850,76 @@ fn test_defect_60_cases_a_through_g_sealed_authority_correction_matrix() {
     assert!(comp_auth.issue_with_p7_execution(&report_initial, &authority, &p7).is_err(), "CASE G: certificate MUST be DENIED");
 }
 
+#[test]
+fn test_defect_44_and_phase5_human_decision_semantic_dedup_matrix() {
+    let (authority, current, store, _signing_key, temp) = create_phase5_test_fixture();
+
+    let req_a = authority.revision.contract.requirement_graph.requirements.iter()
+        .find(|r| r.requirement_id == "REQ-A-OUTCOME").expect("req_a");
+    let req_b = authority.revision.contract.requirement_graph.requirements.iter()
+        .find(|r| r.requirement_id == "REQ-B-PURPOSE").expect("req_b");
+
+    // Case B & Case I: Both requirements are semantically equivalent
+    assert!(is_human_decision_semantic_equivalent(req_a, req_b));
+
+    // Record passing machine test evidence for REQ-TEST-AUTOMATED
+    let mut test_meta = test_metadata(
+        &authority,
+        &current,
+        "test-output-evidence-dedup",
+        EvidenceClass::TestOutput,
+        EvidenceResult::Pass,
+        EvidenceConfidence::StrongDeterministic,
+    );
+    test_meta.requirement_ids = vec!["REQ-TEST-AUTOMATED".into()];
+    test_meta.accepted_criteria = BTreeSet::from(["REQ-TEST-AUTOMATED-criterion".into()]);
+    store.put_test_fixture(test_meta, b"automated tests passed").unwrap();
+
+    let p7 = p7_execution_fixture(
+        &authority,
+        temp.path(),
+        vec!["REQ-A-OUTCOME".into(), "REQ-B-PURPOSE".into()],
+    );
+
+    // Record single user approval on REQ-A-OUTCOME
+    let recorder = ExplicitUserDecisionRecorder;
+    let input = ExplicitUserDecisionInput {
+        requirement_id: "REQ-A-OUTCOME",
+        approved: true,
+        notes: "Approved after verifying all machine checks.",
+    };
+    let artifact = recorder.record(&authority, &current, &store, &p7, input).expect("record decision");
+
+    // 1. Exactly ONE authority event / artifact
+    assert_eq!(artifact.metadata.class, EvidenceClass::HumanDecision);
+    assert_eq!(artifact.metadata.result, EvidenceResult::Pass);
+
+    // 2. Both requirement identities are preserved in metadata
+    assert!(artifact.metadata.requirement_ids.contains(&"REQ-A-OUTCOME".to_string()));
+    assert!(artifact.metadata.requirement_ids.contains(&"REQ-B-PURPOSE".to_string()));
+
+    // 3. Both acceptance criteria are preserved
+    assert!(artifact.metadata.accepted_criteria.contains("REQ-A-OUTCOME-criterion"));
+    assert!(artifact.metadata.accepted_criteria.contains("REQ-B-PURPOSE-criterion"));
+
+    // 4. Validates under p7 execution
+    assert!(p7.validates_evidence_metadata(&authority, &artifact.metadata).unwrap());
+
+    // 5. Evaluation satisfies BOTH requirements from the single decision
+    let engine = VerificationEngine::new_for_test(
+        store.clone(),
+        authority.clone(),
+        current.clone(),
+        Vec::new(),
+    ).expect("engine");
+    let report = engine.evaluate(None).expect("evaluate");
+
+    let status_a = report.requirement_statuses.iter().find(|s| s.requirement_id == "REQ-A-OUTCOME").unwrap();
+    let status_b = report.requirement_statuses.iter().find(|s| s.requirement_id == "REQ-B-PURPOSE").unwrap();
+    assert_eq!(status_a.status, RequirementStatus::Verified, "REQ-A-OUTCOME must be Verified by deduped decision");
+    assert_eq!(status_b.status, RequirementStatus::Verified, "REQ-B-PURPOSE must be Verified by deduped decision");
+    assert!(status_a.missing_obligations.is_empty());
+    assert!(status_b.missing_obligations.is_empty());
+}
+
+

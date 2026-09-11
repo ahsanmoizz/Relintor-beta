@@ -293,6 +293,7 @@ export type VerificationStatus = {
   summary: string;
   human_decisions: Array<{
     requirement_id: string;
+    requirement_ids?: string[];
     title: string;
     question: string;
     summary: string;

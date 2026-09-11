@@ -3192,31 +3192,64 @@ impl ExplicitUserDecisionRecorder {
             &probe_identity,
             &command_digest,
         ))?);
+        let mut bound_requirement_ids = vec![requirement_id.to_string()];
+        let mut all_accepted_criteria = accepted_criteria.clone();
+        for other in &authority.revision.contract.requirement_graph.requirements {
+            if other.requirement_id != requirement_id
+                && is_human_decision_semantic_equivalent(requirement, other)
+            {
+                if !bound_requirement_ids.contains(&other.requirement_id) {
+                    bound_requirement_ids.push(other.requirement_id.clone());
+                }
+                for criterion in &other.acceptance_criteria {
+                    if !criterion.machine_checkable {
+                        all_accepted_criteria.insert(criterion.criterion_id.clone());
+                    }
+                }
+            }
+        }
         let mut binding = CollectorBinding::from_authority_internal(
             authority,
             current,
             evidence_id,
-            vec![requirement_id.into()],
+            bound_requirement_ids.clone(),
             true,
-            accepted_criteria.clone(),
+            all_accepted_criteria.clone(),
             BTreeSet::new(),
         )?;
-        binding.criterion_provenance = accepted_criteria
+        binding.criterion_provenance = all_accepted_criteria
             .iter()
-            .map(|criterion_id| CriterionVerificationPlan {
-                mission_id: authority.revision.seal.mission_id.clone(),
-                mission_revision: authority.revision.revision,
-                project_id: authority.revision.seal.project_id.clone(),
-                p6_seal_hash: authority.revision.seal.contract_hash.clone(),
-                requirement_id: requirement_id.into(),
-                criterion_id: criterion_id.clone(),
-                evidence_class: EvidenceClass::HumanDecision,
-                collector_identity: collector.clone(),
-                probe_identity: probe_identity.clone(),
-                command_digest: command_digest.clone(),
-                verification_plan_authority_digest: plan_digest.clone(),
+            .map(|criterion_id| {
+                let req_id = authority
+                    .revision
+                    .contract
+                    .requirement_graph
+                    .requirements
+                    .iter()
+                    .find(|r| {
+                        r.acceptance_criteria
+                            .iter()
+                            .any(|c| &c.criterion_id == criterion_id)
+                    })
+                    .map(|r| r.requirement_id.as_str())
+                    .unwrap_or(requirement_id);
+                CriterionVerificationPlan {
+                    mission_id: authority.revision.seal.mission_id.clone(),
+                    mission_revision: authority.revision.revision,
+                    project_id: authority.revision.seal.project_id.clone(),
+                    p6_seal_hash: authority.revision.seal.contract_hash.clone(),
+                    requirement_id: req_id.into(),
+                    criterion_id: criterion_id.clone(),
+                    evidence_class: EvidenceClass::HumanDecision,
+                    collector_identity: collector.clone(),
+                    probe_identity: probe_identity.clone(),
+                    command_digest: command_digest.clone(),
+                    verification_plan_authority_digest: plan_digest.clone(),
+                }
             })
             .collect();
+        let current_identities = p7_execution.identities_for_requirement(authority, requirement_id)?;
+        let current_attempt = current_identities.first().map(|i| i.attempt_number).unwrap_or(0);
         if let Ok(all_artifacts) = store.list() {
             for artifact in &all_artifacts {
                 if artifact.metadata.mission_id == authority.revision.seal.mission_id
@@ -3224,7 +3257,7 @@ impl ExplicitUserDecisionRecorder {
                     && artifact.metadata.class == EvidenceClass::HumanDecision
                     && is_user_authored_human_decision_artifact(&artifact.metadata)
                 {
-                    let is_target = artifact.metadata.requirement_ids.contains(&requirement.requirement_id);
+                    let is_target = bound_requirement_ids.iter().any(|id| artifact.metadata.requirement_ids.contains(id));
                     let is_semantic_sibling = authority
                         .revision
                         .contract
@@ -3232,19 +3265,23 @@ impl ExplicitUserDecisionRecorder {
                         .requirements
                         .iter()
                         .any(|other| {
-                            other.requirement_id != requirement.requirement_id
-                                && artifact.metadata.requirement_ids.contains(&other.requirement_id)
-                                && is_human_decision_semantic_equivalent(requirement, other)
+                            bound_requirement_ids.contains(&other.requirement_id)
+                                || (artifact.metadata.requirement_ids.contains(&other.requirement_id)
+                                    && is_human_decision_semantic_equivalent(requirement, other))
                         });
                     if is_target || is_semantic_sibling {
                         let existing_approved = artifact.metadata.result == EvidenceResult::Pass;
-                        if approved != existing_approved {
-                            return Err(EvidenceError::InvalidAuthority(
-                                "conflicting human decision: cannot alter an existing human decision on this mission outcome without an authorized revision".into(),
-                            ));
-                        } else {
-                            // Idempotent repetition of identical decision
-                            return Ok(artifact.clone());
+                        let is_same_attempt = artifact.metadata.p7_attempt.is_none()
+                            || artifact.metadata.p7_attempt == Some(current_attempt);
+                        if is_same_attempt {
+                            if approved != existing_approved {
+                                return Err(EvidenceError::InvalidAuthority(
+                                    "conflicting human decision: cannot alter an existing human decision on this mission outcome without an authorized revision".into(),
+                                ));
+                            } else {
+                                // Idempotent repetition of identical decision
+                                return Ok(artifact.clone());
+                            }
                         }
                     }
                 }
@@ -3266,7 +3303,7 @@ impl ExplicitUserDecisionRecorder {
                 .sealed_hash
                 .clone()
                 .ok_or_else(|| EvidenceError::InvalidAuthority("sealed hash is missing".into()))?,
-            accepted_criteria,
+            accepted_criteria: all_accepted_criteria,
             seal_hash: authority.revision.seal.contract_hash.clone(),
             approved,
             notes: notes.into(),
@@ -5805,9 +5842,28 @@ impl AuthenticatedP7Execution {
         if metadata.mission_id != authority.revision.seal.mission_id
             || metadata.mission_revision != authority.revision.revision
             || metadata.p6_seal_hash != authority.revision.seal.contract_hash
-            || metadata.requirement_ids.len() != 1
+            || metadata.requirement_ids.is_empty()
         {
             return Ok(false);
+        }
+        if metadata.requirement_ids.len() > 1 {
+            if metadata.class != EvidenceClass::HumanDecision {
+                return Ok(false);
+            }
+            let reqs = &authority.revision.contract.requirement_graph.requirements;
+            let first_req = match reqs.iter().find(|r| r.requirement_id == metadata.requirement_ids[0]) {
+                Some(r) => r,
+                None => return Ok(false),
+            };
+            for rid in &metadata.requirement_ids[1..] {
+                let other_req = match reqs.iter().find(|r| &r.requirement_id == rid) {
+                    Some(r) => r,
+                    None => return Ok(false),
+                };
+                if !is_human_decision_semantic_equivalent(first_req, other_req) {
+                    return Ok(false);
+                }
+            }
         }
         let expected = self.identities_for_requirement(
             authority,

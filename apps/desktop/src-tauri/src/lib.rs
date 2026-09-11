@@ -702,6 +702,8 @@ struct HumanDecisionEvidenceItemView {
 #[derive(Debug, Clone, Serialize)]
 struct HumanDecisionPromptView {
     requirement_id: String,
+    #[serde(default)]
+    requirement_ids: Vec<String>,
     title: String,
     question: String,
     summary: String,
@@ -5688,7 +5690,30 @@ fn human_decision_prompts(
                 .is_ok_and(|stored| stored.artifact.metadata.class == EvidenceClass::HumanDecision)
         })
     });
-    if any_user_rejected {
+
+    let has_unfinished_tasks = context.p7_execution.run.tasks.values().any(|t| {
+        matches!(
+            t.state,
+            relintor_execution::ExecutionTaskState::Pending
+                | relintor_execution::ExecutionTaskState::Ready
+                | relintor_execution::ExecutionTaskState::Running
+        )
+    });
+    let correction_scope = if any_user_rejected {
+        derive_correction_scope_from_context(context, report)
+    } else {
+        None
+    };
+    let scope_unauthorized = correction_scope.as_ref().map_or(false, |s| {
+        s.human_refinement_required || (s.user_reauthorization_required && !s.authorized)
+    });
+    let unresolved_corrections_count = if has_unfinished_tasks || scope_unauthorized {
+        1
+    } else {
+        0
+    };
+
+    if unresolved_corrections_count > 0 {
         return Vec::new();
     }
 
@@ -5704,7 +5729,7 @@ fn human_decision_prompts(
         report,
         &blocked_strings,
         0,
-        if any_user_rejected { 1 } else { 0 },
+        unresolved_corrections_count,
         context.authority.validate().is_ok(),
         true,
     );
@@ -5714,7 +5739,7 @@ fn human_decision_prompts(
 
     let evidence_items = build_verification_evidence_items(context, report);
 
-    report
+    let pending_requirements: Vec<&relintor_standards::Requirement> = report
         .requirement_statuses
         .iter()
         .filter(|status| {
@@ -5732,21 +5757,44 @@ fn human_decision_prompts(
                 .iter()
                 .find(|requirement| requirement.requirement_id == status.requirement_id)
         })
-        .map(|requirement| HumanDecisionPromptView {
-            requirement_id: requirement.requirement_id.clone(),
-            title: requirement.title.clone(),
-            question: format!(
-                "Does the completed result satisfy the approved {} for this mission?",
-                requirement.title.to_lowercase()
-            ),
-            summary: requirement.intent.clone(),
-            criterion_ids: requirement
-                .acceptance_criteria
-                .iter()
-                .filter(|criterion| !criterion.machine_checkable)
-                .map(|criterion| criterion.criterion_id.clone())
-                .collect(),
-            evidence_items: evidence_items.clone(),
+        .collect();
+
+    let mut clusters: Vec<Vec<&relintor_standards::Requirement>> = Vec::new();
+    for req in pending_requirements {
+        if let Some(cluster) = clusters.iter_mut().find(|c| {
+            c.iter().any(|existing| relintor_evidence::is_human_decision_semantic_equivalent(existing, req))
+        }) {
+            cluster.push(req);
+        } else {
+            clusters.push(vec![req]);
+        }
+    }
+
+    clusters
+        .into_iter()
+        .map(|cluster| {
+            let primary = cluster[0];
+            let requirement_ids: Vec<String> = cluster.iter().map(|r| r.requirement_id.clone()).collect();
+            let mut criterion_ids: Vec<String> = Vec::new();
+            for req in &cluster {
+                for c in &req.acceptance_criteria {
+                    if !c.machine_checkable && !criterion_ids.contains(&c.criterion_id) {
+                        criterion_ids.push(c.criterion_id.clone());
+                    }
+                }
+            }
+            HumanDecisionPromptView {
+                requirement_id: primary.requirement_id.clone(),
+                requirement_ids,
+                title: primary.title.clone(),
+                question: format!(
+                    "Does the completed result satisfy the approved {} for this mission?",
+                    primary.title.to_lowercase()
+                ),
+                summary: primary.intent.clone(),
+                criterion_ids,
+                evidence_items: evidence_items.clone(),
+            }
         })
         .collect()
 }
@@ -5761,6 +5809,12 @@ fn default_verification_workflow_stage(
     failed_count: usize,
     correction_scope: Option<&relintor_evidence::CorrectionScopeView>,
 ) -> &'static str {
+    if certificate_present {
+        return "VERIFIED_COMPLETE";
+    }
+    if human_decision_pending && final_human_acceptance_eligible {
+        return "WAITING_FOR_USER_DECISION";
+    }
     if let Some(scope) = correction_scope {
         if scope.authorized || !scope.user_reauthorization_required {
             return "CORRECTING_FAILED_REQUIREMENT";
@@ -5768,14 +5822,10 @@ fn default_verification_workflow_stage(
     }
     if user_rejected {
         "USER_DECISION_REJECTED"
-    } else if certificate_present {
-        "VERIFIED_COMPLETE"
     } else if *completion_state == relintor_evidence::CompletionState::FailedVerification || failed_count > 0 {
         "VERIFICATION_NEEDS_ATTENTION"
     } else if *completion_state == relintor_evidence::CompletionState::BlockedExternal {
         "COLLECTION_BLOCKED"
-    } else if human_decision_pending && final_human_acceptance_eligible {
-        "WAITING_FOR_USER_DECISION"
     } else if *completion_state != relintor_evidence::CompletionState::VerifiedComplete && evidence_present {
         "VERIFICATION_NEEDS_ATTENTION"
     } else if !evidence_present {
@@ -6034,7 +6084,7 @@ fn verification_view(
     let summary = match stage {
         "VERIFIED_COMPLETE" => "All required evidence passed and the completion certificate is valid.",
         "WAITING_FOR_USER_DECISION" => {
-            "Automated checks are complete. Relintor needs your decision before verification can continue."
+            "Relintor independently verified all machine-checkable requirements. Your final acceptance is now required."
         }
         "CORRECTING_FAILED_REQUIREMENT" => {
             if user_rejected {
@@ -6633,9 +6683,9 @@ async fn verification_submit_human_decision(
     }
     with_verification_mutation_lock(|| {
         let (context, report, _, _) = evaluate_p8(&app, &project_id, false)?;
-        let _prompt = human_decision_prompts(&context, &report)
+        let prompt = human_decision_prompts(&context, &report)
             .into_iter()
-            .find(|prompt| prompt.requirement_id == requirement_id)
+            .find(|prompt| prompt.requirement_id == requirement_id || prompt.requirement_ids.contains(&requirement_id))
             .ok_or_else(|| {
                 "This decision is not currently requested by the sealed verification authority."
                     .to_string()
@@ -6647,7 +6697,7 @@ async fn verification_submit_human_decision(
                 &context.store,
                 &context.p7_execution,
                 ExplicitUserDecisionInput {
-                    requirement_id: &requirement_id,
+                    requirement_id: &prompt.requirement_id,
                     approved,
                     notes: &notes,
                 },

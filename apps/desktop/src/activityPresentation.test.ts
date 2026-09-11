@@ -139,7 +139,7 @@ describe("user-visible mission state model", () => {
       true,
     );
     expect(view.primaryAction).toBe("none");
-    expect(view.headline).toBe("Your decision is needed");
+    expect(view.headline).toBe("Ready for your final decision");
   });
 
   it("treats pre-evidence verification as waiting rather than failed", () => {
@@ -148,17 +148,17 @@ describe("user-visible mission state model", () => {
     expect(view.tone).toBe("info");
   });
 
-  it("surfaces incomplete verification with human decision when eligible", () => {
+  it("surfaces Ready for your final decision when machine gates pass and human decision is eligible", () => {
     const view = verificationPresentation(verification({
-      requirements_verified: 2,
+      requirements_verified: 10,
       requirements_total: 11,
-      evidence_count: 2,
+      evidence_count: 10,
       final_human_acceptance_eligible: true,
       missing_evidence: ["requirement-human: missing HUMAN_DECISION"],
     }));
-    expect(view.label).toBe("Verification needs attention");
-    expect(view.tone).toBe("warning");
-    expect(view.supporting).toMatch(/explicit human decision/i);
+    expect(view.label).toBe("Ready for your final decision");
+    expect(view.tone).toBe("info");
+    expect(view.supporting).toBe("Relintor independently verified all machine-checkable requirements. Your final acceptance is now required.");
   });
 
   it("never prompts for human decision while machine-verifiable obligations remain incomplete", () => {
@@ -329,7 +329,7 @@ describe("user-visible mission state model", () => {
         true,
       );
       expect(m.primaryAction).toBe("none");
-      expect(m.headline).toBe("Your decision is needed");
+      expect(m.headline).toBe("Ready for your final decision");
     });
 
     it("never enables Verify work while correction is actively running", () => {
@@ -477,6 +477,58 @@ describe("user-visible mission state model", () => {
       expect(m.primaryAction).toBe("recover");
       expect(m.headline).toBe("Recovery reviewed — ready to retry");
       expect(m.supporting).toContain("Review changes and retry to continue");
+    });
+
+    it("displays Ready for your final decision when all machine requirements verified and final human acceptance eligible", () => {
+      const ver = verification({
+        completion_state: "Incomplete",
+        requirements_verified: 13,
+        requirements_total: 15,
+        evidence_count: 26,
+        workflow_stage: "WAITING_FOR_USER_DECISION",
+        final_human_acceptance_eligible: true,
+        summary: "Relintor independently verified all machine-checkable requirements. Your final acceptance is now required.",
+        missing_evidence: ["req_outcome: missing HumanDecision", "req_purpose: missing HumanDecision"],
+        human_decisions: [{
+          requirement_id: "req_outcome",
+          requirement_ids: ["req_outcome", "req_purpose"],
+          title: "User problem outcome",
+          question: "Does the completed result satisfy the approved user problem outcome for this mission?",
+          summary: "Feature intent",
+          criterion_ids: ["crit_outcome", "crit_purpose"],
+        }],
+      });
+      const exec = execution({
+        finished_tasks: 15,
+        total_tasks: 15,
+        state: "ExecutionTasksFinishedAwaitingVerification",
+        execution_phase: "FINISHED_AWAITING_VERIFICATION",
+      });
+      const v = verificationPresentation(ver);
+      expect(v.label).toBe("Ready for your final decision");
+      expect(v.supporting).toBe("Relintor independently verified all machine-checkable requirements. Your final acceptance is now required.");
+      expect(v.tone).toBe("info");
+
+      const m = missionPresentation(exec, ver, true);
+      expect(m.headline).toBe("Ready for your final decision");
+      expect(m.supporting).toBe("Relintor independently verified all machine-checkable requirements. Your final acceptance is now required.");
+      expect(m.badge).toBe("Decision needed");
+      expect(m.primaryAction).toBe("none");
+    });
+
+    it("suppresses final human acceptance when any machine check fails (Defect #52)", () => {
+      const ver = verification({
+        completion_state: "FailedVerification",
+        requirements_verified: 12,
+        requirements_total: 15,
+        evidence_count: 25,
+        workflow_stage: "VERIFICATION_NEEDS_ATTENTION",
+        final_human_acceptance_eligible: false,
+        failed_checks: ["test-fail-01"],
+        missing_evidence: ["req_outcome: missing HumanDecision"],
+      });
+      const v = verificationPresentation(ver);
+      expect(v.label).toBe("Verification needs attention");
     });
   });
 });
