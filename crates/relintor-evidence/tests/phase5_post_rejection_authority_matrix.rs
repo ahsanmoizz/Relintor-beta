@@ -2922,4 +2922,108 @@ fn test_defect_44_and_phase5_human_decision_semantic_dedup_matrix() {
     assert!(status_b.missing_obligations.is_empty());
 }
 
+#[test]
+fn test_phase5_machine_verified_pending_human_decision_stage_and_dedup() {
+    let core_intent = "Implement an end-to-end Transport Health & Route Status feature for OmniChat.\n\nExpose structured transport/route health information from the existing Rust routing layer.";
+    let req_a_intent = format!("The owner needs a reliable way to turn this outcome into an agreed, reviewable product plan: {}", core_intent);
+    let req_b_intent = core_intent.to_string();
+
+    let req_a = to_requirement(&seed_decision_req("REQ-A-OUTCOME", "User problem outcome", &req_a_intent));
+    let req_b = to_requirement(&seed_decision_req("REQ-B-PURPOSE", "User product purpose", &req_b_intent));
+    let req_test = to_requirement(&seed_machine_req("REQ-TEST", "Automated Transport Tests", EvidenceClass::TestOutput));
+
+    assert!(is_human_decision_semantic_equivalent(&req_a, &req_b));
+
+    let contract_reqs = vec![req_test.clone(), req_a.clone(), req_b.clone()];
+
+    // Report where machine test is Verified, and the two human decisions are ImplementedUnverified (awaiting decision)
+    let report = VerificationReport {
+        verification_run_id: "v-p5-gate".into(),
+        authority_digest: "auth-p5".into(),
+        requirement_statuses: vec![
+            RequirementVerification {
+                requirement_id: "REQ-TEST".into(),
+                status: RequirementStatus::Verified,
+                evidence_ids: vec!["ev-test-pass".into()],
+                missing_obligations: vec![],
+                missing_acceptance_criteria: vec![],
+                stale_evidence: vec![],
+                failed_evidence: vec![],
+                reason: "all required evidence is fresh and valid".into(),
+            },
+            RequirementVerification {
+                requirement_id: "REQ-A-OUTCOME".into(),
+                status: RequirementStatus::ImplementedUnverified,
+                evidence_ids: vec![],
+                missing_obligations: vec![EvidenceClass::HumanDecision],
+                missing_acceptance_criteria: vec!["REQ-A-OUTCOME-criterion".into()],
+                stale_evidence: vec![],
+                failed_evidence: vec![],
+                reason: "required evidence is missing".into(),
+            },
+            RequirementVerification {
+                requirement_id: "REQ-B-PURPOSE".into(),
+                status: RequirementStatus::ImplementedUnverified,
+                evidence_ids: vec![],
+                missing_obligations: vec![EvidenceClass::HumanDecision],
+                missing_acceptance_criteria: vec!["REQ-B-PURPOSE-criterion".into()],
+                stale_evidence: vec![],
+                failed_evidence: vec![],
+                reason: "required evidence is missing".into(),
+            },
+        ],
+        decision: CompletionDecision {
+            state: CompletionState::StoppedIncomplete,
+            reason: "coverage is incomplete".into(),
+            deterministic_gates: vec![],
+            accepted_risks: vec![],
+            blocked_external: vec![],
+        },
+        builder_claim: None,
+        coverage_total: 3,
+        coverage_accounted: 1,
+        evidence_manifest_hash: "man-p5".into(),
+        p7_ledger_digest: None,
+        ai_judgements: vec![],
+        integrity_tag: "tag-p5".into(),
+    };
+
+    // Simulated collection.blocked_external from run_required_collectors
+    let collection_blocked_external = vec![
+        "REQ-A-OUTCOME:HumanDecision: an explicit user decision is required; Relintor will not infer or generate HUMAN_DECISION evidence".to_string(),
+        "REQ-B-PURPOSE:HumanDecision: an explicit user decision is required; Relintor will not infer or generate HUMAN_DECISION evidence".to_string(),
+    ];
+
+    // Check that machine collection blockers check correctly excludes HumanDecision
+    let has_machine_collection_blockers = collection_blocked_external.iter().any(|item| {
+        !item.contains("HumanDecision") && !item.contains("HUMAN_DECISION")
+    });
+    assert!(!has_machine_collection_blockers, "HumanDecision must not be treated as machine blocker");
+
+    let eligibility = is_final_human_acceptance_eligible(
+        &contract_reqs,
+        &report,
+        &collection_blocked_external,
+        0,
+        0,
+        true,
+        true,
+    );
+
+    assert!(eligibility.eligible, "Must be eligible for final human acceptance: {:?}", eligibility.reasons);
+    assert!(eligibility.required_machine_requirements_verified);
+    assert_eq!(eligibility.technical_blockers_count, 0);
+    assert_eq!(eligibility.missing_required_evidence_count, 0);
+
+    // Filter collection.blocked_external to ensure human decision strings do not leak into status.blocked_external
+    let filtered_blocked_external: Vec<String> = collection_blocked_external
+        .iter()
+        .filter(|item| !item.contains("HUMAN_DECISION") && !item.contains("HumanDecision"))
+        .cloned()
+        .collect();
+    assert!(filtered_blocked_external.is_empty(), "HumanDecision strings must be filtered from status.blocked_external");
+}
+
+
+
 

@@ -133,7 +133,7 @@ export function verificationPresentation(status: VerificationStatus | null): {
       status.requirements_verified !== status.requirements_total ||
       authoritySaysVerified)
   ) {
-    const hasPendingHumanDecision = [...status.missing_evidence, ...status.blocked_external].some((item) => /HUMAN[_ ]DECISION|explicit user decision/i.test(item));
+    const hasPendingHumanDecision = (status.human_decisions?.length || 0) > 0 || [...status.missing_evidence, ...status.blocked_external].some((item) => /HUMAN[_ ]DECISION|explicit user decision/i.test(item));
     const humanDecisionRequired = Boolean(status.final_human_acceptance_eligible && hasPendingHumanDecision);
     const hasMachineBlockers = status.failed_checks.length > 0 || status.blocked_external.some((b) => !/HUMAN[_ ]DECISION|explicit user decision/i.test(b));
     if (humanDecisionRequired && !hasMachineBlockers) {

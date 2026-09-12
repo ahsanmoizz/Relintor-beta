@@ -6141,7 +6141,7 @@ fn verification_view(
             .iter()
             .map(|item| format!("{}: {}", item.requirement_id, item.reason))
             .chain(collection.blocked_external.iter().filter_map(|item| {
-                if user_rejected && (item.contains("HUMAN_DECISION") || item.contains("HumanDecision")) {
+                if item.contains("HUMAN_DECISION") || item.contains("HumanDecision") {
                     None
                 } else {
                     Some(item.clone())
@@ -6611,7 +6611,10 @@ fn verification_start_inner(
             }
         }
     }
-    if (!collection.blocked_external.is_empty()
+    let has_machine_collection_blockers = collection.blocked_external.iter().any(|item| {
+        !item.contains("HumanDecision") && !item.contains("HUMAN_DECISION")
+    });
+    if (has_machine_collection_blockers
         || report.decision.state == relintor_evidence::CompletionState::BlockedExternal)
         && workflow_stage.is_none()
     {
