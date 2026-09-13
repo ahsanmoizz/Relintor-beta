@@ -8163,6 +8163,164 @@ mod tests {
     }
 
     #[test]
+    fn inspect_live_production_mission() {
+        let app_data = PathBuf::from(r"C:\Users\A\AppData\Roaming\com.relintor.desktop");
+        let db_path = app_data.join("relintor.sqlite");
+        if !db_path.is_file() {
+            return;
+        }
+        let project_id = "mission-takeover-project-takeover_719ad83a558ede1be5868c6d";
+        let (revision, handoff, registry, trusted, workspace, _takeover_fingerprint) =
+            latest_execution_context(&db_path, project_id).expect("latest execution context");
+        let ledger_path = app_data
+            .join("execution")
+            .join(format!("{}-{}.json", revision.seal.mission_id, revision.revision));
+        let p7_execution = AuthenticatedP7Execution::from_snapshot(&ledger_path)
+            .expect("authenticate P7 execution ledger");
+        let p7_run_id = p7_execution.run.run_id.clone();
+        let verification_workspace_fingerprint = p7_execution.run.workspace_fingerprint.clone();
+        let p7_state = "EXECUTION_TASKS_FINISHED_AWAITING_VERIFICATION".into();
+        let source_revision = Some(revision.contract.project_source_revision.clone());
+        let environment = environment_fingerprint(
+            &workspace,
+            &revision.seal.mission_id,
+            revision.revision,
+            &revision.seal.contract_hash,
+            &registry,
+            source_revision.clone(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .expect("fingerprint verification environment");
+        let environment_fingerprint = environment.digest().expect("digest verification environment");
+        let authority = VerificationAuthority {
+            revision,
+            handoff,
+            registry,
+            trusted_signers: trusted,
+            p7_run_id,
+            p7_state,
+            workspace_fingerprint: verification_workspace_fingerprint.clone(),
+            source_revision: source_revision.clone(),
+            environment_fingerprint: environment_fingerprint.clone(),
+        };
+        p7_execution
+            .validate_against(&authority)
+            .expect("validate P7 execution authority");
+        let local_key = load_or_create_keychain_authority_key(
+            "Relintor.P8.Authority",
+            &format!("{}-{}", authority.revision.seal.project_id, authority.revision.revision),
+        )
+        .expect("load P8 OS keychain authority");
+        let store = EvidenceStore::new(
+            app_data.join("verification").join(format!(
+                "{}-{}",
+                authority.revision.seal.mission_id, authority.revision.revision
+            )),
+            &local_key,
+        )
+        .expect("open P8 evidence store");
+        let current_workspace_fingerprint = fingerprint_workspace(&workspace)
+            .expect("fingerprint current verification workspace");
+        ensure_terminal_p7_workspace_matches(
+            &current_workspace_fingerprint,
+            &verification_workspace_fingerprint,
+        )
+        .expect("workspace matches");
+        let current = FreshnessContext {
+            mission_id: authority.revision.seal.mission_id.clone(),
+            mission_revision: authority.revision.revision,
+            p6_seal_hash: authority.revision.seal.contract_hash.clone(),
+            workspace_fingerprint: current_workspace_fingerprint,
+            source_revision,
+            environment_fingerprint: authority.environment_fingerprint.clone(),
+            dependency_lock_hashes: BTreeMap::new(),
+            workspace_root: Some(workspace),
+        };
+        let context = P8VerificationContext {
+            authority,
+            current,
+            store,
+            p7_execution,
+            local_key,
+        };
+        let engine = VerificationEngine::new_with_p7_execution(
+            context.store.clone(),
+            context.authority.clone(),
+            context.current.clone(),
+            Vec::new(),
+            context.p7_execution.clone(),
+        )
+        .expect("start P8 verification");
+        let report = engine.evaluate(None).expect("evaluate P8 requirements");
+        let manifest = export_manifest(&report, &context.authority, &context.store, Vec::new(), None)
+            .expect("export P8 evidence manifest");
+        let collection = CollectorOrchestrationResult::default();
+        let certificate = None;
+        let stage = derive_verification_workflow_stage_for_context(
+            &context,
+            &report,
+            &manifest,
+            certificate,
+            &collection,
+        );
+        let view = verification_view(
+            project_id,
+            &context,
+            &report,
+            &manifest,
+            certificate,
+            &collection,
+            Some(stage),
+        );
+
+        let contract_reqs = &context.authority.revision.contract.requirement_graph.requirements;
+        let machine_reqs: Vec<_> = contract_reqs.iter().filter(|r| r.requirement_type != "decision").collect();
+        let machine_req_ids: BTreeSet<_> = machine_reqs.iter().map(|r| &r.requirement_id).collect();
+        let machine_verified_count = report
+            .requirement_statuses
+            .iter()
+            .filter(|s| machine_req_ids.contains(&s.requirement_id) && s.status == RequirementStatus::Verified)
+            .count();
+
+        let has_human_decision_pending = report.requirement_statuses.iter().any(|status| {
+            if status.missing_obligations.contains(&EvidenceClass::HumanDecision) {
+                return true;
+            }
+            let req = contract_reqs.iter().find(|r| r.requirement_id == status.requirement_id);
+            req.map_or(false, |r| {
+                r.requirement_type == "decision" && status.status != RequirementStatus::Verified
+            })
+        });
+
+        let eligibility = is_final_human_acceptance_eligible(
+            contract_reqs,
+            &report,
+            &view.blocked_external,
+            0,
+            0,
+            context.authority.validate().is_ok(),
+            true,
+        );
+
+        assert_eq!(view.state, "VERIFICATION_FINISHED");
+        assert_eq!(view.workflow_stage, "WAITING_FOR_USER_DECISION");
+        assert!(view.final_human_acceptance_eligible);
+        assert!(view.final_human_acceptance_reasons.is_empty());
+        assert_eq!(view.requirements_total, 15);
+        assert_eq!(view.requirements_verified, 13);
+        assert_eq!(machine_reqs.len(), 13);
+        assert_eq!(machine_verified_count, 13);
+        assert!(view.missing_evidence.is_empty());
+        assert!(view.blocked_external.is_empty());
+        assert!(view.collection_failures.is_empty());
+        assert_eq!(view.human_decisions.len(), 1);
+        assert_eq!(eligibility.technical_blockers_count, 0);
+        assert_eq!(eligibility.missing_required_evidence_count, 0);
+        assert!(has_human_decision_pending);
+    }
+
+    #[test]
     fn missing_canonical_project_scope_fails_closed_with_domain_error() {
         let path = test_path("missing-canonical-project-scope");
         migrate_database(&path).expect("migrate");

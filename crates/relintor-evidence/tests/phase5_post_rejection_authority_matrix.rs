@@ -3722,3 +3722,151 @@ fn test_phase5_mandatory_negative_tests_cases_1_through_7() {
     );
     assert!(!elig7.eligible, "CASE 7: eligibility must be false after source mutation");
 }
+
+#[test]
+fn test_phase5_superseded_stale_evidence_with_rerun_eligible() {
+    let outcome_seed = seed_decision_req(
+        "requirement_1da26ac4d30cfc800fc961b0",
+        "User problem outcome",
+        "Feature intent outcome",
+    );
+    let purpose_seed = seed_decision_req(
+        "requirement_70089e6721ae13e5c0f59b5a",
+        "User product purpose",
+        "Feature intent purpose",
+    );
+    let req_outcome = to_requirement(&outcome_seed);
+    let req_purpose = to_requirement(&purpose_seed);
+
+    let mut contract_reqs = Vec::new();
+    let mut requirement_statuses = Vec::new();
+
+    // 13 machine requirements, all Verified, each having historical stale evidence superseded by a fresh rerun artifact
+    for i in 1..=13 {
+        let req_id = format!("REQ-M-{:02}", i);
+        let title = format!("Machine Check {:02}", i);
+        let class = if i % 2 == 0 {
+            EvidenceClass::TestOutput
+        } else {
+            EvidenceClass::AccessibilityResult
+        };
+        contract_reqs.push(to_requirement(&seed_machine_req(&req_id, &title, class)));
+        requirement_statuses.push(RequirementVerification {
+            requirement_id: req_id.clone(),
+            status: RequirementStatus::Verified,
+            evidence_ids: vec![format!("ev-pass-{}-rerun-1234567890abcdef", req_id)],
+            missing_obligations: vec![],
+            missing_acceptance_criteria: vec![],
+            stale_evidence: vec![format!("ev-pass-{}", req_id)],
+            failed_evidence: vec![],
+            reason: "all required evidence is fresh and valid".into(),
+        });
+    }
+
+    contract_reqs.push(req_outcome);
+    contract_reqs.push(req_purpose);
+
+    requirement_statuses.push(RequirementVerification {
+        requirement_id: "requirement_1da26ac4d30cfc800fc961b0".into(),
+        status: RequirementStatus::ImplementedUnverified,
+        evidence_ids: vec![],
+        missing_obligations: vec![EvidenceClass::HumanDecision],
+        missing_acceptance_criteria: vec!["criterion-outcome".into()],
+        stale_evidence: vec![],
+        failed_evidence: vec![],
+        reason: "required human decision is missing".into(),
+    });
+    requirement_statuses.push(RequirementVerification {
+        requirement_id: "requirement_70089e6721ae13e5c0f59b5a".into(),
+        status: RequirementStatus::ImplementedUnverified,
+        evidence_ids: vec![],
+        missing_obligations: vec![EvidenceClass::HumanDecision],
+        missing_acceptance_criteria: vec!["criterion-purpose".into()],
+        stale_evidence: vec![],
+        failed_evidence: vec![],
+        reason: "required human decision is missing".into(),
+    });
+
+    let report = VerificationReport {
+        verification_run_id: "v-p5-superseded".into(),
+        authority_digest: "auth-p5-superseded".into(),
+        requirement_statuses: requirement_statuses.clone(),
+        decision: CompletionDecision {
+            state: CompletionState::StoppedIncomplete,
+            reason: "coverage is incomplete or evidence is unknown/stale".into(),
+            deterministic_gates: vec![],
+            accepted_risks: vec![],
+            blocked_external: vec![],
+        },
+        builder_claim: None,
+        coverage_total: 15,
+        coverage_accounted: 13,
+        evidence_manifest_hash: "man-p5-superseded".into(),
+        p7_ledger_digest: None,
+        ai_judgements: vec![],
+        integrity_tag: "tag-p5-superseded".into(),
+    };
+
+    let blocked: Vec<String> = vec![];
+    let elig = is_final_human_acceptance_eligible(
+        &contract_reqs,
+        &report,
+        &blocked,
+        0,
+        0,
+        true,
+        true,
+    );
+    assert!(elig.eligible, "Superseded stale evidence with fresh reruns MUST be eligible");
+    assert_eq!(elig.stale_required_evidence_count, 0);
+    assert_eq!(elig.technical_blockers_count, 0);
+    assert_eq!(elig.missing_required_evidence_count, 0);
+
+    let stage = derive_verification_workflow_stage(
+        &contract_reqs,
+        &report,
+        true,
+        false,
+        &blocked,
+        0,
+        0,
+        None,
+        true,
+        true,
+    );
+    assert_eq!(stage, "WAITING_FOR_USER_DECISION");
+
+    // Negative case: if an un-superseded stale evidence exists, eligibility must be blocked
+    let mut neg_statuses = requirement_statuses;
+    neg_statuses[0].stale_evidence.push("ev-unsuperseded-stale".into());
+    let neg_report = VerificationReport {
+        requirement_statuses: neg_statuses,
+        ..report
+    };
+    let neg_elig = is_final_human_acceptance_eligible(
+        &contract_reqs,
+        &neg_report,
+        &blocked,
+        0,
+        0,
+        true,
+        true,
+    );
+    assert!(!neg_elig.eligible, "Unsuperseded stale evidence MUST block final acceptance");
+    assert_eq!(neg_elig.stale_required_evidence_count, 1);
+
+    let neg_stage = derive_verification_workflow_stage(
+        &contract_reqs,
+        &neg_report,
+        true,
+        false,
+        &blocked,
+        0,
+        0,
+        None,
+        true,
+        true,
+    );
+    assert_eq!(neg_stage, "VERIFICATION_NEEDS_ATTENTION");
+}
+

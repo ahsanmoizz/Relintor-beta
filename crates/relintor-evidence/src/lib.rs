@@ -5502,8 +5502,8 @@ pub fn is_final_human_acceptance_eligible(
         reasons.push(format!("{missing_required_evidence_count} required machine evidence item(s) missing"));
     }
 
-    // 4. Stale required evidence
-    let stale_required_evidence_count = report
+    // 4. Stale required evidence (superseded historical artifacts with a fresh passing rerun are not blockers)
+    let stale_required_evidence_count: usize = report
         .requirement_statuses
         .iter()
         .filter(|s| {
@@ -5512,14 +5512,30 @@ pub fn is_final_human_acceptance_eligible(
                 .find(|r| r.requirement_id == s.requirement_id);
             req.map_or(true, |r| r.requirement_type != "decision")
         })
-        .map(|s| s.stale_evidence.len())
+        .map(|s| {
+            s.stale_evidence
+                .iter()
+                .filter(|stale_id| {
+                    let is_superseded = s.evidence_ids.iter().any(|fresh_id| {
+                        fresh_id.starts_with(&format!("{stale_id}-rerun-"))
+                            || if let Some(idx) = stale_id.rfind("-rerun-") {
+                                let base = &stale_id[..idx];
+                                fresh_id.starts_with(&format!("{base}-rerun-"))
+                            } else {
+                                false
+                            }
+                    });
+                    !is_superseded
+                })
+                .count()
+        })
         .sum();
     if stale_required_evidence_count > 0 {
         reasons.push(format!("{stale_required_evidence_count} stale evidence item(s) present"));
     }
 
     // 5. Failed required evidence (machine evidence failure)
-    let failed_required_evidence_count = report
+    let failed_required_evidence_count: usize = report
         .requirement_statuses
         .iter()
         .filter(|s| {
