@@ -5460,7 +5460,19 @@ pub fn is_final_human_acceptance_eligible(
                 .iter()
                 .filter(|c| **c != EvidenceClass::HumanDecision)
                 .count();
-            missing_required_evidence_count += missing_machine + s.missing_acceptance_criteria.len();
+            let missing_machine_criteria = s
+                .missing_acceptance_criteria
+                .iter()
+                .filter(|cid| {
+                    req.map_or(true, |r| {
+                        r.acceptance_criteria
+                            .iter()
+                            .find(|c| &c.criterion_id == *cid)
+                            .map_or(true, |c| c.machine_checkable)
+                    })
+                })
+                .count();
+            missing_required_evidence_count += missing_machine + missing_machine_criteria;
         }
     }
     if missing_required_evidence_count > 0 {

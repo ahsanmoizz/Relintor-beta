@@ -5717,10 +5717,17 @@ fn human_decision_prompts(
         return Vec::new();
     }
 
+    let contract_reqs = &context.authority.revision.contract.requirement_graph.requirements;
     let blocked_strings: Vec<String> = report
         .decision
         .blocked_external
         .iter()
+        .filter(|b| {
+            let req = contract_reqs.iter().find(|r| r.requirement_id == b.requirement_id);
+            req.map_or(true, |r| r.requirement_type != "decision")
+                && !b.reason.contains("HumanDecision")
+                && !b.reason.contains("HUMAN_DECISION")
+        })
         .map(|b| format!("{}: {}", b.requirement_id, b.reason))
         .collect();
 
@@ -5972,17 +5979,32 @@ fn verification_view(
     collection: &CollectorOrchestrationResult,
     workflow_stage: Option<&str>,
 ) -> VerificationStatusView {
+    let contract_reqs = &context.authority.revision.contract.requirement_graph.requirements;
     let missing_evidence = report
         .requirement_statuses
         .iter()
         .flat_map(|status| {
-            status
+            let req = contract_reqs.iter().find(|r| r.requirement_id == status.requirement_id);
+            let missing_machine_obls = status
                 .missing_obligations
                 .iter()
-                .map(move |class| format!("{}: missing {:?}", status.requirement_id, class))
-                .chain(status.missing_acceptance_criteria.iter().map(|criterion| {
-                    format!("{}: missing criterion {criterion}", status.requirement_id)
-                }))
+                .filter(|class| **class != EvidenceClass::HumanDecision)
+                .map(move |class| format!("{}: missing {:?}", status.requirement_id, class));
+            let missing_machine_crit = status
+                .missing_acceptance_criteria
+                .iter()
+                .filter(move |criterion_id| {
+                    req.map_or(true, |r| {
+                        r.acceptance_criteria
+                            .iter()
+                            .find(|c| &c.criterion_id == *criterion_id)
+                            .map_or(true, |c| c.machine_checkable)
+                    })
+                })
+                .map(move |criterion_id| {
+                    format!("{}: missing criterion {criterion_id}", status.requirement_id)
+                });
+            missing_machine_obls.chain(missing_machine_crit)
         })
         .collect::<Vec<_>>();
     let human_decisions = human_decision_prompts(context, report);
@@ -6004,8 +6026,16 @@ fn verification_view(
         .decision
         .blocked_external
         .iter()
+        .filter(|b| {
+            let req = contract_reqs.iter().find(|r| r.requirement_id == b.requirement_id);
+            req.map_or(true, |r| r.requirement_type != "decision")
+                && !b.reason.contains("HumanDecision")
+                && !b.reason.contains("HUMAN_DECISION")
+        })
         .map(|b| format!("{}: {}", b.requirement_id, b.reason))
-        .chain(collection.blocked_external.iter().cloned())
+        .chain(collection.blocked_external.iter().filter(|item| {
+            !item.contains("HumanDecision") && !item.contains("HUMAN_DECISION")
+        }).cloned())
         .collect();
     let correction_scope = if user_rejected {
         derive_correction_scope_from_context(context, report)
@@ -6139,6 +6169,12 @@ fn verification_view(
             .decision
             .blocked_external
             .iter()
+            .filter(|item| {
+                let req = contract_reqs.iter().find(|r| r.requirement_id == item.requirement_id);
+                req.map_or(true, |r| r.requirement_type != "decision")
+                    && !item.reason.contains("HumanDecision")
+                    && !item.reason.contains("HUMAN_DECISION")
+            })
             .map(|item| format!("{}: {}", item.requirement_id, item.reason))
             .chain(collection.blocked_external.iter().filter_map(|item| {
                 if item.contains("HUMAN_DECISION") || item.contains("HumanDecision") {

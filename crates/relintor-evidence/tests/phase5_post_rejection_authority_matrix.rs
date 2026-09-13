@@ -3024,6 +3024,210 @@ fn test_phase5_machine_verified_pending_human_decision_stage_and_dedup() {
     assert!(filtered_blocked_external.is_empty(), "HumanDecision strings must be filtered from status.blocked_external");
 }
 
+#[test]
+fn test_phase5_legacy_real_state_regression_fixture() {
+    let core_intent = "Implement an end-to-end Transport Health & Route Status feature for OmniChat.\n\nExpose structured transport/route health information from the existing Rust routing layer.";
+    let req_a_intent = format!("The owner needs a reliable way to turn this outcome into an agreed, reviewable product plan: {}", core_intent);
+    let req_b_intent = core_intent.to_string();
+
+    let req_outcome = to_requirement(&seed_decision_req("REQ-H-OUTCOME", "User problem outcome", &req_a_intent));
+    let req_purpose = to_requirement(&seed_decision_req("REQ-H-PURPOSE", "User product purpose", &req_b_intent));
+
+    assert!(is_human_decision_semantic_equivalent(&req_outcome, &req_purpose));
+
+    // 13 machine requirements
+    let mut contract_reqs = Vec::new();
+    let mut requirement_statuses = Vec::new();
+
+    for i in 1..=13 {
+        let req_id = format!("REQ-M-{:02}", i);
+        let title = format!("Machine Check {:02}", i);
+        let class = if i % 2 == 0 {
+            EvidenceClass::TestOutput
+        } else {
+            EvidenceClass::AccessibilityResult
+        };
+        let m_req = to_requirement(&seed_machine_req(&req_id, &title, class));
+        contract_reqs.push(m_req);
+
+        requirement_statuses.push(RequirementVerification {
+            requirement_id: req_id.clone(),
+            status: RequirementStatus::Verified,
+            evidence_ids: vec![format!("ev-pass-{}", req_id)],
+            missing_obligations: vec![],
+            missing_acceptance_criteria: vec![],
+            stale_evidence: vec![],
+            failed_evidence: vec![],
+            reason: "all required evidence is fresh and valid".into(),
+        });
+    }
+
+    // 2 HumanDecision requirements
+    contract_reqs.push(req_outcome.clone());
+    contract_reqs.push(req_purpose.clone());
+
+    requirement_statuses.push(RequirementVerification {
+        requirement_id: "REQ-H-OUTCOME".into(),
+        status: RequirementStatus::ImplementedUnverified,
+        evidence_ids: vec![],
+        missing_obligations: vec![EvidenceClass::HumanDecision],
+        missing_acceptance_criteria: vec!["REQ-H-OUTCOME-criterion".into()],
+        stale_evidence: vec![],
+        failed_evidence: vec![],
+        reason: "required evidence is missing".into(),
+    });
+    requirement_statuses.push(RequirementVerification {
+        requirement_id: "REQ-H-PURPOSE".into(),
+        status: RequirementStatus::ImplementedUnverified,
+        evidence_ids: vec![],
+        missing_obligations: vec![EvidenceClass::HumanDecision],
+        missing_acceptance_criteria: vec!["REQ-H-PURPOSE-criterion".into()],
+        stale_evidence: vec![],
+        failed_evidence: vec![],
+        reason: "required evidence is missing".into(),
+    });
+
+    // 15 tasks completed in execution run
+    let mut tasks = BTreeMap::new();
+    for i in 1..=15 {
+        let task_id = format!("task-{:02}", i);
+        tasks.insert(
+            task_id.clone(),
+            ExecutionTask {
+                task_id: task_id.clone(),
+                objective: format!("Task {task_id}"),
+                requirement_ids: vec![],
+                dependency_ids: vec![],
+                priority: RequirementPriority::P1,
+                state: ExecutionTaskState::FinishedAwaitingVerification,
+                scope: relintor_execution::LeaseScope {
+                    workspace: std::path::PathBuf::from("workspace"),
+                    file_scopes: vec![],
+                    directory_scopes: vec![],
+                    shared_resources: vec![],
+                    package_lockfiles: vec![],
+                    generated_files: vec![],
+                    allowed_tools: BTreeSet::new(),
+                    external_authority: BTreeSet::new(),
+                    scope_known: true,
+                },
+                usage_budget: relintor_execution::UsageBudget::default(),
+                retry_policy: RetryPolicy::default(),
+                evidence_obligations: vec![],
+                attempt_number: 1,
+            },
+        );
+    }
+    assert_eq!(tasks.len(), 15, "15 tasks complete");
+    assert!(tasks.values().all(|t| t.state == ExecutionTaskState::FinishedAwaitingVerification));
+
+    let report = VerificationReport {
+        verification_run_id: "v-p5-legacy-fixture".into(),
+        authority_digest: "auth-p5-legacy".into(),
+        requirement_statuses,
+        decision: CompletionDecision {
+            state: CompletionState::StoppedIncomplete,
+            reason: "coverage is incomplete".into(),
+            deterministic_gates: vec![],
+            accepted_risks: vec![],
+            blocked_external: vec![],
+        },
+        builder_claim: None,
+        coverage_total: 15,
+        coverage_accounted: 13,
+        evidence_manifest_hash: "man-p5-legacy".into(),
+        p7_ledger_digest: None,
+        ai_judgements: vec![],
+        integrity_tag: "tag-p5-legacy".into(),
+    };
+
+    // Simulated collection.blocked_external from run_required_collectors
+    let collection_blocked_external = vec![
+        "REQ-H-OUTCOME:HumanDecision: an explicit user decision is required; Relintor will not infer or generate HUMAN_DECISION evidence".to_string(),
+        "REQ-H-PURPOSE:HumanDecision: an explicit user decision is required; Relintor will not infer or generate HUMAN_DECISION evidence".to_string(),
+    ];
+
+    // Assert: FINAL_HUMAN_ACCEPTANCE_ELIGIBLE = TRUE
+    let eligibility = is_final_human_acceptance_eligible(
+        &contract_reqs,
+        &report,
+        &collection_blocked_external,
+        0,
+        0,
+        true,
+        true,
+    );
+
+    assert!(eligibility.eligible, "FINAL_HUMAN_ACCEPTANCE_ELIGIBLE must be TRUE: {:?}", eligibility.reasons);
+    assert!(eligibility.required_machine_requirements_verified, "All 13 machine requirements must be verified");
+    assert_eq!(eligibility.technical_blockers_count, 0, "TECHNICAL_BLOCKER_COUNT must be 0");
+    assert_eq!(eligibility.missing_required_evidence_count, 0, "TECHNICAL_MISSING_EVIDENCE_COUNT must be 0");
+
+    // Assert: TECHNICAL_MISSING_EVIDENCE_COUNT = 0 via view missing evidence computation
+    let missing_evidence: Vec<String> = report
+        .requirement_statuses
+        .iter()
+        .flat_map(|status| {
+            let req = contract_reqs.iter().find(|r| r.requirement_id == status.requirement_id);
+            let missing_machine_obls = status
+                .missing_obligations
+                .iter()
+                .filter(|class| **class != EvidenceClass::HumanDecision)
+                .map(move |class| format!("{}: missing {:?}", status.requirement_id, class));
+            let missing_machine_crit = status
+                .missing_acceptance_criteria
+                .iter()
+                .filter(move |criterion_id| {
+                    req.map_or(true, |r| {
+                        r.acceptance_criteria
+                            .iter()
+                            .find(|c| &c.criterion_id == *criterion_id)
+                            .map_or(true, |c| c.machine_checkable)
+                    })
+                })
+                .map(move |criterion_id| {
+                    format!("{}: missing criterion {criterion_id}", status.requirement_id)
+                });
+            missing_machine_obls.chain(missing_machine_crit)
+        })
+        .collect();
+    assert_eq!(missing_evidence.len(), 0, "TECHNICAL_MISSING_EVIDENCE_COUNT must be 0");
+
+    // Assert: USER_DECISION_COUNT = 1 via semantic clustering
+    let pending_human_reqs: Vec<&Requirement> = report
+        .requirement_statuses
+        .iter()
+        .filter(|status| status.missing_obligations.contains(&EvidenceClass::HumanDecision))
+        .filter_map(|status| contract_reqs.iter().find(|r| r.requirement_id == status.requirement_id))
+        .collect();
+    assert_eq!(pending_human_reqs.len(), 2, "There are 2 pending HumanDecision requirements");
+
+    let mut clusters: Vec<Vec<&Requirement>> = Vec::new();
+    for req in pending_human_reqs {
+        if let Some(cluster) = clusters.iter_mut().find(|c| {
+            c.iter().any(|existing| is_human_decision_semantic_equivalent(existing, req))
+        }) {
+            cluster.push(req);
+        } else {
+            clusters.push(vec![req]);
+        }
+    }
+    assert_eq!(clusters.len(), 1, "USER_DECISION_COUNT must be 1 (semantically deduped)");
+
+    // Assert: WORKFLOW_STAGE = WAITING_FOR_USER_DECISION
+    let has_machine_collection_blockers = collection_blocked_external.iter().any(|item| {
+        !item.contains("HumanDecision") && !item.contains("HUMAN_DECISION")
+    });
+    assert!(!has_machine_collection_blockers);
+
+    let stage = if eligibility.eligible && !clusters.is_empty() {
+        "WAITING_FOR_USER_DECISION"
+    } else {
+        "OTHER"
+    };
+    assert_eq!(stage, "WAITING_FOR_USER_DECISION", "WORKFLOW_STAGE must be WAITING_FOR_USER_DECISION");
+}
+
 
 
 
