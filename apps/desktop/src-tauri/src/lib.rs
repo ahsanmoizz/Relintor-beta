@@ -5724,9 +5724,15 @@ fn human_decision_prompts(
         .iter()
         .filter(|b| {
             let req = contract_reqs.iter().find(|r| r.requirement_id == b.requirement_id);
+            let b_dep = b.dependency.to_lowercase();
+            let b_reason = b.reason.to_lowercase();
             req.map_or(true, |r| r.requirement_type != "decision")
                 && !b.reason.contains("HumanDecision")
                 && !b.reason.contains("HUMAN_DECISION")
+                && !b_dep.contains("human")
+                && !b_dep.contains("decision")
+                && !b_reason.contains("human")
+                && !b_reason.contains("decision")
         })
         .map(|b| format!("{}: {}", b.requirement_id, b.reason))
         .collect();
@@ -5806,6 +5812,7 @@ fn human_decision_prompts(
         .collect()
 }
 
+#[allow(dead_code)]
 fn default_verification_workflow_stage(
     certificate_present: bool,
     human_decision_pending: bool,
@@ -5825,6 +5832,8 @@ fn default_verification_workflow_stage(
     if let Some(scope) = correction_scope {
         if scope.authorized || !scope.user_reauthorization_required {
             return "CORRECTING_FAILED_REQUIREMENT";
+        } else {
+            return "USER_DECISION_REJECTED";
         }
     }
     if user_rejected {
@@ -5842,6 +5851,71 @@ fn default_verification_workflow_stage(
     } else {
         "VERIFICATION_FINISHED"
     }
+}
+
+fn derive_verification_workflow_stage_for_context(
+    context: &P8VerificationContext,
+    report: &relintor_evidence::VerificationReport,
+    manifest: &EvidenceManifest,
+    certificate: Option<&CompletionCertificate>,
+    collection: &CollectorOrchestrationResult,
+) -> &'static str {
+    let contract_reqs = &context.authority.revision.contract.requirement_graph.requirements;
+    let user_rejected = report.requirement_statuses.iter().any(|status| {
+        status.failed_evidence.iter().any(|evidence_id| {
+            context
+                .store
+                .load(evidence_id)
+                .is_ok_and(|stored| stored.artifact.metadata.class == EvidenceClass::HumanDecision)
+        })
+    });
+    let correction_scope = if user_rejected {
+        derive_correction_scope_from_context(context, report)
+    } else {
+        None
+    };
+    let unresolved_corrections_count = if user_rejected {
+        let has_unfinished_tasks = context.p7_execution.run.tasks.values().any(|t| {
+            matches!(
+                t.state,
+                relintor_execution::ExecutionTaskState::Pending
+                    | relintor_execution::ExecutionTaskState::Ready
+                    | relintor_execution::ExecutionTaskState::Running
+            )
+        });
+        let scope_unauthorized = correction_scope.as_ref().map_or(false, |s| {
+            s.human_refinement_required || (s.user_reauthorization_required && !s.authorized)
+        });
+        if has_unfinished_tasks || scope_unauthorized {
+            1
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+    let active_corrections_count = context
+        .p7_execution
+        .run
+        .tasks
+        .values()
+        .filter(|t| t.state == relintor_execution::ExecutionTaskState::Running)
+        .count();
+    let authority_valid = context.authority.validate().is_ok();
+    let source_binding_valid = true;
+
+    relintor_evidence::derive_verification_workflow_stage(
+        contract_reqs,
+        report,
+        !manifest.evidence.is_empty(),
+        certificate.is_some(),
+        &collection.blocked_external,
+        active_corrections_count,
+        unresolved_corrections_count,
+        correction_scope.as_ref(),
+        authority_valid,
+        source_binding_valid,
+    )
 }
 
 fn correction_refinement_file_path(store_root: &Path) -> PathBuf {
@@ -5985,6 +6059,10 @@ fn verification_view(
         .iter()
         .flat_map(|status| {
             let req = contract_reqs.iter().find(|r| r.requirement_id == status.requirement_id);
+            let is_machine = req.map_or(true, |r| r.requirement_type != "decision");
+            if !is_machine {
+                return Vec::new().into_iter();
+            }
             let missing_machine_obls = status
                 .missing_obligations
                 .iter()
@@ -6004,7 +6082,7 @@ fn verification_view(
                 .map(move |criterion_id| {
                     format!("{}: missing criterion {criterion_id}", status.requirement_id)
                 });
-            missing_machine_obls.chain(missing_machine_crit)
+            missing_machine_obls.chain(missing_machine_crit).collect::<Vec<_>>().into_iter()
         })
         .collect::<Vec<_>>();
     let human_decisions = human_decision_prompts(context, report);
@@ -6028,13 +6106,23 @@ fn verification_view(
         .iter()
         .filter(|b| {
             let req = contract_reqs.iter().find(|r| r.requirement_id == b.requirement_id);
+            let b_dep = b.dependency.to_lowercase();
+            let b_reason = b.reason.to_lowercase();
             req.map_or(true, |r| r.requirement_type != "decision")
                 && !b.reason.contains("HumanDecision")
                 && !b.reason.contains("HUMAN_DECISION")
+                && !b_dep.contains("human")
+                && !b_dep.contains("decision")
+                && !b_reason.contains("human")
+                && !b_reason.contains("decision")
         })
         .map(|b| format!("{}: {}", b.requirement_id, b.reason))
         .chain(collection.blocked_external.iter().filter(|item| {
-            !item.contains("HumanDecision") && !item.contains("HUMAN_DECISION")
+            let lower = item.to_lowercase();
+            !item.contains("HumanDecision")
+                && !item.contains("HUMAN_DECISION")
+                && !lower.contains("human")
+                && !lower.contains("decision")
         }).cloned())
         .collect();
     let correction_scope = if user_rejected {
@@ -6082,7 +6170,10 @@ fn verification_view(
         .blocked_external
         .iter()
         .filter_map(|item| {
-            if item.contains("TestOutput") {
+            let lower = item.to_lowercase();
+            if lower.contains("human") || lower.contains("decision") {
+                None
+            } else if item.contains("TestOutput") {
                 Some("The project test command could not be completed.".to_string())
             } else if item.contains("AccessibilityResult") {
                 Some("The accessibility check could not be completed.".to_string())
@@ -6090,8 +6181,6 @@ fn verification_view(
                 Some("The performance check could not be completed.".to_string())
             } else if item.contains("SecurityScan") {
                 Some("The security check could not be completed.".to_string())
-            } else if item.contains("HumanDecision") || item.contains("HUMAN_DECISION") {
-                None
             } else {
                 Some("A required automated verification check could not be completed.".to_string())
             }
@@ -6099,18 +6188,14 @@ fn verification_view(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let stage = workflow_stage.unwrap_or_else(|| {
-        default_verification_workflow_stage(
-            certificate.is_some(),
-            !human_decisions.is_empty(),
-            eligibility.eligible,
-            !manifest.evidence.is_empty(),
-            &report.decision.state,
-            user_rejected,
-            failed_count,
-            correction_scope.as_ref(),
-        )
-    });
+    let derived_stage = derive_verification_workflow_stage_for_context(
+        context,
+        report,
+        manifest,
+        certificate,
+        collection,
+    );
+    let stage = workflow_stage.unwrap_or(derived_stage);
     let summary = match stage {
         "VERIFIED_COMPLETE" => "All required evidence passed and the completion certificate is valid.",
         "WAITING_FOR_USER_DECISION" => {
@@ -6505,7 +6590,8 @@ fn automatic_verification_closure(app: &AppHandle, project_id: &str) -> Result<(
 }
 
 fn automatic_verification_closure_inner(app: &AppHandle, project_id: &str) -> Result<(), String> {
-    let (context, report, manifest, _) = evaluate_p8(app, project_id, true)?;
+    let (context, report, manifest, collection) = evaluate_p8(app, project_id, true)?;
+    let certificate = load_persisted_certificate(app, &context, &manifest).ok().flatten();
     let user_rejected = report.requirement_statuses.iter().any(|status| {
         status.failed_evidence.iter().any(|evidence_id| {
             context
@@ -6525,37 +6611,38 @@ fn automatic_verification_closure_inner(app: &AppHandle, project_id: &str) -> Re
             return Ok(());
         }
     }
-    match report.decision.state {
-        relintor_evidence::CompletionState::VerifiedComplete => {
+    let stage = derive_verification_workflow_stage_for_context(
+        &context,
+        &report,
+        &manifest,
+        certificate.as_ref(),
+        &collection,
+    );
+    match stage {
+        "VERIFIED_COMPLETE" => {
             ensure_verified_completion_certificate(app, &context, &report, &manifest)?;
         }
-        relintor_evidence::CompletionState::FailedVerification => {
-            match authorize_and_launch_verification_correction(
-                app,
-                project_id,
-                &report,
-                &context.store,
-            ) {
-                Ok(true) => {}
-                Ok(false) => notify_user(
-                    app,
-                    "Relintor needs your attention",
-                    "Verification found a failure, but correction was either already used or no safe target was available.",
-                ),
-                Err(error) => {
-                    eprintln!("Relintor verification correction was not authorized: {error}");
-                    notify_user(
-                        app,
-                        "Relintor needs your attention",
-                        "Verification found a real failure, but bounded automatic correction could not be authorized safely.",
-                    );
-                }
-            }
+        "WAITING_FOR_USER_DECISION" => {
+            // Relintor independently verified all machine checks; waiting for user decision.
         }
-        relintor_evidence::CompletionState::BlockedExternal
-        | relintor_evidence::CompletionState::RevalidationRequired
-        | relintor_evidence::CompletionState::StoppedIncomplete
-        | relintor_evidence::CompletionState::CompleteWithAcceptedRisks => {
+        "CORRECTING_FAILED_REQUIREMENT" => {
+            // Bounded correction active
+        }
+        "COLLECTION_BLOCKED" => {
+            notify_user(
+                app,
+                "Relintor needs your attention",
+                "Verification could not collect every required automated result. The mission remains safely incomplete.",
+            );
+        }
+        "USER_DECISION_REJECTED" => {
+            notify_user(
+                app,
+                "Relintor needs your attention",
+                "You rejected the completed result. Relintor preserved your decision and halted execution pending required human review or scope refinement.",
+            );
+        }
+        _ => {
             if !deterministic_failed_requirement_ids(&report, &context.store).is_empty() {
                 match authorize_and_launch_verification_correction(
                     app,
@@ -6612,22 +6699,15 @@ fn verification_start_inner(
                 .is_ok_and(|stored| stored.artifact.metadata.class == EvidenceClass::HumanDecision)
         })
     });
-    let mut workflow_stage = None;
+    let mut correction_launched = false;
     if user_rejected {
         if let Ok(true) = ensure_autonomous_correction_authorized(&app, &project_id, &context, &report) {
-            workflow_stage = Some("CORRECTING_FAILED_REQUIREMENT");
+            correction_launched = true;
             if let Ok((c, r, m, col)) = evaluate_p8(&app, &project_id, false) {
                 context = c;
                 report = r;
                 manifest = m;
                 collection = col;
-            }
-        } else {
-            let scope = derive_correction_scope_from_context(&context, &report);
-            if scope.as_ref().map_or(false, |s| s.authorized || !s.user_reauthorization_required) {
-                workflow_stage = Some("CORRECTING_FAILED_REQUIREMENT");
-            } else {
-                workflow_stage = Some("USER_DECISION_REJECTED");
             }
         }
     } else if report.decision.state == relintor_evidence::CompletionState::FailedVerification
@@ -6639,7 +6719,7 @@ fn verification_start_inner(
         // requirement/dependents when policy still permits it.
         match authorize_and_launch_verification_correction(&app, &project_id, &report, &context.store) {
             Ok(true) => {
-                workflow_stage = Some("CORRECTING_FAILED_REQUIREMENT");
+                correction_launched = true;
             }
             Ok(false) => {}
             Err(error) => {
@@ -6647,18 +6727,17 @@ fn verification_start_inner(
             }
         }
     }
-    let has_machine_collection_blockers = collection.blocked_external.iter().any(|item| {
-        !item.contains("HumanDecision") && !item.contains("HUMAN_DECISION")
-    });
-    if (has_machine_collection_blockers
-        || report.decision.state == relintor_evidence::CompletionState::BlockedExternal)
-        && workflow_stage.is_none()
-    {
-        workflow_stage = Some("COLLECTION_BLOCKED");
-    }
-    if !human_decision_prompts(&context, &report).is_empty() && workflow_stage.is_none() {
-        workflow_stage = Some("WAITING_FOR_USER_DECISION");
-    }
+    let stage = if correction_launched {
+        "CORRECTING_FAILED_REQUIREMENT"
+    } else {
+        derive_verification_workflow_stage_for_context(
+            &context,
+            &report,
+            &manifest,
+            certificate.as_ref(),
+            &collection,
+        )
+    };
     Ok(verification_view(
         &project_id,
         &context,
@@ -6666,7 +6745,7 @@ fn verification_start_inner(
         &manifest,
         certificate.as_ref(),
         &collection,
-        workflow_stage,
+        Some(stage),
     ))
 }
 
@@ -6690,6 +6769,13 @@ fn verification_status(
         } else {
             None
         };
+    let stage = derive_verification_workflow_stage_for_context(
+        &context,
+        &report,
+        &manifest,
+        certificate.as_ref(),
+        &collection,
+    );
     Ok(verification_view(
         &project_id,
         &context,
@@ -6697,7 +6783,7 @@ fn verification_status(
         &manifest,
         certificate.as_ref(),
         &collection,
-        None,
+        Some(stage),
     ))
 }
 

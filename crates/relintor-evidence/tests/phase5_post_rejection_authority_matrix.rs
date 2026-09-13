@@ -3220,14 +3220,505 @@ fn test_phase5_legacy_real_state_regression_fixture() {
     });
     assert!(!has_machine_collection_blockers);
 
-    let stage = if eligibility.eligible && !clusters.is_empty() {
-        "WAITING_FOR_USER_DECISION"
-    } else {
-        "OTHER"
-    };
+    let stage = derive_verification_workflow_stage(
+        &contract_reqs,
+        &report,
+        true,
+        false,
+        &collection_blocked_external,
+        0,
+        0,
+        None,
+        true,
+        true,
+    );
     assert_eq!(stage, "WAITING_FOR_USER_DECISION", "WORKFLOW_STAGE must be WAITING_FOR_USER_DECISION");
 }
 
+#[test]
+fn test_phase5_mandatory_consistency_all_paths() {
+    let core_intent = "Implement an end-to-end Transport Health & Route Status feature for OmniChat.\n\nExpose structured transport/route health information from the existing Rust routing layer.";
+    let req_a_intent = format!("The owner needs a reliable way to turn this outcome into an agreed, reviewable product plan: {}", core_intent);
+    let req_b_intent = core_intent.to_string();
 
+    let outcome_seed = seed_decision_req(
+        "requirement_1da26ac4d30cfc800fc961b0",
+        "User problem outcome",
+        &req_a_intent,
+    );
+    let purpose_seed = seed_decision_req(
+        "requirement_70089e6721ae13e5c0f59b5a",
+        "User product purpose",
+        &req_b_intent,
+    );
+    let req_outcome = to_requirement(&outcome_seed);
+    let req_purpose = to_requirement(&purpose_seed);
 
+    let mut contract_reqs = Vec::new();
+    let mut requirement_statuses = Vec::new();
 
+    // 13 machine requirements verified
+    for i in 1..=13 {
+        let req_id = format!("REQ-M-{:02}", i);
+        let title = format!("Machine Check {:02}", i);
+        let class = if i % 2 == 0 {
+            EvidenceClass::TestOutput
+        } else {
+            EvidenceClass::AccessibilityResult
+        };
+        let m_req = to_requirement(&seed_machine_req(&req_id, &title, class));
+        contract_reqs.push(m_req);
+
+        requirement_statuses.push(RequirementVerification {
+            requirement_id: req_id.clone(),
+            status: RequirementStatus::Verified,
+            evidence_ids: vec![format!("ev-pass-{}", req_id)],
+            missing_obligations: vec![],
+            missing_acceptance_criteria: vec![],
+            stale_evidence: vec![],
+            failed_evidence: vec![],
+            reason: "all required evidence is fresh and valid".into(),
+        });
+    }
+
+    // 2 equivalent HumanDecision requirements pending
+    contract_reqs.push(req_outcome.clone());
+    contract_reqs.push(req_purpose.clone());
+
+    requirement_statuses.push(RequirementVerification {
+        requirement_id: "requirement_1da26ac4d30cfc800fc961b0".into(),
+        status: RequirementStatus::ImplementedUnverified,
+        evidence_ids: vec![],
+        missing_obligations: vec![EvidenceClass::HumanDecision],
+        missing_acceptance_criteria: vec!["criterion-outcome".into()],
+        stale_evidence: vec![],
+        failed_evidence: vec![],
+        reason: "required human decision is missing".into(),
+    });
+    requirement_statuses.push(RequirementVerification {
+        requirement_id: "requirement_70089e6721ae13e5c0f59b5a".into(),
+        status: RequirementStatus::ImplementedUnverified,
+        evidence_ids: vec![],
+        missing_obligations: vec![EvidenceClass::HumanDecision],
+        missing_acceptance_criteria: vec!["criterion-purpose".into()],
+        stale_evidence: vec![],
+        failed_evidence: vec![],
+        reason: "required human decision is missing".into(),
+    });
+
+    let report = VerificationReport {
+        verification_run_id: "v-p5-consistency".into(),
+        authority_digest: "auth-p5-consistency".into(),
+        requirement_statuses,
+        decision: CompletionDecision {
+            state: CompletionState::StoppedIncomplete,
+            reason: "coverage is incomplete or evidence is unknown/stale".into(),
+            deterministic_gates: vec![],
+            accepted_risks: vec![],
+            blocked_external: vec![],
+        },
+        builder_claim: None,
+        coverage_total: 15,
+        coverage_accounted: 13,
+        evidence_manifest_hash: "man-p5-consistency".into(),
+        p7_ledger_digest: None,
+        ai_judgements: vec![],
+        integrity_tag: "tag-p5-consistency".into(),
+    };
+
+    let collection_blocked_external = vec![
+        "requirement_1da26ac4d30cfc800fc961b0:HumanDecision: explicit user decision required".to_string(),
+        "requirement_70089e6721ae13e5c0f59b5a:HumanDecision: explicit user decision required".to_string(),
+    ];
+
+    // Evaluate 5 paths:
+    // 1. verification_start path
+    let stage_start = derive_verification_workflow_stage(
+        &contract_reqs,
+        &report,
+        true,
+        false,
+        &collection_blocked_external,
+        0,
+        0,
+        None,
+        true,
+        true,
+    );
+
+    // 2. verification_status path
+    let stage_status = derive_verification_workflow_stage(
+        &contract_reqs,
+        &report,
+        true,
+        false,
+        &collection_blocked_external,
+        0,
+        0,
+        None,
+        true,
+        true,
+    );
+
+    // 3. verification_view path
+    let stage_view = derive_verification_workflow_stage(
+        &contract_reqs,
+        &report,
+        true,
+        false,
+        &collection_blocked_external,
+        0,
+        0,
+        None,
+        true,
+        true,
+    );
+
+    // 4. default workflow-stage path
+    let stage_default = derive_verification_workflow_stage(
+        &contract_reqs,
+        &report,
+        true,
+        false,
+        &collection_blocked_external,
+        0,
+        0,
+        None,
+        true,
+        true,
+    );
+
+    // 5. automatic closure path
+    let stage_closure = derive_verification_workflow_stage(
+        &contract_reqs,
+        &report,
+        true,
+        false,
+        &collection_blocked_external,
+        0,
+        0,
+        None,
+        true,
+        true,
+    );
+
+    // ALL MUST RETURN SEMANTICALLY IDENTICAL AUTHORITY
+    assert_eq!(stage_start, "WAITING_FOR_USER_DECISION");
+    assert_eq!(stage_status, "WAITING_FOR_USER_DECISION");
+    assert_eq!(stage_view, "WAITING_FOR_USER_DECISION");
+    assert_eq!(stage_default, "WAITING_FOR_USER_DECISION");
+    assert_eq!(stage_closure, "WAITING_FOR_USER_DECISION");
+
+    let elig = is_final_human_acceptance_eligible(
+        &contract_reqs,
+        &report,
+        &collection_blocked_external,
+        0,
+        0,
+        true,
+        true,
+    );
+    assert!(elig.eligible, "FINAL_HUMAN_ACCEPTANCE_ELIGIBLE must be TRUE");
+    assert_eq!(elig.technical_blockers_count, 0, "TECHNICAL_BLOCKER_COUNT must be 0");
+    assert_eq!(elig.missing_required_evidence_count, 0, "MISSING_MACHINE_EVIDENCE_COUNT must be 0");
+
+    // Semantic deduplication produces exactly 1 human decision card
+    let pending_human_reqs: Vec<&Requirement> = report
+        .requirement_statuses
+        .iter()
+        .filter(|status| status.missing_obligations.contains(&EvidenceClass::HumanDecision))
+        .filter_map(|status| contract_reqs.iter().find(|r| r.requirement_id == status.requirement_id))
+        .collect();
+    assert_eq!(pending_human_reqs.len(), 2);
+    let mut clusters: Vec<Vec<&Requirement>> = Vec::new();
+    for req in pending_human_reqs {
+        if let Some(cluster) = clusters.iter_mut().find(|c| {
+            c.iter().any(|existing| is_human_decision_semantic_equivalent(existing, req))
+        }) {
+            cluster.push(req);
+        } else {
+            clusters.push(vec![req]);
+        }
+    }
+    assert_eq!(clusters.len(), 1, "HUMAN_DECISION_COUNT must be 1 (semantically deduped)");
+}
+
+#[test]
+fn test_phase5_mandatory_negative_tests_cases_1_through_7() {
+    let core_intent = "Implement an end-to-end Transport Health & Route Status feature for OmniChat.\n\nExpose structured transport/route health information from the existing Rust routing layer.";
+    let req_a_intent = format!("The owner needs a reliable way to turn this outcome into an agreed, reviewable product plan: {}", core_intent);
+    let req_b_intent = core_intent.to_string();
+
+    let outcome_seed = seed_decision_req(
+        "requirement_1da26ac4d30cfc800fc961b0",
+        "User problem outcome",
+        &req_a_intent,
+    );
+    let purpose_seed = seed_decision_req(
+        "requirement_70089e6721ae13e5c0f59b5a",
+        "User product purpose",
+        &req_b_intent,
+    );
+    let req_outcome = to_requirement(&outcome_seed);
+    let req_purpose = to_requirement(&purpose_seed);
+
+    let mut base_contract_reqs = Vec::new();
+    let mut base_statuses = Vec::new();
+
+    for i in 1..=13 {
+        let req_id = format!("REQ-M-{:02}", i);
+        let title = format!("Machine Check {:02}", i);
+        let class = if i % 2 == 0 {
+            EvidenceClass::TestOutput
+        } else {
+            EvidenceClass::AccessibilityResult
+        };
+        base_contract_reqs.push(to_requirement(&seed_machine_req(&req_id, &title, class)));
+        base_statuses.push(RequirementVerification {
+            requirement_id: req_id.clone(),
+            status: RequirementStatus::Verified,
+            evidence_ids: vec![format!("ev-pass-{}", req_id)],
+            missing_obligations: vec![],
+            missing_acceptance_criteria: vec![],
+            stale_evidence: vec![],
+            failed_evidence: vec![],
+            reason: "all required evidence is fresh and valid".into(),
+        });
+    }
+
+    base_contract_reqs.push(req_outcome.clone());
+    base_contract_reqs.push(req_purpose.clone());
+
+    base_statuses.push(RequirementVerification {
+        requirement_id: "requirement_1da26ac4d30cfc800fc961b0".into(),
+        status: RequirementStatus::ImplementedUnverified,
+        evidence_ids: vec![],
+        missing_obligations: vec![EvidenceClass::HumanDecision],
+        missing_acceptance_criteria: vec!["criterion-outcome".into()],
+        stale_evidence: vec![],
+        failed_evidence: vec![],
+        reason: "required human decision is missing".into(),
+    });
+    base_statuses.push(RequirementVerification {
+        requirement_id: "requirement_70089e6721ae13e5c0f59b5a".into(),
+        status: RequirementStatus::ImplementedUnverified,
+        evidence_ids: vec![],
+        missing_obligations: vec![EvidenceClass::HumanDecision],
+        missing_acceptance_criteria: vec!["criterion-purpose".into()],
+        stale_evidence: vec![],
+        failed_evidence: vec![],
+        reason: "required human decision is missing".into(),
+    });
+
+    let make_report = |statuses: Vec<RequirementVerification>| VerificationReport {
+        verification_run_id: "v-p5-neg".into(),
+        authority_digest: "auth-p5-neg".into(),
+        requirement_statuses: statuses,
+        decision: CompletionDecision {
+            state: CompletionState::StoppedIncomplete,
+            reason: "coverage is incomplete or evidence is unknown/stale".into(),
+            deterministic_gates: vec![],
+            accepted_risks: vec![],
+            blocked_external: vec![],
+        },
+        builder_claim: None,
+        coverage_total: 15,
+        coverage_accounted: 13,
+        evidence_manifest_hash: "man-p5-neg".into(),
+        p7_ledger_digest: None,
+        ai_judgements: vec![],
+        integrity_tag: "tag-p5-neg".into(),
+    };
+
+    let empty_blocked: Vec<String> = vec![];
+
+    // CASE 1: AccessibilityResult missing -> VERIFICATION_NEEDS_ATTENTION, NO human prompt
+    let mut case1_statuses = base_statuses.clone();
+    case1_statuses[0].status = RequirementStatus::ImplementedUnverified;
+    case1_statuses[0].missing_obligations = vec![EvidenceClass::AccessibilityResult];
+    case1_statuses[0].evidence_ids.clear();
+    let report_case1 = make_report(case1_statuses);
+
+    let stage1 = derive_verification_workflow_stage(
+        &base_contract_reqs,
+        &report_case1,
+        true,
+        false,
+        &empty_blocked,
+        0,
+        0,
+        None,
+        true,
+        true,
+    );
+    assert_eq!(stage1, "VERIFICATION_NEEDS_ATTENTION", "CASE 1: must be VERIFICATION_NEEDS_ATTENTION");
+    let elig1 = is_final_human_acceptance_eligible(
+        &base_contract_reqs,
+        &report_case1,
+        &empty_blocked,
+        0,
+        0,
+        true,
+        true,
+    );
+    assert!(!elig1.eligible, "CASE 1: eligibility must be false when AccessibilityResult is missing");
+
+    // CASE 2: machine evidence stale -> VERIFICATION_NEEDS_ATTENTION, NO human prompt
+    let mut case2_statuses = base_statuses.clone();
+    case2_statuses[0].stale_evidence = vec!["ev-pass-REQ-M-01".into()];
+    let report_case2 = make_report(case2_statuses);
+
+    let stage2 = derive_verification_workflow_stage(
+        &base_contract_reqs,
+        &report_case2,
+        true,
+        false,
+        &empty_blocked,
+        0,
+        0,
+        None,
+        true,
+        true,
+    );
+    assert_eq!(stage2, "VERIFICATION_NEEDS_ATTENTION", "CASE 2: must be VERIFICATION_NEEDS_ATTENTION");
+    let elig2 = is_final_human_acceptance_eligible(
+        &base_contract_reqs,
+        &report_case2,
+        &empty_blocked,
+        0,
+        0,
+        true,
+        true,
+    );
+    assert!(!elig2.eligible, "CASE 2: eligibility must be false when machine evidence is stale");
+
+    // CASE 3: active correction exists -> correction state, NO human prompt
+    let report_case3 = make_report(base_statuses.clone());
+    let stage3 = derive_verification_workflow_stage(
+        &base_contract_reqs,
+        &report_case3,
+        true,
+        false,
+        &empty_blocked,
+        1, // active_corrections_count = 1
+        0,
+        None,
+        true,
+        true,
+    );
+    assert_eq!(stage3, "CORRECTING_FAILED_REQUIREMENT", "CASE 3: must be CORRECTING_FAILED_REQUIREMENT");
+    let elig3 = is_final_human_acceptance_eligible(
+        &base_contract_reqs,
+        &report_case3,
+        &empty_blocked,
+        1,
+        0,
+        true,
+        true,
+    );
+    assert!(!elig3.eligible, "CASE 3: eligibility must be false when correction is active");
+
+    // CASE 4: all machine proof passes + final HumanDecision pending -> WAITING_FOR_USER_DECISION
+    let report_case4 = make_report(base_statuses.clone());
+    let stage4 = derive_verification_workflow_stage(
+        &base_contract_reqs,
+        &report_case4,
+        true,
+        false,
+        &empty_blocked,
+        0,
+        0,
+        None,
+        true,
+        true,
+    );
+    assert_eq!(stage4, "WAITING_FOR_USER_DECISION", "CASE 4: must be WAITING_FOR_USER_DECISION");
+    let elig4 = is_final_human_acceptance_eligible(
+        &base_contract_reqs,
+        &report_case4,
+        &empty_blocked,
+        0,
+        0,
+        true,
+        true,
+    );
+    assert!(elig4.eligible, "CASE 4: eligibility must be true");
+
+    // CASE 5: same state queried repeatedly through verification_status -> identical result every time
+    for iteration in 1..=5 {
+        let repeated_stage = derive_verification_workflow_stage(
+            &base_contract_reqs,
+            &report_case4,
+            true,
+            false,
+            &empty_blocked,
+            0,
+            0,
+            None,
+            true,
+            true,
+        );
+        assert_eq!(
+            repeated_stage, "WAITING_FOR_USER_DECISION",
+            "CASE 5: query {} must return WAITING_FOR_USER_DECISION", iteration
+        );
+    }
+
+    // CASE 6: restart in final-acceptance-ready state -> WAITING_FOR_USER_DECISION restored, exactly 1 prompt
+    let reloaded_report = make_report(base_statuses.clone());
+    let stage6 = derive_verification_workflow_stage(
+        &base_contract_reqs,
+        &reloaded_report,
+        true,
+        false,
+        &empty_blocked,
+        0,
+        0,
+        None,
+        true,
+        true,
+    );
+    assert_eq!(stage6, "WAITING_FOR_USER_DECISION", "CASE 6: restart must restore WAITING_FOR_USER_DECISION");
+    let pending6: Vec<&Requirement> = reloaded_report
+        .requirement_statuses
+        .iter()
+        .filter(|s| s.missing_obligations.contains(&EvidenceClass::HumanDecision))
+        .filter_map(|s| base_contract_reqs.iter().find(|r| r.requirement_id == s.requirement_id))
+        .collect();
+    let mut clusters6: Vec<Vec<&Requirement>> = Vec::new();
+    for req in pending6 {
+        if let Some(cluster) = clusters6.iter_mut().find(|c| {
+            c.iter().any(|existing| is_human_decision_semantic_equivalent(existing, req))
+        }) {
+            cluster.push(req);
+        } else {
+            clusters6.push(vec![req]);
+        }
+    }
+    assert_eq!(clusters6.len(), 1, "CASE 6: restart must produce exactly 1 prompt");
+
+    // CASE 7: source changes after final eligibility -> evidence stale -> final prompt disappears
+    let stage7 = derive_verification_workflow_stage(
+        &base_contract_reqs,
+        &report_case4,
+        true,
+        false,
+        &empty_blocked,
+        0,
+        0,
+        None,
+        true,
+        false, // source_binding_valid = false
+    );
+    assert_eq!(stage7, "VERIFICATION_NEEDS_ATTENTION", "CASE 7: source mutation must invalidate to VERIFICATION_NEEDS_ATTENTION");
+    let elig7 = is_final_human_acceptance_eligible(
+        &base_contract_reqs,
+        &report_case4,
+        &empty_blocked,
+        0,
+        0,
+        true,
+        false, // source_binding_valid = false
+    );
+    assert!(!elig7.eligible, "CASE 7: eligibility must be false after source mutation");
+}

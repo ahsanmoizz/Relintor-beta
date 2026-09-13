@@ -5425,17 +5425,40 @@ pub fn is_final_human_acceptance_eligible(
     let blocked_requirements = report
         .requirement_statuses
         .iter()
-        .filter(|s| s.status == RequirementStatus::Blocked)
+        .filter(|s| {
+            if s.status != RequirementStatus::Blocked {
+                return false;
+            }
+            let req = contract_requirements
+                .iter()
+                .find(|r| r.requirement_id == s.requirement_id);
+            req.map_or(true, |r| r.requirement_type != "decision")
+        })
         .count();
     let blocked_machine_collectors = collection_blocked_external
         .iter()
-        .filter(|item| !item.contains("HumanDecision") && !item.contains("HUMAN_DECISION"))
+        .filter(|item| {
+            let lower = item.to_lowercase();
+            !item.contains("HumanDecision")
+                && !item.contains("HUMAN_DECISION")
+                && !lower.contains("human")
+                && !lower.contains("decision")
+        })
         .count();
     let blocked_report_external = report
         .decision
         .blocked_external
         .iter()
         .filter(|b| {
+            let lower_dep = b.dependency.to_lowercase();
+            let lower_reason = b.reason.to_lowercase();
+            if lower_dep.contains("human")
+                || lower_dep.contains("decision")
+                || lower_reason.contains("human")
+                || lower_reason.contains("decision")
+            {
+                return false;
+            }
             let req = contract_requirements
                 .iter()
                 .find(|r| r.requirement_id == b.requirement_id);
@@ -5577,6 +5600,111 @@ pub fn is_final_human_acceptance_eligible(
         current_source_binding_valid: source_binding_valid,
         all_human_decision_prerequisites_verified,
         reasons,
+    }
+}
+
+pub fn derive_verification_workflow_stage(
+    contract_requirements: &[Requirement],
+    report: &VerificationReport,
+    manifest_evidence_present: bool,
+    certificate_present: bool,
+    collection_blocked_external: &[String],
+    active_corrections_count: usize,
+    unresolved_corrections_count: usize,
+    correction_scope: Option<&CorrectionScopeView>,
+    authority_valid: bool,
+    source_binding_valid: bool,
+) -> &'static str {
+    // 1. AUTHORITY_UNAVAILABLE
+    if !authority_valid || !manifest_evidence_present {
+        return "READY_TO_VERIFY";
+    }
+
+    // 6. VERIFIED COMPLETE
+    if certificate_present || report.decision.state == CompletionState::VerifiedComplete {
+        return "VERIFIED_COMPLETE";
+    }
+
+    let eligibility = is_final_human_acceptance_eligible(
+        contract_requirements,
+        report,
+        collection_blocked_external,
+        active_corrections_count,
+        unresolved_corrections_count,
+        authority_valid,
+        source_binding_valid,
+    );
+
+    // 2. REAL MACHINE TECHNICAL BLOCKER
+    let has_machine_blockers = eligibility.technical_blockers_count > 0
+        || (report.decision.state == CompletionState::BlockedExternal
+            && !report.decision.blocked_external.is_empty()
+            && report.decision.blocked_external.iter().any(|b| {
+                let lower_dep = b.dependency.to_lowercase();
+                let lower_reason = b.reason.to_lowercase();
+                if lower_dep.contains("human")
+                    || lower_dep.contains("decision")
+                    || lower_reason.contains("human")
+                    || lower_reason.contains("decision")
+                {
+                    return false;
+                }
+                let req = contract_requirements
+                    .iter()
+                    .find(|r| r.requirement_id == b.requirement_id);
+                req.map_or(true, |r| r.requirement_type != "decision")
+            }));
+    if has_machine_blockers {
+        return "COLLECTION_BLOCKED";
+    }
+
+    // 3. ACTIVE / UNRESOLVED CORRECTION
+    if active_corrections_count > 0 {
+        return "CORRECTING_FAILED_REQUIREMENT";
+    }
+    if let Some(scope) = correction_scope {
+        if scope.authorized || !scope.user_reauthorization_required {
+            return "CORRECTING_FAILED_REQUIREMENT";
+        } else {
+            return "USER_DECISION_REJECTED";
+        }
+    }
+    if unresolved_corrections_count > 0 {
+        return "USER_DECISION_REJECTED";
+    }
+
+    // Check if any human decision is pending
+    let has_human_decision_pending = report.requirement_statuses.iter().any(|status| {
+        if status.missing_obligations.contains(&EvidenceClass::HumanDecision) {
+            return true;
+        }
+        let req = contract_requirements
+            .iter()
+            .find(|r| r.requirement_id == status.requirement_id);
+        req.map_or(false, |r| {
+            r.requirement_type == "decision" && status.status != RequirementStatus::Verified
+        })
+    });
+
+    // 4. MACHINE EVIDENCE REQUIRED
+    if !eligibility.required_machine_requirements_verified
+        || eligibility.missing_required_evidence_count > 0
+        || eligibility.stale_required_evidence_count > 0
+        || eligibility.failed_required_evidence_count > 0
+        || report.decision.state == CompletionState::FailedVerification
+    {
+        return "VERIFICATION_NEEDS_ATTENTION";
+    }
+
+    // 5. FINAL HUMAN ACCEPTANCE REQUIRED
+    if eligibility.eligible && has_human_decision_pending {
+        return "WAITING_FOR_USER_DECISION";
+    }
+
+    if report.decision.state != CompletionState::VerifiedComplete && manifest_evidence_present {
+        "VERIFICATION_NEEDS_ATTENTION"
+    } else {
+        "VERIFICATION_FINISHED"
     }
 }
 
@@ -6844,7 +6972,20 @@ impl VerificationEngine {
         }
         let blocked_external = statuses
             .iter()
-            .filter(|item| item.status == RequirementStatus::Blocked)
+            .filter(|item| {
+                if item.status != RequirementStatus::Blocked {
+                    return false;
+                }
+                let req = self
+                    .authority
+                    .revision
+                    .contract
+                    .requirement_graph
+                    .requirements
+                    .iter()
+                    .find(|r| r.requirement_id == item.requirement_id);
+                req.map_or(true, |r| r.requirement_type != "decision")
+            })
             .map(|item| BlockedExternalRecord {
                 requirement_id: item.requirement_id.clone(),
                 dependency: "external verification dependency".into(),
