@@ -28,6 +28,7 @@ pub const MAX_CHECKPOINT_BYTES: usize = 512 * 1024 * 1024;
 pub const MAX_SNAPSHOT_FILES: usize = 4096;
 pub const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_UNTRACKED_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const CHECKPOINT_CHAIN_STUB_VERSION: &str = "p9-checkpoint-chain-stub-v1";
 #[cfg(windows)]
 const REPARSE_POINT: u32 = 0x400;
 
@@ -374,6 +375,58 @@ pub struct CheckpointRecord {
     pub content_digest: String,
     pub content: CheckpointContent,
     pub integrity_tag: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CheckpointChainStub {
+    record_version: String,
+    recovery_version: String,
+    checkpoint_id: String,
+    sequence: u64,
+    parent_digest: Option<String>,
+    content_digest: String,
+    authority: RecoveryAuthority,
+    kind: CheckpointKind,
+    verification_references: Vec<String>,
+    reason: String,
+    created_at_ms: u64,
+    integrity_tag: String,
+}
+
+#[derive(Debug, Clone)]
+enum CheckpointArtifact {
+    Full(CheckpointRecord),
+    Stub(CheckpointChainStub),
+}
+
+impl CheckpointArtifact {
+    fn sequence(&self) -> u64 {
+        match self {
+            Self::Full(record) => record.sequence,
+            Self::Stub(stub) => stub.sequence,
+        }
+    }
+
+    fn checkpoint_id(&self) -> &str {
+        match self {
+            Self::Full(record) => &record.checkpoint_id,
+            Self::Stub(stub) => &stub.checkpoint_id,
+        }
+    }
+
+    fn content_digest(&self) -> &str {
+        match self {
+            Self::Full(record) => &record.content_digest,
+            Self::Stub(stub) => &stub.content_digest,
+        }
+    }
+
+    fn parent_digest(&self) -> Option<&str> {
+        match self {
+            Self::Full(record) => record.parent_digest.as_deref(),
+            Self::Stub(stub) => stub.parent_digest.as_deref(),
+        }
+    }
 }
 
 impl CheckpointRecord {
@@ -1604,6 +1657,12 @@ impl RecoveryStore {
             ));
         }
         let index = self.load_index()?;
+        if index.is_some() {
+            // Never extend a chain that cannot currently be authenticated. The first Phase-2
+            // checkpoint may pay the one-time cost of validating the historical full chain;
+            // subsequent loads are bounded by compact chain stubs plus the newest full payload.
+            self.load_latest()?;
+        }
         let next_sequence = index
             .as_ref()
             .map_or(1, |item| item.latest_sequence.saturating_add(1));
@@ -1658,6 +1717,17 @@ impl RecoveryStore {
         atomic_write_pretty_json(&self.root.join("checkpoint-index.json"), &new_index)?;
         *self.latest_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.run_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+        // Authority is already durably committed at this point. Compaction is therefore
+        // best-effort: an interruption or low-disk error leaves historical full checkpoints
+        // in place and never turns a successful authoritative checkpoint into a false failure.
+        // Keep both the newly committed full payload and the immediately previous full
+        // recovery payload.  That preserves the pre-write rollback boundary if the newest
+        // authoritative checkpoint later proves unreadable, while older superseded payloads
+        // collapse to authenticated chain stubs.
+        if next_sequence > 2 {
+            let _ = self.compact_superseded_checkpoints(next_sequence - 2);
+        }
         Ok(record)
     }
 
@@ -1710,13 +1780,16 @@ impl RecoveryStore {
             return Ok(None);
         };
 
-        // Fast path: if latest_cache holds the record matching index and latest file on disk has not changed
+        // Fast path: if latest_cache holds the full newest record and the authoritative
+        // latest artifact has not changed, the chain was already authenticated in this store.
         let latest_path = self.checkpoint_path(index.latest_sequence, &index.latest_checkpoint_id);
         if let Ok(meta) = fs::metadata(&latest_path) {
             let mtime = meta.modified().unwrap_or(UNIX_EPOCH);
             let len = meta.len();
             let latest_cache_guard = self.latest_cache.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((cached_seq, cached_mtime, cached_len, cached_rec)) = latest_cache_guard.as_ref() {
+            if let Some((cached_seq, cached_mtime, cached_len, cached_rec)) =
+                latest_cache_guard.as_ref()
+            {
                 if *cached_seq == index.latest_sequence
                     && *cached_mtime == mtime
                     && *cached_len == len
@@ -1733,7 +1806,10 @@ impl RecoveryStore {
             let path = entry.path();
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 if name.starts_with("checkpoint-") && name.ends_with(".json") {
-                    if let Some(seq_part) = name.strip_prefix("checkpoint-").and_then(|s| s.split('-').next()) {
+                    if let Some(seq_part) = name
+                        .strip_prefix("checkpoint-")
+                        .and_then(|s| s.split('-').next())
+                    {
                         if let Ok(seq) = seq_part.parse::<u64>() {
                             checkpoint_files.entry(seq).or_default().push(path);
                         }
@@ -1742,10 +1818,9 @@ impl RecoveryStore {
             }
         }
 
-        // Resolve canonical path for each sequence from 1..=index.latest_sequence.
-        // We resolve backwards from latest_sequence anchored by index.latest_checkpoint_id and
-        // index.latest_digest, ensuring any intermediate duplicates are disambiguated by the
-        // parent_digest expected by the child sequence in the cryptographic chain.
+        // Resolve the authoritative lineage backwards from the signed index. Historical
+        // artifacts may be full checkpoints or authenticated compact chain stubs. The newest
+        // indexed artifact must always remain a full checkpoint because it is recovery truth.
         let mut resolved_paths: BTreeMap<u64, PathBuf> = BTreeMap::new();
         let mut expected_digest: Option<String> = Some(index.latest_digest.clone());
 
@@ -1754,75 +1829,76 @@ impl RecoveryStore {
                 RecoveryError::Chain(format!("checkpoint sequence {seq} is missing"))
             })?;
 
+            let choose = |path: &Path| -> Result<CheckpointArtifact, RecoveryError> {
+                let artifact = self.read_checkpoint_artifact(path)?;
+                if artifact.sequence() != seq {
+                    return Err(RecoveryError::Chain(format!(
+                        "checkpoint artifact sequence mismatch at {seq}"
+                    )));
+                }
+                if Some(artifact.content_digest()) != expected_digest.as_deref() {
+                    return Err(RecoveryError::Chain(format!(
+                        "checkpoint sequence {seq} does not match the child/index digest lineage"
+                    )));
+                }
+                Ok(artifact)
+            };
+
             let (chosen_path, chosen_parent_digest) = if candidate_paths.len() == 1 {
-                let p = &candidate_paths[0];
+                let path = &candidate_paths[0];
                 if seq == index.latest_sequence {
                     let expected_path = self.checkpoint_path(seq, &index.latest_checkpoint_id);
-                    if p != &expected_path {
+                    if path != &expected_path {
                         return Err(RecoveryError::Chain(format!(
                             "checkpoint sequence {seq} does not match authoritative index latest checkpoint id"
                         )));
                     }
                 }
-                let meta = fs::metadata(p).map_err(io_error)?;
-                let mtime = meta.modified().unwrap_or(UNIX_EPOCH);
-                let len = meta.len();
-                let parent_digest = {
-                    let cache = self.chain_cache.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(cached) = cache.get(&seq) {
-                        if cached.mtime == mtime && cached.len == len {
-                            cached.parent_digest.clone()
-                        } else {
-                            let rec: CheckpointRecord = read_json(p)?;
-                            self.validate_record(&rec)?;
-                            rec.parent_digest
-                        }
-                    } else {
-                        let rec: CheckpointRecord = read_json(p)?;
-                        self.validate_record(&rec)?;
-                        rec.parent_digest
-                    }
-                };
-                (p.clone(), parent_digest)
+                let artifact = choose(path)?;
+                if seq == index.latest_sequence
+                    && !matches!(&artifact, CheckpointArtifact::Full(_))
+                {
+                    return Err(RecoveryError::Chain(
+                        "authoritative latest checkpoint was compacted and is not recoverable".into(),
+                    ));
+                }
+                (path.clone(), artifact.parent_digest().map(str::to_owned))
             } else if seq == index.latest_sequence {
                 let expected_path = self.checkpoint_path(seq, &index.latest_checkpoint_id);
                 let matching = candidate_paths
                     .iter()
-                    .filter(|p| *p == &expected_path)
+                    .filter(|path| *path == &expected_path)
                     .collect::<Vec<_>>();
-                if matching.len() == 1 {
-                    let rec: CheckpointRecord = read_json(&expected_path)?;
-                    self.validate_record(&rec)?;
-                    if rec.content_digest != index.latest_digest {
-                        return Err(RecoveryError::Chain(
-                            "checkpoint index digest does not match newest artifact".into(),
-                        ));
-                    }
-                    (expected_path, rec.parent_digest)
-                } else if matching.is_empty() {
-                    return Err(RecoveryError::Chain(format!(
-                        "checkpoint sequence {seq} has duplicate artifacts with none matching the authoritative index"
-                    )));
-                } else {
-                    return Err(RecoveryError::Chain(format!(
-                        "checkpoint sequence {seq} has ambiguous duplicate authority matching index"
-                    )));
+                if matching.len() != 1 {
+                    return Err(RecoveryError::Chain(if matching.is_empty() {
+                        format!(
+                            "checkpoint sequence {seq} has duplicate artifacts with none matching the authoritative index"
+                        )
+                    } else {
+                        format!(
+                            "checkpoint sequence {seq} has ambiguous duplicate authority matching index"
+                        )
+                    }));
                 }
+                let artifact = choose(&expected_path)?;
+                if !matches!(&artifact, CheckpointArtifact::Full(_)) {
+                    return Err(RecoveryError::Chain(
+                        "authoritative latest checkpoint was compacted and is not recoverable".into(),
+                    ));
+                }
+                (expected_path, artifact.parent_digest().map(str::to_owned))
             } else {
                 let mut valid_candidates = Vec::new();
-                for cand in candidate_paths {
-                    if let Ok(cand_record) = read_json::<CheckpointRecord>(cand) {
-                        if self.validate_record(&cand_record).is_ok()
-                            && cand_record.sequence == seq
-                            && Some(&cand_record.content_digest) == expected_digest.as_ref()
-                        {
-                            valid_candidates.push((cand.clone(), cand_record));
-                        }
+                for candidate in candidate_paths {
+                    if let Ok(artifact) = choose(candidate) {
+                        valid_candidates.push((
+                            candidate.clone(),
+                            artifact.parent_digest().map(str::to_owned),
+                        ));
                     }
                 }
                 if valid_candidates.len() == 1 {
-                    let (chosen_cand, chosen_rec) = valid_candidates.remove(0);
-                    (chosen_cand, chosen_rec.parent_digest)
+                    valid_candidates.remove(0)
                 } else if valid_candidates.is_empty() {
                     return Err(RecoveryError::Chain(format!(
                         "checkpoint sequence {seq} has duplicate artifacts with none matching cryptographic lineage from child sequence"
@@ -1838,6 +1914,12 @@ impl RecoveryStore {
             resolved_paths.insert(seq, chosen_path);
         }
 
+        if expected_digest.is_some() {
+            return Err(RecoveryError::Chain(
+                "checkpoint root unexpectedly names a parent digest".into(),
+            ));
+        }
+
         let mut previous: Option<String> = None;
         let mut latest_record: Option<CheckpointRecord> = None;
         let mut cache = self.chain_cache.lock().unwrap_or_else(|e| e.into_inner());
@@ -1849,15 +1931,18 @@ impl RecoveryStore {
             let meta = fs::metadata(path).map_err(io_error)?;
             let mtime = meta.modified().unwrap_or(UNIX_EPOCH);
             let len = meta.len();
-
             let is_latest = sequence == index.latest_sequence;
 
             if is_latest {
                 let latest_cache_guard = self.latest_cache.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some((cached_seq, cached_mtime, cached_len, cached_rec)) = latest_cache_guard.as_ref() {
+                if let Some((cached_seq, cached_mtime, cached_len, cached_rec)) =
+                    latest_cache_guard.as_ref()
+                {
                     if *cached_seq == sequence && *cached_mtime == mtime && *cached_len == len {
-                        if cached_rec.parent_digest != previous {
-                            return Err(RecoveryError::Chain("checkpoint parent chain is broken".into()));
+                        if cached_rec.parent_digest.as_deref() != previous.as_deref() {
+                            return Err(RecoveryError::Chain(
+                                "checkpoint parent chain is broken".into(),
+                            ));
                         }
                         if cached_rec.checkpoint_id != index.latest_checkpoint_id
                             || cached_rec.content_digest != index.latest_digest
@@ -1872,33 +1957,53 @@ impl RecoveryStore {
                 }
             } else if let Some(cached) = cache.get(&sequence) {
                 if cached.mtime == mtime && cached.len == len {
-                    if cached.sequence != sequence || cached.parent_digest != previous {
-                        return Err(RecoveryError::Chain("checkpoint parent chain is broken".into()));
+                    if cached.sequence != sequence
+                        || cached.parent_digest.as_deref() != previous.as_deref()
+                    {
+                        return Err(RecoveryError::Chain(
+                            "checkpoint parent chain is broken".into(),
+                        ));
                     }
                     previous = Some(cached.content_digest.clone());
                     continue;
                 }
             }
 
-            let mut record: CheckpointRecord = read_json(path)?;
-            self.validate_record(&record)?;
-            if record.sequence != sequence || record.parent_digest != previous {
-                return Err(RecoveryError::Chain("checkpoint parent chain is broken".into()));
+            let artifact = self.read_checkpoint_artifact(path)?;
+            if artifact.sequence() != sequence
+                || artifact.parent_digest() != previous.as_deref()
+            {
+                return Err(RecoveryError::Chain(
+                    "checkpoint parent chain is broken".into(),
+                ));
             }
-            previous = Some(record.content_digest.clone());
 
-            if record.recovery_version == LEGACY_RECOVERY_VERSION {
-                let legacy_version = record.recovery_version.clone();
-                let legacy_tag = record.integrity_tag.clone();
-                record.recovery_version = RECOVERY_VERSION.into();
-                let tag = hmac_json(&self.key, &record_without_tag(&record))?;
-                record.integrity_tag = tag;
-                if let Err(error) = atomic_write_json(path, &record) {
-                    if !is_low_storage_error(&error) {
-                        return Err(error);
+            let checkpoint_id = artifact.checkpoint_id().to_owned();
+            let content_digest = artifact.content_digest().to_owned();
+            let parent_digest = artifact.parent_digest().map(str::to_owned);
+
+            let mut full_record = match artifact {
+                CheckpointArtifact::Full(record) => Some(record),
+                CheckpointArtifact::Stub(_) => None,
+            };
+
+            if let Some(record) = full_record.as_mut() {
+                if record.recovery_version == LEGACY_RECOVERY_VERSION {
+                    let legacy_version = record.recovery_version.clone();
+                    let legacy_tag = record.integrity_tag.clone();
+                    record.recovery_version = RECOVERY_VERSION.into();
+                    let migrated_tag = {
+                        let unsigned = record_without_tag(record);
+                        hmac_json(&self.key, &unsigned)?
+                    };
+                    record.integrity_tag = migrated_tag;
+                    if let Err(error) = atomic_write_json(path, record) {
+                        if !is_low_storage_error(&error) {
+                            return Err(error);
+                        }
+                        record.recovery_version = legacy_version;
+                        record.integrity_tag = legacy_tag;
                     }
-                    record.recovery_version = legacy_version;
-                    record.integrity_tag = legacy_tag;
                 }
             }
 
@@ -1906,15 +2011,21 @@ impl RecoveryStore {
                 sequence,
                 ValidatedChainEntry {
                     sequence,
-                    checkpoint_id: record.checkpoint_id.clone(),
-                    content_digest: record.content_digest.clone(),
-                    parent_digest: record.parent_digest.clone(),
+                    checkpoint_id: checkpoint_id.clone(),
+                    content_digest: content_digest.clone(),
+                    parent_digest: parent_digest.clone(),
                     mtime,
                     len,
                 },
             );
+            previous = Some(content_digest);
 
             if is_latest {
+                let record = full_record.ok_or_else(|| {
+                    RecoveryError::Chain(
+                        "authoritative latest checkpoint must remain a full recovery payload".into(),
+                    )
+                })?;
                 if record.checkpoint_id != index.latest_checkpoint_id
                     || record.content_digest != index.latest_digest
                 {
@@ -1922,19 +2033,20 @@ impl RecoveryStore {
                         "checkpoint index does not match the newest artifact".into(),
                     ));
                 }
-                let mut latest_cache_guard = self.latest_cache.lock().unwrap_or_else(|e| e.into_inner());
-                *latest_cache_guard = Some((sequence, mtime, len, record.clone()));
+                *self.latest_cache.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some((sequence, mtime, len, record.clone()));
                 latest_record = Some(record);
             }
         }
 
         if index.recovery_version == LEGACY_RECOVERY_VERSION {
             let mut current_index = index;
-            let _legacy_version = current_index.recovery_version.clone();
-            let _legacy_tag = current_index.integrity_tag.clone();
             current_index.recovery_version = RECOVERY_VERSION.into();
-            let tag = hmac_json(&self.key, &index_without_tag(&current_index))?;
-            current_index.integrity_tag = tag;
+            let migrated_tag = {
+                let unsigned = index_without_tag(&current_index);
+                hmac_json(&self.key, &unsigned)?
+            };
+            current_index.integrity_tag = migrated_tag;
             if let Err(error) =
                 atomic_write_pretty_json(&self.root.join("checkpoint-index.json"), &current_index)
             {
@@ -1944,13 +2056,9 @@ impl RecoveryStore {
             }
         }
 
-        if let Some(record) = latest_record {
-            Ok(Some(record))
-        } else {
-            Err(RecoveryError::Chain(
-                "checkpoint index has no valid newest checkpoint".into(),
-            ))
-        }
+        latest_record.ok_or_else(|| {
+            RecoveryError::Chain("checkpoint index has no valid newest checkpoint".into())
+        }).map(Some)
     }
 
     pub fn load_run(&self) -> Result<Option<ExecutionRun>, RecoveryError> {
@@ -2170,6 +2278,140 @@ impl RecoveryStore {
         Ok(Some(index))
     }
 
+    fn read_checkpoint_artifact(&self, path: &Path) -> Result<CheckpointArtifact, RecoveryError> {
+        let metadata = fs::metadata(path).map_err(io_error)?;
+        if metadata.len() > MAX_CHECKPOINT_BYTES as u64 {
+            return Err(RecoveryError::Corrupt(
+                "recovery artifact exceeds size limit".into(),
+            ));
+        }
+        let bytes = fs::read(path).map_err(io_error)?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|error| RecoveryError::Corrupt(error.to_string()))?;
+        if value.get("content").is_some() {
+            let record: CheckpointRecord = serde_json::from_value(value)
+                .map_err(|error| RecoveryError::Corrupt(error.to_string()))?;
+            self.validate_record(&record)?;
+            Ok(CheckpointArtifact::Full(record))
+        } else {
+            let stub: CheckpointChainStub = serde_json::from_value(value)
+                .map_err(|error| RecoveryError::Corrupt(error.to_string()))?;
+            self.validate_chain_stub(&stub)?;
+            Ok(CheckpointArtifact::Stub(stub))
+        }
+    }
+
+    fn validate_chain_stub(&self, stub: &CheckpointChainStub) -> Result<(), RecoveryError> {
+        if stub.record_version != CHECKPOINT_CHAIN_STUB_VERSION
+            || stub.recovery_version != RECOVERY_VERSION
+            || stub.sequence == 0
+            || stub.checkpoint_id.trim().is_empty()
+            || stub.content_digest.trim().is_empty()
+            || stub.authority.checkpoint_sequence != stub.sequence
+            || stub.integrity_tag != hmac_json(&self.key, &checkpoint_stub_without_tag(stub))?
+        {
+            return Err(RecoveryError::Corrupt(
+                "checkpoint chain stub authentication failed".into(),
+            ));
+        }
+        let expected_authority_proof = sha256_json(&(
+            stub.authority.identity_tuple(),
+            stub.sequence,
+            stub.parent_digest.as_deref(),
+        ));
+        if stub.authority.integrity_proof != expected_authority_proof {
+            return Err(RecoveryError::Corrupt(
+                "checkpoint chain stub authority proof is invalid".into(),
+            ));
+        }
+        stub.authority.validate_nonempty()?;
+        Ok(())
+    }
+
+    fn chain_stub_from_record(
+        &self,
+        record: &CheckpointRecord,
+    ) -> Result<CheckpointChainStub, RecoveryError> {
+        self.validate_record(record)?;
+        let mut stub = CheckpointChainStub {
+            record_version: CHECKPOINT_CHAIN_STUB_VERSION.into(),
+            recovery_version: RECOVERY_VERSION.into(),
+            checkpoint_id: record.checkpoint_id.clone(),
+            sequence: record.sequence,
+            parent_digest: record.parent_digest.clone(),
+            content_digest: record.content_digest.clone(),
+            authority: record.content.authority.clone(),
+            kind: record.content.kind,
+            verification_references: record.content.verification_references.clone(),
+            reason: record.content.reason.clone(),
+            created_at_ms: record.content.created_at_ms,
+            integrity_tag: String::new(),
+        };
+        let integrity_tag = {
+            let unsigned = checkpoint_stub_without_tag(&stub);
+            hmac_json(&self.key, &unsigned)?
+        };
+        stub.integrity_tag = integrity_tag;
+        Ok(stub)
+    }
+
+    fn compact_superseded_checkpoints(&self, through_sequence: u64) -> Result<(), RecoveryError> {
+        if through_sequence == 0 {
+            return Ok(());
+        }
+
+        let result = (|| -> Result<(), RecoveryError> {
+            // Populate the authenticated canonical chain cache before rewriting any historical
+            // artifact. The latest full checkpoint is intentionally never compacted here.
+            let latest = self.load_latest()?.ok_or_else(|| {
+                RecoveryError::Chain(
+                    "cannot compact a recovery store without a latest checkpoint".into(),
+                )
+            })?;
+            if through_sequence >= latest.sequence {
+                return Err(RecoveryError::Chain(
+                    "checkpoint compaction may not replace the latest recovery payload".into(),
+                ));
+            }
+
+            let canonical = {
+                let cache = self.chain_cache.lock().unwrap_or_else(|e| e.into_inner());
+                (1..=through_sequence)
+                    .map(|sequence| {
+                        let entry = cache.get(&sequence).ok_or_else(|| {
+                            RecoveryError::Chain(format!(
+                                "checkpoint sequence {sequence} is not present in the authenticated chain cache"
+                            ))
+                        })?;
+                        Ok((sequence, entry.checkpoint_id.clone()))
+                    })
+                    .collect::<Result<Vec<_>, RecoveryError>>()?
+            };
+
+            for (sequence, checkpoint_id) in canonical {
+                let path = self.checkpoint_path(sequence, &checkpoint_id);
+                match self.read_checkpoint_artifact(&path)? {
+                    CheckpointArtifact::Full(record) => {
+                        let stub = self.chain_stub_from_record(&record)?;
+                        atomic_write_json(&path, &stub)?;
+                    }
+                    CheckpointArtifact::Stub(_) => {}
+                }
+            }
+            Ok(())
+        })();
+
+        // Compaction may be interrupted after replacing any prefix of historical records.
+        // Mixed full/stub history is valid, but all file metadata caches must be discarded.
+        self.chain_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        *self.latest_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.run_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        result
+    }
+
     fn validate_record(&self, record: &CheckpointRecord) -> Result<(), RecoveryError> {
         let version_supported = matches!(
             record.recovery_version.as_str(),
@@ -2332,7 +2574,7 @@ impl RecoveryCoordinator {
         now_ms: u64,
     ) -> Result<CheckpointRecord, RecoveryError> {
         let workspace = WorkspaceSnapshot::capture(root, now_ms)?;
-        let untracked = UntrackedFileSnapshot::capture(root, now_ms)?;
+        let untracked = UntrackedFileSnapshot::capture_for_checkpoint(root, &workspace, now_ms)?;
         let git = GitWorktreeSnapshot::capture(root)?;
         self.store.write_run_checkpoint(
             run,
@@ -2851,6 +3093,57 @@ impl WorkspaceSnapshot {
 }
 
 impl UntrackedFileSnapshot {
+    fn capture_for_checkpoint(
+        root: &Path,
+        workspace: &WorkspaceSnapshot,
+        now_ms: u64,
+    ) -> Result<Self, RecoveryError> {
+        let root = canonical_root(root)?;
+        if PathBuf::from(&workspace.root) != root {
+            return Err(RecoveryError::Path(
+                "checkpoint workspace root does not match captured workspace authority".into(),
+            ));
+        }
+        let mut files = Vec::new();
+        let mut omitted_paths = Vec::new();
+        for item in &workspace.files {
+            let relative = item.relative_path.clone();
+            if is_sensitive_path(&relative) {
+                omitted_paths.push(relative);
+                continue;
+            }
+            let path = safe_join(&root, &relative)?;
+            let metadata = fs::symlink_metadata(&path).map_err(io_error)?;
+            if is_link_or_reparse(&metadata) {
+                omitted_paths.push(relative);
+                continue;
+            }
+            // Recovery checkpoints need immutable workspace identity, not a second copy of
+            // workspace bytes.  The already-captured WorkspaceSnapshot carries the digest
+            // and size authority used by resume_integrity.  File contents remain available
+            // to the compensation subsystem through the ordinary capture() API below.
+            files.push(UntrackedFileRecord {
+                relative_path: relative.clone(),
+                digest: item.digest.clone(),
+                size: item.size,
+                content: None,
+            });
+            omitted_paths.push(relative);
+            if files.len() > MAX_SNAPSHOT_FILES {
+                return Err(RecoveryError::Storage(
+                    "checkpoint metadata file-count limit exceeded".into(),
+                ));
+            }
+        }
+        Ok(Self {
+            root: root.display().to_string(),
+            files,
+            omitted_paths,
+            total_bytes: 0,
+            captured_at_ms: now_ms,
+        })
+    }
+
     pub fn capture(root: &Path, now_ms: u64) -> Result<Self, RecoveryError> {
         let root = canonical_root(root)?;
         let workspace = WorkspaceSnapshot::capture(&root, now_ms)?;
@@ -3320,6 +3613,22 @@ fn compensation_journal_without_tag(journal: &CompensationJournal) -> impl Seria
         &journal.recovery_version,
         &journal.entries,
         &journal.attempts,
+    )
+}
+
+fn checkpoint_stub_without_tag(stub: &CheckpointChainStub) -> impl Serialize + '_ {
+    (
+        &stub.record_version,
+        &stub.recovery_version,
+        &stub.checkpoint_id,
+        stub.sequence,
+        &stub.parent_digest,
+        &stub.content_digest,
+        &stub.authority,
+        stub.kind,
+        &stub.verification_references,
+        &stub.reason,
+        stub.created_at_ms,
     )
 }
 

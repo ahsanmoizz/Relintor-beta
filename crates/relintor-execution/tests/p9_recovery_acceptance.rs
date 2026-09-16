@@ -5,7 +5,7 @@ use relintor_execution::{
     ExecutionRunState, ExecutionTask, ExecutionTaskState, GitWorktreeSnapshot, LeaseScope,
     LeaseStatus, ProcessInspector, ProcessObservation, ProcessOwnershipRecord, RecoveryAuthority,
     RecoveryCoordinator, RecoveryDisposition, RecoveryStore, RetryPolicy, SessionEndState,
-    SqliteTestDatabaseHook, TaskAttempt, TaskAttemptState, TestDatabaseCheckpointHook, UntrackedFileRecord,
+    SqliteTestDatabaseHook, TaskAttemptState, TestDatabaseCheckpointHook, UntrackedFileRecord,
     UntrackedFileSnapshot, UsageBudget, WorkspaceSnapshot,
 };
 use relintor_standards::RequirementPriority;
@@ -172,6 +172,290 @@ fn checkpoint_chain_appends_and_binds_parent() {
     assert_eq!(second.parent_digest, Some(first.content_digest));
     assert_eq!(store.load_latest().expect("load").unwrap().sequence, 2);
 }
+
+#[test]
+fn superseded_checkpoint_payloads_compact_to_authenticated_chain_stubs() {
+    let path = root("phase2-chain-compaction");
+    let recovery_store = store(&path);
+    let first = recovery_store
+        .write_checkpoint(content(&path, "first"))
+        .expect("first checkpoint");
+    let second = recovery_store
+        .write_checkpoint(content(&path, "second"))
+        .expect("second checkpoint");
+    let third = recovery_store
+        .write_checkpoint(content(&path, "third"))
+        .expect("third checkpoint");
+
+    let recovery = path.join(".relintor-recovery");
+    let artifact_for = |sequence: u64| {
+        fs::read_dir(&recovery)
+            .expect("list recovery")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|artifact| {
+                artifact.file_name().is_some_and(|name| {
+                    name.to_string_lossy()
+                        .contains(&format!("{sequence:020}"))
+                })
+            })
+            .expect("checkpoint artifact")
+    };
+    let first_path = artifact_for(1);
+    let second_path = artifact_for(2);
+    let third_path = artifact_for(3);
+
+    let first_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&first_path).expect("read first")).expect("parse first");
+    let second_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&second_path).expect("read second")).expect("parse second");
+    let third_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&third_path).expect("read third")).expect("parse third");
+
+    assert!(
+        first_json.get("content").is_none(),
+        "payload older than the previous rollback boundary should be compacted"
+    );
+    assert_eq!(
+        first_json.get("record_version").and_then(|value| value.as_str()),
+        Some("p9-checkpoint-chain-stub-v1")
+    );
+    assert_eq!(
+        first_json.get("content_digest").and_then(|value| value.as_str()),
+        Some(first.content_digest.as_str())
+    );
+    assert!(
+        second_json.get("content").is_some(),
+        "immediately previous checkpoint must remain fully recoverable"
+    );
+    assert!(
+        third_json.get("content").is_some(),
+        "latest checkpoint must remain fully recoverable"
+    );
+    assert_eq!(second.sequence, 2);
+    assert_eq!(third.sequence, 3);
+    assert!(
+        fs::metadata(&first_path).expect("first metadata").len()
+            < fs::metadata(&third_path).expect("third metadata").len()
+    );
+
+    let reopened = store(&path).load_latest().expect("reload").expect("latest");
+    assert_eq!(reopened.sequence, third.sequence);
+    assert_eq!(reopened.checkpoint_id, third.checkpoint_id);
+}
+
+
+#[test]
+fn checkpoint_run_records_workspace_identity_without_copying_workspace_bytes() {
+    let path = root("phase2-checkpoint-metadata-only");
+    fs::write(path.join("notes.txt"), vec![b'x'; 256 * 1024]).expect("seed workspace file");
+    let run = empty_run(&path);
+    let workspace = WorkspaceSnapshot::capture(&path, 1).expect("workspace");
+    let authority = RecoveryAuthority::new(
+        "project-p9",
+        "mission-p9",
+        1,
+        "p6-seal-p9",
+        "registry-p9",
+        run.run_id.clone(),
+        workspace.fingerprint.clone(),
+        "source-p9",
+        None,
+        "P8_PENDING",
+        1,
+    );
+    let store = store(&path);
+    RecoveryCoordinator::new(store.clone())
+        .checkpoint_run(
+            &run,
+            authority,
+            CheckpointKind::AfterTaskPersistence,
+            &path,
+            Vec::new(),
+            Vec::new(),
+            "metadata-only checkpoint",
+            1,
+        )
+        .expect("checkpoint");
+
+    let latest = store.load_latest().expect("load").expect("latest");
+    assert_eq!(latest.content.workspace.fingerprint, workspace.fingerprint);
+    assert_eq!(latest.content.untracked.total_bytes, 0);
+    assert!(latest
+        .content
+        .untracked
+        .files
+        .iter()
+        .all(|file| file.content.is_none()));
+    assert!(latest
+        .content
+        .untracked
+        .files
+        .iter()
+        .any(|file| file.relative_path == "notes.txt"));
+}
+
+#[test]
+fn compact_chain_stub_tampering_fails_closed() {
+    let path = root("phase2-stub-tamper");
+    let recovery_store = store(&path);
+    recovery_store
+        .write_checkpoint(content(&path, "first"))
+        .expect("first checkpoint");
+    recovery_store
+        .write_checkpoint(content(&path, "second"))
+        .expect("second checkpoint");
+    recovery_store
+        .write_checkpoint(content(&path, "third"))
+        .expect("third checkpoint");
+
+    let recovery = path.join(".relintor-recovery");
+    let first_path = fs::read_dir(&recovery)
+        .expect("list recovery")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|artifact| {
+            artifact
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().contains("00000000000000000001"))
+        })
+        .expect("first artifact");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&first_path).expect("read stub")).expect("parse stub");
+    assert!(
+        value.get("content").is_none(),
+        "sequence 1 must be compacted once sequence 3 is durable"
+    );
+    value["reason"] = serde_json::Value::String("tampered".into());
+    fs::write(
+        &first_path,
+        serde_json::to_vec(&value).expect("serialize tampered stub"),
+    )
+    .expect("write tampered stub");
+
+    let reopened = store(&path);
+    assert!(
+        reopened.load_latest().is_err(),
+        "tampered compact history must fail closed"
+    );
+}
+
+
+#[test]
+fn interrupted_compaction_mixed_full_and_stub_history_still_loads_latest() {
+    let path = root("phase2-interrupted-compaction");
+    let recovery_store = store(&path);
+    recovery_store
+        .write_checkpoint(content(&path, "first"))
+        .expect("first checkpoint");
+    recovery_store
+        .write_checkpoint(content(&path, "second"))
+        .expect("second checkpoint");
+    recovery_store
+        .write_checkpoint(content(&path, "third"))
+        .expect("third checkpoint");
+
+    let recovery = path.join(".relintor-recovery");
+    let second_path = fs::read_dir(&recovery)
+        .expect("list recovery")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|artifact| {
+            artifact
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().contains("00000000000000000002"))
+        })
+        .expect("second artifact");
+    let second_full_bytes = fs::read(&second_path).expect("save second full payload");
+
+    recovery_store
+        .write_checkpoint(content(&path, "fourth"))
+        .expect("fourth checkpoint");
+
+    // Sequence 2 is now eligible for compaction. Restoring its already-authenticated full
+    // payload models cleanup being interrupted before that replacement became durable.
+    // The chain must accept this mixed full/stub history and still resolve the newest authority.
+    fs::write(&second_path, second_full_bytes).expect("restore second full payload");
+
+    let reopened = store(&path)
+        .load_latest()
+        .expect("load mixed chain")
+        .expect("latest");
+    assert_eq!(reopened.sequence, 4);
+    assert_eq!(reopened.content.reason, "fourth");
+}
+
+
+#[test]
+fn repeated_checkpoint_generation_keeps_previous_and_latest_full_recovery_payloads() {
+    let path = root("phase2-bounded-history");
+    let recovery_store = store(&path);
+    for sequence in 1..=100_u64 {
+        recovery_store
+            .write_checkpoint(content(&path, &format!("checkpoint-{sequence}")))
+            .expect("write bounded checkpoint chain");
+    }
+
+    let recovery = path.join(".relintor-recovery");
+    let mut full_payloads = 0_usize;
+    let mut chain_stubs = 0_usize;
+    let mut checkpoint_bytes = 0_u64;
+    let mut full_sequences = Vec::new();
+    for path in fs::read_dir(&recovery)
+        .expect("list recovery")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy();
+                name.starts_with("checkpoint-") && name.ends_with(".json")
+            })
+        })
+    {
+        checkpoint_bytes += fs::metadata(&path).expect("checkpoint metadata").len();
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("read checkpoint"))
+                .expect("parse checkpoint");
+        if value.get("content").is_some() {
+            full_payloads += 1;
+            let sequence = value
+                .get("sequence")
+                .and_then(|value| value.as_u64())
+                .expect("full checkpoint sequence");
+            full_sequences.push(sequence);
+        } else if value
+            .get("record_version")
+            .and_then(|value| value.as_str())
+            == Some("p9-checkpoint-chain-stub-v1")
+        {
+            chain_stubs += 1;
+        }
+    }
+
+    full_sequences.sort_unstable();
+    assert_eq!(
+        full_payloads, 2,
+        "previous and latest recovery payloads must remain full"
+    );
+    assert_eq!(
+        full_sequences,
+        vec![99, 100],
+        "only the immediate rollback boundary and latest authority stay full"
+    );
+    assert_eq!(
+        chain_stubs, 98,
+        "older superseded generations become authenticated stubs"
+    );
+    assert!(
+        checkpoint_bytes < 10 * 1024 * 1024,
+        "synthetic 100-generation history must remain bounded"
+    );
+
+    let reopened = store(&path).load_latest().expect("reload").expect("latest");
+    assert_eq!(reopened.sequence, 100);
+    assert_eq!(reopened.content.reason, "checkpoint-100");
+}
+
 
 #[test]
 fn checkpoint_metadata_tampering_fails_closed() {
