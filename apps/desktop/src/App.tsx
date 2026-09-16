@@ -452,6 +452,7 @@ function Projects({
   const [authority, setAuthority] = useState<AuthorityPreview | null>(null);
   const [authorityBusy, setAuthorityBusy] = useState(false);
   const [authorityError, setAuthorityError] = useState<string | null>(null);
+  const projectOpenInFlight = useRef(false);
 
   useEffect(() => setMode(initialMode), [initialMode]);
 
@@ -554,6 +555,8 @@ function Projects({
   };
 
   const openSavedProject = async (project: ProjectSummary) => {
+    if (projectOpenInFlight.current) return;
+    projectOpenInFlight.current = true;
     setProjectsError(null);
     try {
       const opened = await openProject(project.project_id);
@@ -567,6 +570,8 @@ function Projects({
       }
     } catch (reason) {
       setProjectsError(String(reason));
+    } finally {
+      projectOpenInFlight.current = false;
     }
   };
 

@@ -2904,51 +2904,22 @@ fn reconcile_unsealed_project_takeover(path: &Path, project_id: &str) -> Result<
         return Ok(());
     }
 
-    let needs_rescan = if scanner_version != relintor_takeover::TAKEOVER_SCANNER_VERSION {
-        true
-    } else if let Ok(report) = TakeoverScanner::default().scan(&p) {
-        report.fingerprint != fingerprint
-    } else {
-        false
+    let Ok(report) = TakeoverScanner::default().scan(&p) else {
+        return Ok(());
     };
+    let needs_rescan = scanner_version != relintor_takeover::TAKEOVER_SCANNER_VERSION
+        || report.fingerprint != fingerprint;
 
     if needs_rescan {
-        if let Ok(report) = TakeoverScanner::default().scan(&p) {
-            let _ = persist_takeover_for_project(path, &report, project_id);
-        }
+        let _ = persist_takeover_for_project(path, &report, project_id);
     }
 
-    Ok(())
-}
-
-fn reconcile_all_unsealed_projects(path: &Path) -> Result<(), String> {
-    let connection = Connection::open(path)
-        .map_err(|error| format!("open db for bulk reconciliation: {error}"))?;
-    let mut stmt = connection
-        .prepare(
-            "SELECT p.id FROM projects p
-             WHERE p.root_path IS NOT NULL
-               AND NOT EXISTS (
-                   SELECT 1 FROM mission_revisions WHERE mission_id = 'mission-' || p.id
-               )",
-        )
-        .map_err(|error| format!("query unsealed projects: {error}"))?;
-    let project_ids: Vec<String> = stmt
-        .query_map([], |row| row.get(0))
-        .map_err(|error| format!("read unsealed project ids: {error}"))?
-        .filter_map(Result::ok)
-        .collect();
-    drop(stmt);
-    drop(connection);
-
-    for project_id in project_ids {
-        let _ = reconcile_unsealed_project_takeover(path, &project_id);
-    }
     Ok(())
 }
 
 fn open_project_at_path(path: &Path, project_id: &str) -> Result<ProjectOpenView, String> {
-    reconcile_unsealed_project_takeover(path, project_id)?;
+    // Phase-1 Closed-Beta hardening: saved-project open is persisted-state only.
+    // Fresh workspace reconciliation remains enforced at the authority-review boundary.
     let connection =
         Connection::open(path).map_err(|error| format!("open project database: {error}"))?;
     let project = project_summaries(&connection)?
@@ -3009,7 +2980,6 @@ fn open_project_at_path(path: &Path, project_id: &str) -> Result<ProjectOpenView
 fn projects_list(app: AppHandle) -> Result<Vec<ProjectSummaryView>, String> {
     let path = database_path(&app)?;
     migrate_database(&path)?;
-    reconcile_all_unsealed_projects(&path)?;
     let connection =
         Connection::open(&path).map_err(|error| format!("open project database: {error}"))?;
     project_summaries(&connection)
