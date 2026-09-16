@@ -6,8 +6,8 @@ Last updated: 2026-09-16 08:17:07 local time
 
 1. Desktop smoothness + existing-project opening — COMPLETE
 2. Storage/checkpoint/low-disk safety — COMPLETE
-3. Authority/status consistency — NEXT
-4. Windows packaging/installer — NOT STARTED
+3. Authority/status consistency — COMPLETE
+4. Windows packaging/installer — NEXT
 5. Security/privacy — NOT STARTED
 6. Diagnostics/supportability — NOT STARTED
 7. Cross-project robustness — NOT STARTED
@@ -143,8 +143,81 @@ Principal evidence:
 
 The Phase-2 qualification demonstrated bounded no-state-change growth, preservation of prior authority across write failures/interruption, authenticated historical lineage after compaction, fail-closed tamper behavior, and database integrity after injected failures. No protected HumanDecision/rejection/current-authority state was intentionally deleted or rewritten by compaction.
 
+## Phase 3 — Authority & Status Consistency
+
+Status: **COMPLETE**
+
+Objective:
+
+- Every user-visible Relintor surface now projects the same backend-authoritative truth for the current project / mission / revision.
+- The known contradiction class where `VERIFIED COMPLETE` could coexist with a global `AUTHORITY NEEDS ATTENTION` presentation is closed without introducing a new authority model.
+
+Qualified implementation:
+
+- Frontend refresh/open projection returns backend workflow authority instead of preserving stale local authority.
+- `verification_start` and `verification_status` remain tied to the same backend workflow-stage derivation.
+- Final HumanDecision controls fail closed unless the backend is genuinely `WAITING_FOR_USER_DECISION`.
+- Machine-verifiable missing/failed/blocked/correction-required states cannot expose final approval/rejection controls.
+- Verified Complete presentation requires coherent backend `VERIFIEDCOMPLETE` authority plus a valid certificate.
+- Generic system-health messaging no longer masquerades as mission authority.
+- Home no longer emits the false `no missions` placeholder while authoritative mission state exists.
+- Historical rejection/correction state is not promoted into approval.
+- No new authority model, governance layer, Verified Complete definition, or frontend-only authority override was introduced.
+
+Validation:
+
+- Targeted authority-presentation tests: **41/41 PASS**.
+- Full frontend tests: **80/80 PASS**.
+- Frontend typecheck: PASS.
+- Frontend production build: PASS.
+- Existing Phase-5 restart/authority regression matrix: **29/29 PASS**.
+- Rust desktop check: PASS.
+- Desktop Rust test-target compile: PASS.
+- Phase-1 and Phase-2 qualified files remained bit-for-bit unchanged.
+
+Real persisted-project proof:
+
+- Used a COPY of the historical serious Phase-5 persisted project/mission; the production persisted state was not modified.
+- Persisted mission:
+  `mission-takeover-project-takeover_719ad83a558ede1be5868c6d`
+- Persisted project:
+  `takeover-project-takeover_719ad83a558ede1be5868c6d`
+- Revision: **1**
+- SQLite `quick_check`: **ok**.
+- SQLite `integrity_check`: **ok**.
+- Repeated copied-DB reopen: **20/20 stable**.
+- Repeated copied execution-ledger reads: **20/20 stable**.
+- Verification artifacts: **56 files**.
+- Evidence artifacts excluding certificate: **55 files**.
+- Persisted certificate present with final state: **VERIFIED_COMPLETE**.
+- Real persisted projection: **VERIFIED_COMPLETE**.
+- Production persisted state before/after qualification: unchanged.
+
+Sealed acceptance:
+
+- Authority state matrix: PASS.
+- Zero contradictory user-visible authority states: PASS.
+- `verification_start` / `verification_status` shared authority: PASS.
+- Final controls fail closed on machine blockers: PASS.
+- Genuine HumanDecision is not inferred by frontend presentation: PASS.
+- Historical rejection is not promoted to approval: PASS.
+- Rejection → correction → reverification presentation transitions: PASS.
+- Historical/completed attempt recovery immunity: PASS.
+- Refresh/reopen causes no authority flip without an authoritative transition: PASS.
+- Verified Complete requires coherent backend stage + certificate: PASS.
+- Certificate-eligibility projection: PASS.
+- Real persisted project copy proof: PASS.
+- Phase 4 was not executed.
+
+Principal evidence:
+
+- `RELINTOR_PHASE3_APPLY_VALIDATE_20260916-084830.zip`
+  SHA-256 `968612F7D2FEA94F7A951412BAEB481FE26791A86D523181703EFD4CE1AEF085`
+- `RELINTOR_PHASE3_FINAL_QUALIFICATION_20260916-090408.zip`
+  SHA-256 `AE414BA2BDD1CEF78604BBE71057D73142FBDA1EC09B1080CA53C0710BE83A1B`
+
 ## Next sealed phase
 
-**Phase 3 — Authority/status consistency**
+**Phase 4 — Windows Installer & Packaging Closure**
 
 Not started in this snapshot.
