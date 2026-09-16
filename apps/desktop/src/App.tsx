@@ -139,8 +139,8 @@ export function App() {
     if (value.handoff) navigate("activity");
   };
 
-  const authorityText = useMemo(() => {
-    if (!health) return "Authority checking";
+  const systemHealthText = useMemo(() => {
+    if (!health) return "System health checking";
     if (health.application.status === "unavailable") return "Browser preview";
 
     const coreReady =
@@ -148,7 +148,7 @@ export function App() {
       isHealthy(health.database.status) &&
       isHealthy(health.specification.status);
 
-    return coreReady ? "Authority baseline healthy" : "Authority needs attention";
+    return coreReady ? "System healthy" : "System needs attention";
   }, [health]);
 
   return (
@@ -164,11 +164,11 @@ export function App() {
           </a>
           <span className="beta-badge">Beta</span>
         </div>
-        <div className="guardian-status" aria-label={`System status: ${authorityText}`}>
+        <div className="guardian-status" aria-label={`System health: ${systemHealthText}`}>
           <span className="status-mark" aria-hidden="true">
             ●
           </span>
-          {authorityText}
+          {systemHealthText}
         </div>
       </header>
 
@@ -219,6 +219,29 @@ export function App() {
 }
 
 function Home({ onNewProject, onTakeover, showOnboarding, onDismissOnboarding }: { onNewProject: () => void; onTakeover: () => void; showOnboarding: boolean; onDismissOnboarding: () => void }) {
+  const [recentProjects, setRecentProjects] = useState<ProjectSummary[] | null>(null);
+  const [recentProjectsError, setRecentProjectsError] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void listProjects()
+      .then((projects) => {
+        if (!cancelled) {
+          setRecentProjects(projects.slice(0, 3));
+          setRecentProjectsError(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRecentProjects([]);
+          setRecentProjectsError(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <section className="view" aria-labelledby="home-title">
       <div className="eyebrow">EXECUTION AUTHORITY FOR AI-BUILT SOFTWARE</div>
@@ -266,16 +289,41 @@ function Home({ onNewProject, onTakeover, showOnboarding, onDismissOnboarding }:
 
       <section className="recent-section" aria-labelledby="recent-title">
         <div className="section-heading">
-          <h2 id="recent-title">Recent missions</h2>
+          <h2 id="recent-title">Recent projects</h2>
           <span className="mono-label">LOCAL ONLY</span>
         </div>
-        <div className="empty-state">
-          <span className="empty-mark" aria-hidden="true">
-            □
-          </span>
-          <p>No missions yet.</p>
-          <small>Your local project evidence will appear here once a mission is created.</small>
-        </div>
+        {recentProjects === null && (
+          <div className="empty-state" role="status">
+            <span className="empty-mark" aria-hidden="true">□</span>
+            <p>Reading saved projects…</p>
+          </div>
+        )}
+        {recentProjects !== null && recentProjectsError && (
+          <div className="empty-state" role="status">
+            <span className="empty-mark" aria-hidden="true">□</span>
+            <p>Saved projects are temporarily unavailable.</p>
+            <small>Relintor will not guess whether local missions exist when the backend authority read fails.</small>
+          </div>
+        )}
+        {recentProjects !== null && !recentProjectsError && recentProjects.length === 0 && (
+          <div className="empty-state">
+            <span className="empty-mark" aria-hidden="true">□</span>
+            <p>No saved projects yet.</p>
+            <small>Your local project evidence will appear here once a project is created.</small>
+          </div>
+        )}
+        {recentProjects !== null && !recentProjectsError && recentProjects.length > 0 && (
+          <div className="project-list">
+            {recentProjects.map((project) => (
+              <div className="project-list-row" key={project.project_id}>
+                <div>
+                  <strong>{project.name}</strong>
+                  <small>{project.root_path ? displayWindowsPath(project.root_path) : "Workspace required"} · {project.sealed_revision ? "Mission sealed" : humanStatus(project.state, "Saved")}</small>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       <div className="principles" aria-label="Relintor workflow">
@@ -347,7 +395,9 @@ export function verificationActionError(reason: unknown): string {
 }
 
 export function verificationActionMessage(status: VerificationStatus): string {
-  if (status.completion_state.replace(/[^a-z0-9]/gi, "").toUpperCase() === "VERIFIEDCOMPLETE") {
+  const completionVerified = status.completion_state.replace(/[^a-z0-9]/gi, "").toUpperCase() === "VERIFIEDCOMPLETE";
+  const certificateVerified = status.certificate?.final_state.replace(/[^a-z0-9]/gi, "").toUpperCase() === "VERIFIEDCOMPLETE";
+  if (status.workflow_stage === "VERIFIED_COMPLETE" && completionVerified && certificateVerified) {
     return "Verification finished successfully. The completion certificate is valid and saved.";
   }
   return status.summary;
@@ -624,7 +674,7 @@ function ProjectChooser({ projects, busy, error, onRefresh, onOpen, onNew, onTak
     <p className="muted-copy">Open a saved project, or start with a new idea or an existing codebase.</p>
     {busy && <p className="loading-state" role="status">Reading saved projects…</p>}
     {!busy && !projects.length && <div className="empty-inline"><strong>No saved projects yet</strong><span>Start a new project or scan an existing codebase.</span></div>}
-    {projects.length > 0 && <div className="project-list">{projects.map((project) => <div className="project-list-row" key={project.project_id}><div><strong>{project.name}</strong><small>{project.root_path ? displayWindowsPath(project.root_path) : "Workspace required"} · {humanStatus(project.state, "Saved")}</small></div><button className="secondary-button" type="button" onClick={() => onOpen(project)}>Open</button></div>)}</div>}
+    {projects.length > 0 && <div className="project-list">{projects.map((project) => <div className="project-list-row" key={project.project_id}><div><strong>{project.name}</strong><small>{project.root_path ? displayWindowsPath(project.root_path) : "Workspace required"} · {project.sealed_revision ? "Mission sealed" : humanStatus(project.state, "Saved")}</small></div><button className="secondary-button" type="button" onClick={() => onOpen(project)}>Open</button></div>)}</div>}
     {error && <p className="error-text" role="alert">{error}</p>}
     <div className="result-actions"><div className="button-row"><button className="primary-button" type="button" onClick={onNew}>New project</button><button className="secondary-button" type="button" onClick={onTakeover}>Take over a project</button></div><button className="tertiary-button" type="button" onClick={onRefresh} disabled={busy}>Refresh projects</button></div>
   </section>;
@@ -668,32 +718,13 @@ function WorkspaceSelector({ projectId, onUpdated }: { projectId: string; onUpda
 }
 
 export function mergeVerificationRefresh(
-  previous: VerificationStatus | null,
+  _previous: VerificationStatus | null,
   next: VerificationStatus,
 ): VerificationStatus {
-  if (!previous || previous.workflow_stage !== "WAITING_FOR_USER_DECISION" || !previous.human_decisions.length) {
-    return next;
-  }
-  if (
-    next.mission_id !== previous.mission_id
-    || next.project_id !== previous.project_id
-    || next.revision !== previous.revision
-    || next.execution_run_id !== previous.execution_run_id
-    || ["VERIFIED_COMPLETE", "USER_DECISION_REJECTED"].includes(next.workflow_stage)
-  ) {
-    return next;
-  }
-
-  const humanDecisionStillRequired = next.human_decisions.length > 0
-    || next.missing_evidence.some((item) => /human.?decision/i.test(item));
-  if (!humanDecisionStillRequired) return next;
-
-  return {
-    ...next,
-    workflow_stage: "WAITING_FOR_USER_DECISION",
-    summary: next.workflow_stage === "WAITING_FOR_USER_DECISION" ? next.summary : previous.summary,
-    human_decisions: next.human_decisions.length > 0 ? next.human_decisions : previous.human_decisions,
-  };
+  // Phase 3: the Rust workflow stage is authoritative. The renderer must not
+  // preserve or synthesize an older authority state when a refresh returns a
+  // newer snapshot.
+  return next;
 }
 
 function VerificationSection({ projectId }: { projectId: string }) {
@@ -1672,9 +1703,9 @@ export function MissionCockpit({
     ...(verification?.failed_checks || []),
   ];
   const pendingDecision =
-    (verification?.workflow_stage === "WAITING_FOR_USER_DECISION" ||
-      (verification?.final_human_acceptance_eligible && (verification?.human_decisions?.length || 0) > 0)) &&
-    (verification?.final_human_acceptance_eligible ?? true)
+    verification?.workflow_stage === "WAITING_FOR_USER_DECISION" &&
+    verification.final_human_acceptance_eligible === true &&
+    verificationView.label === "Ready for your final decision"
       ? verification.human_decisions[0] || null
       : null;
   const decisionIdentity = pendingDecision

@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { Activity, App, MissionCockpit, mergeVerificationRefresh, verificationActionError } from "./App";
+import { Activity, App, MissionCockpit, mergeVerificationRefresh, verificationActionError, verificationActionMessage } from "./App";
 import type { AntigravityHealth, ExecutionStatus, VerificationStatus } from "./backend";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -120,6 +120,16 @@ describe("desktop shell foundation", () => {
     fireEvent.click(screen.getByRole("button", { name: /New project/ }));
     expect(screen.getByRole("heading", { name: "Make the idea legible." })).toBeTruthy();
     expect(screen.getByRole("textbox", { name: "What are you building?" })).toBeTruthy();
+  });
+
+  it("keeps system health distinct from mission authority and does not fabricate recent missions", async () => {
+    render(<App />);
+
+    expect(screen.getByLabelText(/System health:/)).toBeTruthy();
+    expect(screen.queryByText("Authority needs attention")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Recent projects" })).toBeTruthy();
+    expect(await screen.findByText("No saved projects yet.")).toBeTruthy();
+    expect(screen.queryByText("No missions yet.")).toBeNull();
   });
 
   it("changes the active view and exposes aria-current", () => {
@@ -280,6 +290,8 @@ describe("desktop shell foundation", () => {
   it("drives the native approval command through Tauri and renders the returned certificate state", async () => {
     const pending = pendingVerification();
     pending.workflow_stage = "WAITING_FOR_USER_DECISION";
+    pending.final_human_acceptance_eligible = true;
+    pending.missing_evidence = [];
     pending.human_decisions = [{
       requirement_id: "requirement-human",
       title: "Approved outcome",
@@ -350,10 +362,30 @@ describe("desktop shell foundation", () => {
     expect(verificationActionError(new Error("verification authority command failed"))).toMatch(/couldn't verify this work/i);
   });
 
+  it("does not announce successful completion when workflow authority or certificate state disagrees", () => {
+    const contradictory: VerificationStatus = {
+      ...pendingVerification(),
+      completion_state: "VerifiedComplete",
+      workflow_stage: "VERIFICATION_NEEDS_ATTENTION",
+      summary: "Backend authority still requires attention.",
+      requirements_verified: 11,
+      requirements_total: 11,
+      evidence_count: 11,
+      certificate: {
+        certificate_id: "cert-contradictory",
+        final_state: "VerifiedComplete",
+        digest: "digest",
+      },
+    };
+    expect(verificationActionMessage(contradictory)).toBe("Backend authority still requires attention.");
+  });
+
   it("captures a genuine human decision in plain language without exposing IDs in primary copy", () => {
     const onDecision = vi.fn();
     const decision = pendingVerification();
     decision.workflow_stage = "WAITING_FOR_USER_DECISION";
+    decision.final_human_acceptance_eligible = true;
+    decision.missing_evidence = [];
     decision.summary = "Automated checks are complete. Relintor needs your decision before verification can continue.";
     decision.human_decisions = [{
       requirement_id: "requirement-secret-internal-id",
@@ -380,17 +412,18 @@ describe("desktop shell foundation", () => {
     expect(screen.getByRole("heading", { name: "Relintor needs your decision" })).toBeTruthy();
     expect(screen.getByText(/Technical Evidence/i)).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Optional notes"), { target: { value: "The result matches." } });
-    const staleRefresh: VerificationStatus = {
+    const authoritativeRefresh: VerificationStatus = {
       ...decision,
-      workflow_stage: "READY_TO_VERIFY",
-      summary: "Verification is ready.",
-      human_decisions: [],
-      missing_evidence: ["requirement-secret-internal-id: missing HUMAN_DECISION"],
+      workflow_stage: "WAITING_FOR_USER_DECISION",
+      summary: "Automated checks are complete. Relintor needs your decision before verification can continue.",
+      human_decisions: decision.human_decisions,
+      missing_evidence: [],
+      final_human_acceptance_eligible: true,
     };
     rendered.rerender(
       <MissionCockpit
         status={finishedExecution()}
-        verification={mergeVerificationRefresh(decision, staleRefresh)}
+        verification={mergeVerificationRefresh(decision, authoritativeRefresh)}
         antigravity={readyAntigravity}
         busy={false}
         revalidating={false}
@@ -412,6 +445,8 @@ describe("desktop shell foundation", () => {
     try {
       const pending = pendingVerification();
       pending.workflow_stage = "WAITING_FOR_USER_DECISION";
+      pending.final_human_acceptance_eligible = true;
+      pending.missing_evidence = [];
       pending.summary = "Automated checks are complete. Relintor needs your decision before verification can continue.";
       pending.human_decisions = [{
         requirement_id: "requirement-human",
@@ -420,12 +455,13 @@ describe("desktop shell foundation", () => {
         summary: "Review the completed project outcome before approving it.",
         criterion_ids: ["criterion-human"],
       }];
-      const staleRefresh: VerificationStatus = {
+      const authoritativeRefresh: VerificationStatus = {
         ...pending,
-        workflow_stage: "READY_TO_VERIFY",
-        summary: "Verification is ready.",
-        human_decisions: [],
-        missing_evidence: ["requirement-human: missing HumanDecision"],
+        workflow_stage: "WAITING_FOR_USER_DECISION",
+        summary: "Automated checks are complete. Relintor needs your decision before verification can continue.",
+        human_decisions: pending.human_decisions,
+        missing_evidence: [],
+        final_human_acceptance_eligible: true,
       };
       const onDecision = vi.fn();
       let current = pending;
@@ -447,7 +483,7 @@ describe("desktop shell foundation", () => {
         target: { value: "My decision remains attached to this mission." },
       });
       const timer = window.setInterval(() => {
-        current = mergeVerificationRefresh(current, staleRefresh);
+        current = mergeVerificationRefresh(current, authoritativeRefresh);
         rendered.rerender(
           <MissionCockpit
             status={finishedExecution()}
@@ -477,9 +513,10 @@ describe("desktop shell foundation", () => {
     }
   });
 
-  it("keeps a pending decision when status polling returns the same prompts with READY_TO_VERIFY", () => {
+  it("never overrides a newer backend workflow stage during refresh", () => {
     const pending = pendingVerification();
     pending.workflow_stage = "WAITING_FOR_USER_DECISION";
+    pending.final_human_acceptance_eligible = true;
     pending.human_decisions = [{
       requirement_id: "requirement-human",
       title: "Approved outcome",
@@ -487,22 +524,26 @@ describe("desktop shell foundation", () => {
       summary: "Review the completed project outcome before approving it.",
       criterion_ids: ["criterion-human"],
     }];
-    pending.missing_evidence = ["requirement-human: missing HumanDecision"];
-    const polled = {
+    const authoritativeNext: VerificationStatus = {
       ...pending,
       workflow_stage: "READY_TO_VERIFY",
-      summary: "Verification is ready.",
+      summary: "Backend authority no longer requests a human decision.",
+      human_decisions: [],
+      final_human_acceptance_eligible: false,
     };
 
-    const merged = mergeVerificationRefresh(pending, polled);
+    const merged = mergeVerificationRefresh(pending, authoritativeNext);
 
-    expect(merged.workflow_stage).toBe("WAITING_FOR_USER_DECISION");
-    expect(merged.human_decisions).toEqual(pending.human_decisions);
+    expect(merged).toEqual(authoritativeNext);
+    expect(merged.workflow_stage).toBe("READY_TO_VERIFY");
+    expect(merged.human_decisions).toHaveLength(0);
   });
 
   it("allows an authoritative decision transition to replace the pending card", () => {
     const pending = pendingVerification();
     pending.workflow_stage = "WAITING_FOR_USER_DECISION";
+    pending.final_human_acceptance_eligible = true;
+    pending.missing_evidence = [];
     pending.human_decisions = [{
       requirement_id: "requirement-human",
       title: "Approved outcome",
@@ -522,10 +563,76 @@ describe("desktop shell foundation", () => {
     expect(mergeVerificationRefresh(pending, rejected).human_decisions).toHaveLength(0);
   });
 
+  it("fails closed on approval controls when a waiting snapshot still contains machine blockers", () => {
+    const status = pendingVerification();
+    status.workflow_stage = "WAITING_FOR_USER_DECISION";
+    status.final_human_acceptance_eligible = true;
+    status.missing_evidence = ["requirement-test: missing TestOutput"];
+    status.human_decisions = [{
+      requirement_id: "requirement-human",
+      title: "Approved outcome",
+      question: "Approve?",
+      summary: "Review the result.",
+      criterion_ids: ["criterion-human"],
+    }];
+
+    render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={status}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reject" })).toBeNull();
+    expect(screen.getAllByRole("heading", { name: "Verification needs attention" }).length).toBeGreaterThan(0);
+  });
+
+  it("does not render approval controls when backend workflow stage is not waiting for a user decision", () => {
+    const status = pendingVerification();
+    status.workflow_stage = "READY_TO_VERIFY";
+    status.final_human_acceptance_eligible = true;
+    status.human_decisions = [{
+      requirement_id: "requirement-human",
+      title: "Approved outcome",
+      question: "Approve?",
+      summary: "Review the result.",
+      criterion_ids: ["criterion-human"],
+    }];
+
+    render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={status}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reject" })).toBeNull();
+  });
+
   it("submits the exact rejection and retains the card and notes while persistence is pending or fails", () => {
     const onDecision = vi.fn();
     const pending = pendingVerification();
     pending.workflow_stage = "WAITING_FOR_USER_DECISION";
+    pending.final_human_acceptance_eligible = true;
+    pending.missing_evidence = [];
     pending.human_decisions = [{
       requirement_id: "requirement-human",
       title: "Approved outcome",
@@ -575,6 +682,8 @@ describe("desktop shell foundation", () => {
   it("removes the decision card only after an authoritative successful submission response", () => {
     const pending = pendingVerification();
     pending.workflow_stage = "WAITING_FOR_USER_DECISION";
+    pending.final_human_acceptance_eligible = true;
+    pending.missing_evidence = [];
     pending.human_decisions = [{
       requirement_id: "requirement-human",
       title: "Approved outcome",

@@ -100,7 +100,7 @@ describe("user-visible mission state model", () => {
   });
 
   it("rejects a contradictory verified-complete state with missing evidence", () => {
-    const view = verificationPresentation(verification({ completion_state: "VerifiedComplete", requirements_verified: 3, missing_evidence: ["REQ-1: evidence missing"], evidence_count: 3 }));
+    const view = verificationPresentation(verification({ completion_state: "VerifiedComplete", workflow_stage: "VERIFIED_COMPLETE", requirements_verified: 3, requirements_total: 3, missing_evidence: ["REQ-1: evidence missing"], evidence_count: 3, certificate: { certificate_id: "c-bad", final_state: "VerifiedComplete", digest: "d-bad" } }));
     expect(view.verifiedComplete).toBe(false);
     expect(view.label).toBe("Verification needs attention");
   });
@@ -108,6 +108,7 @@ describe("user-visible mission state model", () => {
   it("does not show Verified Complete until the authority certificate is present", () => {
     const view = verificationPresentation(verification({
       completion_state: "VerifiedComplete",
+      workflow_stage: "VERIFIED_COMPLETE",
       requirements_verified: 3,
       requirements_total: 3,
       evidence_count: 3,
@@ -126,6 +127,7 @@ describe("user-visible mission state model", () => {
       }),
       verification({
         workflow_stage: "WAITING_FOR_USER_DECISION",
+        final_human_acceptance_eligible: true,
         summary: "Relintor needs your decision.",
         evidence_count: 2,
         human_decisions: [{
@@ -153,8 +155,16 @@ describe("user-visible mission state model", () => {
       requirements_verified: 10,
       requirements_total: 11,
       evidence_count: 10,
+      workflow_stage: "WAITING_FOR_USER_DECISION",
       final_human_acceptance_eligible: true,
-      missing_evidence: ["requirement-human: missing HUMAN_DECISION"],
+      missing_evidence: [],
+      human_decisions: [{
+        requirement_id: "requirement-human",
+        title: "Approved outcome",
+        question: "Does this result satisfy the approved outcome?",
+        summary: "Review the completed result.",
+        criterion_ids: ["criterion-human"],
+      }],
     }));
     expect(view.label).toBe("Ready for your final decision");
     expect(view.tone).toBe("info");
@@ -200,6 +210,7 @@ describe("user-visible mission state model", () => {
   it("renders Verified Complete when valid certificate is present despite historical stale evidence", () => {
     const view = verificationPresentation(verification({
       completion_state: "VerifiedComplete",
+      workflow_stage: "VERIFIED_COMPLETE",
       requirements_verified: 6,
       requirements_total: 6,
       evidence_count: 6,
@@ -272,6 +283,7 @@ describe("user-visible mission state model", () => {
     it("never renders Verified Complete alongside Verification needs attention", () => {
       const v = verificationPresentation(verification({
         completion_state: "VerifiedComplete",
+        workflow_stage: "VERIFIED_COMPLETE",
         requirements_verified: 6,
         requirements_total: 6,
         evidence_count: 6,
@@ -285,6 +297,7 @@ describe("user-visible mission state model", () => {
 
       const vContradiction = verificationPresentation(verification({
         completion_state: "VerifiedComplete",
+        workflow_stage: "VERIFIED_COMPLETE",
         requirements_verified: 5,
         requirements_total: 6,
         evidence_count: 6,
@@ -295,11 +308,67 @@ describe("user-visible mission state model", () => {
       expect(vContradiction.label).toBe("Verification needs attention");
     });
 
+    it("does not promote completion from completion_state when backend workflow authority disagrees", () => {
+      const view = verificationPresentation(verification({
+        completion_state: "VerifiedComplete",
+        workflow_stage: "VERIFICATION_NEEDS_ATTENTION",
+        requirements_verified: 6,
+        requirements_total: 6,
+        evidence_count: 6,
+        certificate: { certificate_id: "c1", final_state: "VerifiedComplete", digest: "d1" },
+      }));
+      expect(view.verifiedComplete).toBe(false);
+      expect(view.label).toBe("Verification needs attention");
+    });
+
+    it("fails closed when WAITING_FOR_USER_DECISION still carries a machine blocker", () => {
+      const status = verification({
+        workflow_stage: "WAITING_FOR_USER_DECISION",
+        final_human_acceptance_eligible: true,
+        evidence_count: 5,
+        missing_evidence: ["req-machine: missing TestOutput"],
+        human_decisions: [{
+          requirement_id: "requirement-human",
+          title: "Approved outcome",
+          question: "Approve?",
+          summary: "Review the result.",
+          criterion_ids: ["criterion-human"],
+        }],
+      });
+      const view = verificationPresentation(status);
+      expect(view.label).toBe("Verification needs attention");
+      expect(missionPresentation(
+        execution({
+          state: "ExecutionTasksFinishedAwaitingVerification",
+          execution_phase: "FINISHED_AWAITING_VERIFICATION",
+        }),
+        status,
+        true,
+      ).headline).not.toBe("Ready for your final decision");
+    });
+
+    it("does not infer a human approval prompt outside WAITING_FOR_USER_DECISION", () => {
+      const view = verificationPresentation(verification({
+        workflow_stage: "READY_TO_VERIFY",
+        final_human_acceptance_eligible: true,
+        evidence_count: 5,
+        human_decisions: [{
+          requirement_id: "requirement-human",
+          title: "Approved outcome",
+          question: "Approve?",
+          summary: "Review the result.",
+          criterion_ids: ["criterion-human"],
+        }],
+      }));
+      expect(view.label).not.toBe("Ready for your final decision");
+    });
+
     it("never enables Verify work when mission is already Verified Complete", () => {
       const m = missionPresentation(
         execution({ state: "ExecutionTasksFinishedAwaitingVerification", execution_phase: "FINISHED_AWAITING_VERIFICATION" }),
         verification({
           completion_state: "VerifiedComplete",
+          workflow_stage: "VERIFIED_COMPLETE",
           requirements_verified: 6,
           requirements_total: 6,
           evidence_count: 6,
@@ -317,6 +386,7 @@ describe("user-visible mission state model", () => {
         execution({ state: "ExecutionTasksFinishedAwaitingVerification", execution_phase: "FINISHED_AWAITING_VERIFICATION" }),
         verification({
           workflow_stage: "WAITING_FOR_USER_DECISION",
+          final_human_acceptance_eligible: true,
           summary: "Human decision required.",
           human_decisions: [{
             requirement_id: "req_human",
@@ -488,7 +558,7 @@ describe("user-visible mission state model", () => {
         workflow_stage: "WAITING_FOR_USER_DECISION",
         final_human_acceptance_eligible: true,
         summary: "Relintor independently verified all machine-checkable requirements. Your final acceptance is now required.",
-        missing_evidence: ["req_outcome: missing HumanDecision", "req_purpose: missing HumanDecision"],
+        missing_evidence: [],
         human_decisions: [{
           requirement_id: "req_outcome",
           requirement_ids: ["req_outcome", "req_purpose"],
@@ -531,4 +601,161 @@ describe("user-visible mission state model", () => {
       expect(v.label).toBe("Verification needs attention");
     });
   });
+});
+
+
+describe("Phase 3 authoritative state matrix", () => {
+  const finished = execution({
+    state: "ExecutionTasksFinishedAwaitingVerification",
+    execution_phase: "FINISHED_AWAITING_VERIFICATION",
+    finished_tasks: 3,
+    total_tasks: 3,
+    runnable_tasks: [],
+  });
+
+  const cases: Array<{
+    name: string;
+    status: ExecutionStatus;
+    verification: VerificationStatus | null;
+    expectedHeadline: string;
+    expectedVerified: boolean;
+  }> = [
+    {
+      name: "sealed ready",
+      status: execution(),
+      verification: null,
+      expectedHeadline: "Ready to run",
+      expectedVerified: false,
+    },
+    {
+      name: "executing",
+      status: execution({ state: "Running", execution_phase: "RUNNING", dispatch_active: true }),
+      verification: null,
+      expectedHeadline: "Antigravity is working",
+      expectedVerified: false,
+    },
+    {
+      name: "interrupted recovery",
+      status: execution({
+        state: "RevalidationRequired",
+        recovery_state: "RECOVERY_NOT_ALLOWED",
+        recovery_detected: true,
+        recovery_action: "CHECK_SAFETY",
+      }),
+      verification: null,
+      expectedHeadline: "Recovery review required",
+      expectedVerified: false,
+    },
+    {
+      name: "evidence collection pending",
+      status: finished,
+      verification: null,
+      expectedHeadline: "Capture evidence and check requirements",
+      expectedVerified: false,
+    },
+    {
+      name: "verification blocked",
+      status: finished,
+      verification: verification({
+        workflow_stage: "VERIFICATION_NEEDS_ATTENTION",
+        evidence_count: 2,
+        missing_evidence: ["req-machine: missing TestOutput"],
+        summary: "A machine-verifiable obligation is missing.",
+      }),
+      expectedHeadline: "Verification needs attention",
+      expectedVerified: false,
+    },
+    {
+      name: "correction",
+      status: finished,
+      verification: verification({
+        workflow_stage: "CORRECTING_FAILED_REQUIREMENT",
+        evidence_count: 2,
+        summary: "Correction is running.",
+      }),
+      expectedHeadline: "Antigravity is correcting failed work",
+      expectedVerified: false,
+    },
+    {
+      name: "awaiting genuine human decision",
+      status: finished,
+      verification: verification({
+        workflow_stage: "WAITING_FOR_USER_DECISION",
+        final_human_acceptance_eligible: true,
+        evidence_count: 10,
+        missing_evidence: [],
+        human_decisions: [{
+          requirement_id: "req-human",
+          title: "Approved outcome",
+          question: "Does the completed result satisfy the approved outcome?",
+          summary: "Review the completed result.",
+          criterion_ids: ["criterion-human"],
+        }],
+        summary: "Relintor independently verified all machine-checkable requirements. Your final acceptance is now required.",
+      }),
+      expectedHeadline: "Ready for your final decision",
+      expectedVerified: false,
+    },
+    {
+      name: "human rejection",
+      status: finished,
+      verification: verification({
+        workflow_stage: "USER_DECISION_REJECTED",
+        evidence_count: 10,
+        summary: "You rejected the completed result.",
+      }),
+      expectedHeadline: "Correction required",
+      expectedVerified: false,
+    },
+    {
+      name: "fresh re-verification",
+      status: finished,
+      verification: verification({
+        workflow_stage: "READY_TO_VERIFY",
+        evidence_count: 10,
+        missing_evidence: [],
+        failed_checks: [],
+        blocked_external: [],
+        summary: "Fresh evidence is ready.",
+      }),
+      expectedHeadline: "Work finished — technical review required",
+      expectedVerified: false,
+    },
+    {
+      name: "verified complete",
+      status: finished,
+      verification: verification({
+        workflow_stage: "VERIFIED_COMPLETE",
+        completion_state: "VerifiedComplete",
+        requirements_verified: 3,
+        requirements_total: 3,
+        evidence_count: 3,
+        missing_evidence: [],
+        failed_checks: [],
+        blocked_external: [],
+        collection_failures: [],
+        certificate: {
+          certificate_id: "cert-matrix",
+          final_state: "VerifiedComplete",
+          digest: "matrix-digest",
+        },
+      }),
+      expectedHeadline: "Verified Complete",
+      expectedVerified: true,
+    },
+  ];
+
+  for (const testCase of cases) {
+    it(`projects ${testCase.name} without a contradictory primary authority state`, () => {
+      const view = missionPresentation(testCase.status, testCase.verification, true);
+      expect(view.headline).toBe(testCase.expectedHeadline);
+      expect(view.verifiedComplete).toBe(testCase.expectedVerified);
+      if (testCase.expectedVerified) {
+        expect(view.tone).toBe("success");
+        expect(view.badge).toBe("Verified");
+      } else {
+        expect(view.headline).not.toBe("Verified Complete");
+      }
+    });
+  }
 });

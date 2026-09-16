@@ -86,57 +86,47 @@ export function verificationPresentation(status: VerificationStatus | null): {
     };
   }
 
-  const hasMaterialGap =
+  const stage = token(status.workflow_stage);
+  const completion = token(status.completion_state);
+  const certificateVerified =
+    Boolean(status.certificate) &&
+    token(status.certificate?.final_state) === "VERIFIEDCOMPLETE";
+  const machineBlockers =
     status.missing_evidence.length > 0 ||
     status.failed_checks.length > 0 ||
     status.blocked_external.length > 0 ||
-    status.requirements_total === 0 ||
-    status.requirements_verified !== status.requirements_total;
-  const authoritySaysVerified = token(status.completion_state) === "VERIFIEDCOMPLETE";
-  if (authoritySaysVerified && !hasMaterialGap && status.evidence_count > 0 && status.certificate) {
+    status.collection_failures.length > 0;
+  const coverageComplete =
+    status.requirements_total > 0 &&
+    status.requirements_verified === status.requirements_total;
+  const verifiedSnapshotCoherent =
+    stage === "VERIFIEDCOMPLETE" &&
+    completion === "VERIFIEDCOMPLETE" &&
+    certificateVerified &&
+    status.evidence_count > 0 &&
+    coverageComplete &&
+    !machineBlockers;
+
+  if (stage === "VERIFIEDCOMPLETE") {
+    if (verifiedSnapshotCoherent) {
+      return {
+        label: "Verified Complete",
+        supporting: `${status.requirements_verified} of ${status.requirements_total} requirements passed with ${status.evidence_count} evidence ${status.evidence_count === 1 ? "artifact" : "artifacts"}.`,
+        tone: "success",
+        verifiedComplete: true,
+      };
+    }
     return {
-      label: "Verified Complete",
-      supporting: `${status.requirements_verified} of ${status.requirements_total} requirements passed with ${status.evidence_count} evidence ${status.evidence_count === 1 ? "artifact" : "artifacts"}.`,
-      tone: "success",
-      verifiedComplete: true,
-    };
-  }
-  if (status.workflow_stage === "WAITING_FOR_USER_DECISION") {
-    return {
-      label: "Ready for your final decision",
-      supporting: status.summary || "Relintor independently verified all machine-checkable requirements. Your final acceptance is now required.",
-      tone: "info",
-      verifiedComplete: false,
-    };
-  }
-  if (status.workflow_stage === "CORRECTING_FAILED_REQUIREMENT") {
-    return {
-      label: "Correction in progress",
-      supporting: status.summary,
-      tone: "info",
-      verifiedComplete: false,
-    };
-  }
-  if (status.workflow_stage === "USER_DECISION_REJECTED") {
-    return {
-      label: "Correction required",
-      supporting: status.summary,
+      label: "Verification needs attention",
+      supporting: "Relintor received an inconsistent completion snapshot and will not present the mission as complete until backend authority is coherent.",
       tone: "warning",
       verifiedComplete: false,
     };
   }
-  if (
-    status.evidence_count > 0 &&
-    (status.failed_checks.length ||
-      status.blocked_external.length ||
-      status.missing_evidence.length ||
-      status.requirements_verified !== status.requirements_total ||
-      authoritySaysVerified)
-  ) {
-    const hasPendingHumanDecision = (status.human_decisions?.length || 0) > 0 || [...status.missing_evidence, ...status.blocked_external].some((item) => /HUMAN[_ ]DECISION|explicit user decision/i.test(item));
-    const humanDecisionRequired = Boolean(status.final_human_acceptance_eligible && hasPendingHumanDecision);
-    const hasMachineBlockers = status.failed_checks.length > 0 || status.blocked_external.some((b) => !/HUMAN[_ ]DECISION|explicit user decision/i.test(b));
-    if (humanDecisionRequired && !hasMachineBlockers) {
+
+  if (stage === "WAITINGFORUSERDECISION") {
+    const hasDecision = (status.human_decisions?.length || 0) > 0;
+    if (status.final_human_acceptance_eligible === true && hasDecision && !machineBlockers) {
       return {
         label: "Ready for your final decision",
         supporting: "Relintor independently verified all machine-checkable requirements. Your final acceptance is now required.",
@@ -146,11 +136,77 @@ export function verificationPresentation(status: VerificationStatus | null): {
     }
     return {
       label: "Verification needs attention",
-      supporting: "Relintor found missing evidence or dependency issues that must be resolved before completion can be claimed.",
+      supporting: "Relintor will not request final approval until every machine-verifiable obligation is clear and backend authority explicitly requests a human decision.",
       tone: "warning",
       verifiedComplete: false,
     };
   }
+
+  if (stage === "CORRECTINGFAILEDREQUIREMENT") {
+    return {
+      label: "Correction in progress",
+      supporting: status.summary,
+      tone: "info",
+      verifiedComplete: false,
+    };
+  }
+
+  if (stage === "USERDECISIONREJECTED") {
+    return {
+      label: "Correction required",
+      supporting: status.summary,
+      tone: "warning",
+      verifiedComplete: false,
+    };
+  }
+
+  if (
+    stage === "TECHNICALDELIVERYBLOCKED" ||
+    stage === "COLLECTIONBLOCKED" ||
+    stage === "VERIFICATIONNEEDSATTENTION"
+  ) {
+    return {
+      label: "Verification needs attention",
+      supporting: status.summary || "Relintor found missing evidence or dependency issues that must be resolved before completion can be claimed.",
+      tone: "warning",
+      verifiedComplete: false,
+    };
+  }
+
+  if (stage === "READYTOVERIFY") {
+    if (machineBlockers) {
+      return {
+        label: "Verification needs attention",
+        supporting: "Relintor found missing evidence or dependency issues that must be resolved before verification can continue.",
+        tone: "warning",
+        verifiedComplete: false,
+      };
+    }
+    if (status.evidence_count === 0) {
+      return {
+        label: "Waiting for evidence",
+        supporting: "Relintor will verify the work after execution evidence is captured.",
+        tone: "info",
+        verifiedComplete: false,
+      };
+    }
+    return {
+      label: "Ready to verify",
+      supporting: `${status.evidence_count} evidence ${status.evidence_count === 1 ? "artifact is" : "artifacts are"} ready for review.`,
+      tone: "info",
+      verifiedComplete: false,
+    };
+  }
+
+  if (machineBlockers || completion === "FAILEDVERIFICATION" || completion === "BLOCKEDEXTERNAL") {
+    return {
+      label: "Verification needs attention",
+      supporting: status.summary || "Relintor found missing evidence or dependency issues that must be resolved before completion can be claimed.",
+      tone: "warning",
+      verifiedComplete: false,
+    };
+  }
+
   if (status.evidence_count === 0) {
     return {
       label: "Waiting for evidence",
@@ -159,9 +215,10 @@ export function verificationPresentation(status: VerificationStatus | null): {
       verifiedComplete: false,
     };
   }
+
   return {
     label: "Ready to verify",
-    supporting: `${status.evidence_count} evidence ${status.evidence_count === 1 ? "artifact is" : "artifacts are"} ready for review.`,
+    supporting: status.summary || `${status.evidence_count} evidence ${status.evidence_count === 1 ? "artifact is" : "artifacts are"} ready for review.`,
     tone: "info",
     verifiedComplete: false,
   };
@@ -260,9 +317,10 @@ export function missionPresentation(
       };
     }
     const isWaitingForDecision =
-      (verification.workflow_stage === "WAITING_FOR_USER_DECISION" ||
-        (verification.final_human_acceptance_eligible && verification.human_decisions.length > 0)) &&
-      verification.final_human_acceptance_eligible !== false;
+      verification.workflow_stage === "WAITING_FOR_USER_DECISION" &&
+      verification.final_human_acceptance_eligible === true &&
+      verification.human_decisions.length > 0 &&
+      verificationView.label === "Ready for your final decision";
     if (isWaitingForDecision) {
       return {
         headline: "Ready for your final decision",
