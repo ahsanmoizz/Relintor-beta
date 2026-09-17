@@ -125,12 +125,43 @@ fn authority_fixture() -> (VerificationAuthority, FreshnessContext, TempDir) {
     (authority, current, root)
 }
 
+fn candidate_command(root: &std::path::Path) -> CommandSpec {
+    if cfg!(target_os = "windows") {
+        CommandSpec {
+            program: "cmd".into(),
+            args: vec!["/C".into(), "echo".into(), "test sensitive ... ok".into()],
+            working_directory: root.to_path_buf(),
+            environment: BTreeMap::new(),
+        }
+    } else {
+        CommandSpec {
+            program: "sh".into(),
+            args: vec!["-c".into(), "printf 'test sensitive ... ok'".into()],
+            working_directory: root.to_path_buf(),
+            environment: BTreeMap::new(),
+        }
+    }
+}
+
 fn candidate_plan(root: &std::path::Path) {
     let config_dir = root.join(".relintor");
     fs::create_dir_all(&config_dir).unwrap();
+    let command = candidate_command(root);
+    let plan = serde_json::json!({
+        "collectors": [{
+            "class": "TEST_OUTPUT",
+            "program": command.program,
+            "args": command.args,
+            "criteria": [{
+                "requirement_id": "P8-ZC-01",
+                "criterion_id": "sensitive-behavior",
+                "probe_identity": "fake-pass"
+            }]
+        }]
+    });
     fs::write(
         config_dir.join("verification-plan.json"),
-        r#"{"collectors":[{"class":"TEST_OUTPUT","program":"cmd","args":["/C","echo","test sensitive ... ok"],"criteria":[{"requirement_id":"P8-ZC-01","criterion_id":"sensitive-behavior","probe_identity":"fake-pass"}]}]}"#,
+        serde_json::to_vec(&plan).unwrap(),
     )
     .unwrap();
 }
@@ -156,12 +187,7 @@ fn mutable_workspace_claim_cannot_verify_sealed_criterion() {
 fn protected_mapping_requires_exact_candidate_and_authentication_stays_fail_closed() {
     let (authority, current, root) = authority_fixture();
     candidate_plan(root.path());
-    let command = CommandSpec {
-        program: "cmd".into(),
-        args: vec!["/C".into(), "echo".into(), "test sensitive ... ok".into()],
-        working_directory: root.path().to_path_buf(),
-        environment: BTreeMap::new(),
-    };
+    let command = candidate_command(root.path());
     let protected = ProtectedCriterionVerificationPlan::from_test_support(
         &authority,
         vec![CriterionProbeAuthorizationInput {

@@ -130,10 +130,17 @@ fn sealed_fixture() -> (
 }
 
 fn workspace() -> PathBuf {
-    let root = std::env::var_os("CARGO_TARGET_DIR")
+    let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("target"))
-        .join("p7-independent-acceptance");
+        .unwrap_or_else(|| PathBuf::from("target"));
+    let target = if target.is_absolute() {
+        target
+    } else {
+        std::env::current_dir()
+            .expect("resolve P7 acceptance working directory")
+            .join(target)
+    };
+    let root = target.join("p7-independent-acceptance");
     fs::create_dir_all(&root).expect("create disposable P7 workspace");
     root
 }

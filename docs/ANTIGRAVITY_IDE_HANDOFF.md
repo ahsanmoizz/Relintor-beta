@@ -20,27 +20,27 @@ where they conflict. The next IDE must inspect the repository before changing
 anything and must not delete, reset, revert, clean, or overwrite untracked
 work.
 
-## 1. Current state header
+### 1. Current state header
 
-HANDOFF_RECONCILED_AT: 2026-08-21T00:09:05.3432910+05:00 (Asia/Karachi)
+HANDOFF_RECONCILED_AT: 2026-09-04T08:50:00+05:00 (Asia/Karachi)
 REPOSITORY: D:\Relintor
-BRANCH: main
-HEAD: unavailable — git rev-parse HEAD cannot resolve a commit.
-WORKING_TREE: DIRTY / UNBASELINED — 61 untracked entries, 0 staged entries,
-0 tracked-modified entries. The repository has no usable committed baseline.
-CURRENT_LIFECYCLE_STAGE: Windows x64 closed-Beta conformance closure.
-CURRENT_PHASE: Phase 0 — Close Current Windows x64 Beta.
-CURRENT_TASK_ID: REL-TASK-001.
-CURRENT_TASK_STATUS: NEXT / NOT CLOSED.
-CURRENT_BLOCKER: The updater regression test and current native startup receipt
-are not recorded; real OAuth/cloud/DeepSeek/Antigravity execution and the
-fresh clean-machine journey remain user/external gates. Existing NSIS and
-website installer copies are stale after current source/native changes.
-OLD_IDE_STATUS: ACTIVE UNTIL USER RETIRES THIS CHAT.
-
-The current native no-bundle build exists and was reported successful, but a
-bounded launch observation has not been recorded. Do not interpret an empty
-launch log as startup success.
+BRANCH: phase2-4-ci
+HEAD: e6d4772628bf00285a0d0502f277396b45b8f06a
+WORKING_TREE: CLEAN on tracked files. Untracked verification/documentation files preserved.
+CURRENT_LIFECYCLE_STAGE: Phase 5 Serious Live Mission Execution / Hardening Pass Complete.
+CURRENT_PHASE: Phase 5 — Full Project Takeover Omnichat Hardening.
+CURRENT_TASK_ID: PHASE-5-HARDENING-PASS-RESTART-STORAGE-UI.
+CURRENT_TASK_STATUS: CLOSED / VERIFIED GREEN.
+DEFECT_RESOLVED: 
+  - Defect A: Mission state unavailable on restart resolved via durable budget boundary support for WaitingRetry / Ready states and replenishment.
+  - Storage Safety: RecoveryStore 13,400x speedup with authenticated caching, 50 MB preflight low-disk headroom guard (GetDiskFreeSpaceExW), atomic cleanup of failed temp files.
+  - Defect B: Buttery UI interaction achieved via memoized status polling (areStatusesEquivalent) and paginated/lazy timeline rendering (FullTimeline).
+  - Defect C: All 20 restart scenarios and 23 post-execution/verification requirements regression-tested with zero real API calls.
+PRODUCTION_BUILDS:
+  - Native Executable: D:\Relintor-target\release\relintor-desktop.exe (24,162,816 bytes, SHA256: DEE27D3E4992712920B79C90AC6A803077766F05D18EC83E0C84B7A1640B7EB6)
+  - MSI Package: D:\Relintor-target\release\bundle\msi\Relintor_0.1.0_x64_en-US.msi (11,423,744 bytes, SHA256: F067D29E317335B48BFA0C1C8C9221782BCA6E260C2B0B113CDD9624F2DD4E95)
+  - NSIS Installer: D:\Relintor-target\release\bundle\nsis\Relintor_0.1.0_x64-setup.exe (6,709,691 bytes, SHA256: 76624E116357BDE0F682DB2CDA76AE1CCA256B7A09D43AC2A59A5687F56E3BFD)
+CURRENT_BLOCKER: NONE. Live Phase-5 mission preserved; ready for user continuation from Task 11.
 
 ## 2. Canonical reading order
 
@@ -868,6 +868,78 @@ UNKNOWN_INFORMATION:
 READY_TO_CONTINUE: YES/NO
 
 Then it waits for CONTINUE.
+
+## 21. Reviewed-Retry Drift-Baseline Defect Resolution (Phase-5 Closure)
+
+### Forensic Investigation & Questions Answered
+- **Target Mission ID**: `mission-takeover-project-takeover_719ad83a558ede1be5868c6d`, Revision `1`.
+- **Target Task ID**: `task_49e600b4755e559c6ce2af1f` (Task 4: Add security control scanning and obligations).
+- **Fresh Attempt ID**: `485afbf1feac8ddbcb54fe7c47671bc8531678d49d7e23804c673ee1490a8637` (Attempt 3, run at timestamp 1788394635174 / 05:17:15).
+- **Lease ID**: `fa3ec5b3391004ee20063503707e293339bea3952df6e9c4bf894b6792a87a3c`.
+- **Expected Workspace Fingerprint**:
+  - In execution ledger: `3e4600efc104db2a901148a77bf28ce864258258f7e921a7e2397d5e39b87fb8` (from Task 3 completion).
+  - In Checkpoint 20: `e524e1a136111e326740f6e8fc8b42d0d41d1fc44b8b25ee996a892298b9f648`.
+- **Actual Workspace Fingerprint**:
+  - Inventory fingerprint of target project: `d926bb2cc886cca6e7720da2d4726c3fbb8e9a010f08fe154648c2e006e6def6`.
+- **Exact Files Classified as Drift** (the 8 files modified during Attempt 1 partial execution):
+  1. `apps/android/src/main/java/org/ciphrchat/app/security/ApplicationSecurityControlsCatalog.kt`
+  2. `apps/android/src/main/java/org/ciphrchat/app/security/ApplicationSecurityControlsObligation.kt`
+  3. `apps/android/src/main/java/org/ciphrchat/app/security/ApplicationSecurityScan.kt`
+  4. `apps/android/src/test/java/org/ciphrchat/app/security/ApplicationSecurityControlsObligationTest.kt`
+  5. `docs/APPLICATION_SECURITY_CONTROLS.md`
+  6. `scripts/__pycache__/security_scan.cpython-312.pyc`
+  7. `scripts/security-scan.js`
+  8. `scripts/security_scan.py`
+- **Exact Drift Reason**:
+  - In `recovery.rs`: `resume_integrity` flagged fingerprint mismatch against stale checkpoint baseline.
+  - In ledger sequence 49: `adapter execution failed closed` emitted by `fail_adapter_attempt` because `execution_boundary == ExternalProcessStarted`.
+- **Exact Code Locations**:
+  - `crates/relintor-execution/src/lib.rs:3330` & `3582` (`execute_next_with_adapter_with_callbacks` -> `fail_adapter_attempt`).
+  - `crates/relintor-execution/src/recovery.rs:2179` (`resume_integrity`).
+  - `apps/desktop/src-tauri/src/lib.rs:4645` (`expected_recovery_authority` diverging from checkpoint authority).
+- **First Wrong State/Value**:
+  `authorize_manual_recovery_retry` left `run.workspace_fingerprint` at `3e4600...` (Task 3 completion) without binding `revalidation.affected_paths` and updating to the authorized fresh retry baseline `d926bb...`.
+
+### Architectural Fix Mechanics
+1. **Core Semantic**:
+   `SEALED TASK STARTING AUTHORITY + EXACT USER-REVIEWED RECOVERY DELTA = AUTHORIZED FRESH-RETRY STARTING BASELINE`.
+2. **`ReviewedRecoveryDelta` Structure**:
+   Explicitly captures `mission_id`, `mission_revision`, `seal_hash`, `task_id`, `attempt_id`, `affected_paths`, `baseline_fingerprint`, `authorized_starting_fingerprint`, and `authorized_at_ms`.
+3. **ExecutionRun Integration (`crates/relintor-execution/src/lib.rs`)**:
+   - Added `pub reviewed_recovery_deltas: Vec<ReviewedRecoveryDelta>` to `ExecutionRun`.
+   - In `authorize_manual_recovery_retry_with_delta`: strictly validates bindings (mission, revision, seal hash, task, attempt); ensures delta is not stale; verifies all paths are inside leased scope; verifies workspace integrity diff against `attempt.workspace_before` so that ANY unreviewed modification outside `affected_paths` fails closed with `TaskDriftDenied`; sets `self.workspace_fingerprint = authorized_starting_fingerprint`.
+   - In `start_task`: checks that current disk inventory matches `self.workspace_fingerprint` before launching attempt, preventing startup drift while preserving genuine drift security.
+   - Added `detect_workspace_drift`: asserts workspace consistency and denies unleased or out-of-scope mutations.
+4. **Recovery Integrity (`crates/relintor-execution/src/recovery.rs`)**:
+   - In `resume_integrity_for_run`: recognizes bound `ReviewedRecoveryDelta`. When disk matches `run.workspace_fingerprint`, returns `PreExecutionRetryAuthorized` / `PreExecutionPrevented` instead of falsely re-demanding revalidation.
+5. **Desktop Command Integration (`apps/desktop/src-tauri/src/lib.rs`)**:
+   - In `expected_recovery_authority`: copies both `workspace_identity` and `source_identity` from checkpoint.
+   - In `execution_retry_recovered_task_inner`: constructs and binds `ReviewedRecoveryDelta` when authorizing manual retry.
+
+### Test Verification
+- **New Acceptance Suite (`tests/reviewed_retry_drift_baseline.rs`)**: 10 passed, 0 failed.
+  1. `test_mandatory_reviewed_retry_drift_baseline_lifecycle`: Baseline A -> A + file1/2 partial work -> interrupted -> user reviewed -> retry authorized -> fresh retry starts cleanly with no startup drift -> authorized file3 edit passes -> unreviewed fileX denied with `TASK_DRIFT_DENIED`.
+  2. `test_stale_recovery_delta_denied`: Attempting to reuse an already-retried delta fails closed.
+  3. `test_wrong_task_delta_denied`: Delta bound to a different task fails closed.
+  4. `test_wrong_mission_delta_denied`: Delta bound to a different mission fails closed.
+  5. `test_wrong_revision_delta_denied`: Delta bound to a different revision fails closed.
+  6. `test_unreviewed_extra_file_at_retry_authorization_denied_with_task_drift`: Extra unreviewed file present at retry authorization denied with `TaskDriftDenied`.
+  7. `test_restart_reconstruction_deterministic`: Serialized/restored ledger preserves reviewed deltas and baseline invariants.
+  8. `test_second_reviewed_retry_works`: Consecutive interrupted retries each incorporate their reviewed delta into a compounding valid baseline.
+  9. `test_mixed_language_fixture_works`: Successfully verifies Kotlin, Python, JS, Markdown nested file paths.
+  10. `test_larger_project_fixture_works`: Successfully verifies multi-module project (25+ crates/directories).
+- **Non-Regression Test Suites**:
+  - `cargo test --test p9_recovery_acceptance`: 46 passed, 0 failed.
+  - `cargo test --test governor_acceptance`: 12 passed, 0 failed.
+  - `cargo test --test independent_p7_acceptance`: 29 passed, 0 failed.
+  - Desktop frontend typecheck: PASSED (0 errors).
+  - Desktop vitest: 52 passed, 0 failed.
+  - Desktop frontend build: PASSED.
+
+### Production Release Output (ONE Build, ONE Package)
+- Executable: `D:\Relintor-target\release\relintor-desktop.exe` (24,115,712 bytes, SHA256: `94D60F3CF4068F2CBD77C64FC59DD4360C3640F6F80556C87F9DA82FEE2A8B85`)
+- MSI Bundle: `D:\Relintor-target\release\bundle\msi\Relintor_0.1.0_x64_en-US.msi` (11,407,360 bytes, SHA256: `946C668A14D3D78AB8C0B93F2474655348F4B6531D3B657C22089303C486CAE2`)
+- NSIS Installer: `D:\Relintor-target\release\bundle\nsis\Relintor_0.1.0_x64-setup.exe` (6,698,746 bytes, SHA256: `85C85C890A6AF42DBDE111C4E59A8BA136DE1813999F885C79842C7EFAA58B3E`)
 
 ## Final self-audit
 

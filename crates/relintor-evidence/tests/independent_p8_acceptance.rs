@@ -178,7 +178,7 @@ fn node_beta_workspace_discovers_test_security_and_accessibility_collectors() {
     let root = tempdir().expect("workspace");
     fs::write(
         root.path().join("package.json"),
-        r#"{"scripts":{"test":"node --test","security-scan":"node security.js","accessibility-audit":"node accessibility.js","lint":"node lint.js"}}"#,
+        r#"{"scripts":{"test":"node --test","security-scan":"node security.js","accessibility-check":"node accessibility.js","lint":"node lint.js"}}"#,
     )
     .expect("package manifest");
     fs::create_dir_all(root.path().join("tests")).expect("test directory");
@@ -203,16 +203,378 @@ fn node_beta_workspace_discovers_test_security_and_accessibility_collectors() {
 }
 
 #[test]
+fn successful_collector_retry_after_blocked_receipt_is_registered_and_verifies_requirement() {
+    let (authority, current, root) = authority_fixture();
+    let config_dir = root.path().join(".relintor");
+    fs::create_dir_all(&config_dir).expect("verification config directory");
+    let command = command_for_exit(root.path(), true);
+    let plan = serde_json::json!({
+        "collectors": [{
+            "class": "TEST_OUTPUT",
+            "program": &command.program,
+            "args": &command.args
+        }]
+    });
+    fs::write(
+        config_dir.join("verification-plan.json"),
+        serde_json::to_vec(&plan).expect("verification plan"),
+    )
+    .expect("verification plan");
+    let protected = ProtectedCriterionVerificationPlan::from_test_support(
+        &authority,
+        vec![CriterionProbeAuthorizationInput {
+            requirement_id: "P8-TEST-01".into(),
+            criterion_id: "P8-TEST-01-criterion".into(),
+            evidence_class: EvidenceClass::TestOutput,
+            collector_identity: CollectorIdentity::new("test-collector", "p8-v1"),
+            probe_identity: "cmd-exit-probe".into(),
+            command_digest: command.digest().unwrap(),
+        }],
+    )
+    .expect("protected criterion authority");
+    let store = store(root.path());
+
+    let first = VerificationCollectorOrchestrator::new(root.path())
+        .collect_required_evidence_with_protected_plan(&authority, &current, &store, &protected)
+        .expect("first collector run remains inspectable");
+    assert!(first
+        .executed
+        .iter()
+        .any(|entry| entry.contains("P8-TEST-01")));
+    assert!(store.list().expect("evidence list").iter().any(|artifact| {
+        artifact.metadata.requirement_ids == vec!["P8-TEST-01".to_string()]
+            && artifact.metadata.class == EvidenceClass::TestOutput
+            && artifact.metadata.result != EvidenceResult::Pass
+    }));
+
+    fs::create_dir_all(root.path().join("tests")).expect("tests directory");
+    fs::write(
+        root.path().join("tests").join("progress.test.js"),
+        "// now the test inventory is discoverable\n",
+    )
+    .expect("test file");
+    let second = VerificationCollectorOrchestrator::new(root.path())
+        .collect_required_evidence_with_protected_plan(&authority, &current, &store, &protected)
+        .expect("successful retry is registered");
+    assert!(second
+        .executed
+        .iter()
+        .any(|entry| entry.contains("P8-TEST-01")));
+    let artifacts = store.list().expect("evidence list after retry");
+    assert!(artifacts.iter().any(|artifact| {
+        artifact.metadata.requirement_ids == vec!["P8-TEST-01".to_string()]
+            && artifact.metadata.class == EvidenceClass::TestOutput
+            && artifact.metadata.result == EvidenceResult::Pass
+            && artifact
+                .metadata
+                .accepted_criteria
+                .contains("P8-TEST-01-criterion")
+    }));
+
+    let report = VerificationEngine::new_for_test(
+        store.clone(),
+        authority.clone(),
+        current.clone(),
+        Vec::new(),
+    )
+    .expect("verification engine")
+    .evaluate(None)
+    .expect("verification report");
+    let verified = report
+        .requirement_statuses
+        .iter()
+        .find(|status| status.requirement_id == "P8-TEST-01")
+        .expect("target requirement");
+    assert_eq!(verified.status, RequirementStatus::Verified);
+}
+
+#[test]
+fn successful_collector_retry_after_persisted_blocked_failure_is_registered_and_verifies() {
+    let (authority, current, root) = authority_fixture();
+    let config_dir = root.path().join(".relintor");
+    fs::create_dir_all(&config_dir).expect("verification config directory");
+    let command = command_for_exit(root.path(), true);
+    let plan = serde_json::json!({
+        "collectors": [{
+            "class": "TEST_OUTPUT",
+            "program": &command.program,
+            "args": &command.args
+        }]
+    });
+    fs::write(
+        config_dir.join("verification-plan.json"),
+        serde_json::to_vec(&plan).expect("verification plan"),
+    )
+    .expect("verification plan");
+    let protected = ProtectedCriterionVerificationPlan::from_test_support(
+        &authority,
+        vec![CriterionProbeAuthorizationInput {
+            requirement_id: "P8-TEST-01".into(),
+            criterion_id: "P8-TEST-01-criterion".into(),
+            evidence_class: EvidenceClass::TestOutput,
+            collector_identity: CollectorIdentity::new("test-collector", "p8-v1"),
+            probe_identity: "cmd-exit-probe".into(),
+            command_digest: command.digest().unwrap(),
+        }],
+    )
+    .expect("protected criterion authority");
+    let store = store(root.path());
+
+    // Inject a blocked failure artifact for P8-TEST-01 into the store (simulating previous failure)
+    let mut failure_item = metadata(
+        &authority,
+        &current,
+        "p8-collector-P8-TEST-01-P8-TEST-01-criterion-blocked-testfail",
+        EvidenceClass::TestOutput,
+        EvidenceResult::Blocked,
+        EvidenceConfidence::Missing,
+    );
+    failure_item.requirement_ids = vec!["P8-TEST-01".into()];
+    failure_item.accepted_criteria = BTreeSet::from(["P8-TEST-01-criterion".into()]);
+    test_support::put_fixture(&store, failure_item, b"{\"result\":\"BLOCKED\"}").unwrap();
+
+    assert!(store.list().unwrap().iter().any(|art| {
+        art.metadata.requirement_ids == vec!["P8-TEST-01".to_string()]
+            && art.metadata.result == EvidenceResult::Blocked
+    }));
+
+    // Run collector with test files present
+    fs::create_dir_all(root.path().join("tests")).expect("tests directory");
+    fs::write(
+        root.path().join("tests").join("progress.test.js"),
+        "// test inventory discoverable\n",
+    )
+    .expect("test file");
+
+    let result = VerificationCollectorOrchestrator::new(root.path())
+        .collect_required_evidence_with_protected_plan(&authority, &current, &store, &protected)
+        .expect("retry collector run");
+    assert!(result.executed.iter().any(|e| e.contains("P8-TEST-01")));
+
+    let report = VerificationEngine::new_for_test(
+        store.clone(),
+        authority.clone(),
+        current.clone(),
+        Vec::new(),
+    )
+    .expect("engine")
+    .evaluate(None)
+    .expect("report");
+
+    let verified = report
+        .requirement_statuses
+        .iter()
+        .find(|status| status.requirement_id == "P8-TEST-01")
+        .expect("target requirement");
+    assert_eq!(verified.status, RequirementStatus::Verified);
+}
+
+#[test]
+fn stale_historical_evidence_does_not_block_fresh_valid_verified_complete_decision() {
+    let (root, store, authority, current, _) = report_with_all_evidence();
+
+    // Insert an older stale artifact for P8-TEST-01 into the store
+    let mut stale_item = metadata(
+        &authority,
+        &current,
+        "historical-stale-p8-test-01",
+        EvidenceClass::TestOutput,
+        EvidenceResult::Pass,
+        EvidenceConfidence::StrongDeterministic,
+    );
+    stale_item.requirement_ids = vec!["P8-TEST-01".into()];
+    stale_item.workspace_fingerprint = "older-workspace-fingerprint".into();
+    test_support::put_fixture(&store, stale_item, b"historical test output").unwrap();
+
+    let report = VerificationEngine::new_for_test(
+        store.clone(),
+        authority.clone(),
+        current.clone(),
+        Vec::new(),
+    )
+    .expect("verification engine")
+    .evaluate(Some("DONE".into()))
+    .expect("verification report");
+
+    let p8_test = report
+        .requirement_statuses
+        .iter()
+        .find(|status| status.requirement_id == "P8-TEST-01")
+        .expect("target requirement");
+    assert_eq!(p8_test.status, RequirementStatus::Verified);
+    assert!(!p8_test.stale_evidence.is_empty());
+    assert_eq!(report.decision.state, CompletionState::VerifiedComplete);
+    drop(root);
+}
+
+#[test]
+fn invalidated_evidence_retry_receives_fresh_identity_and_verifies() {
+    let (authority, current, root) = authority_fixture();
+    let config_dir = root.path().join(".relintor");
+    fs::create_dir_all(&config_dir).expect("verification config directory");
+    let command = command_for_exit(root.path(), true);
+    let plan = serde_json::json!({
+        "collectors": [{
+            "class": "TEST_OUTPUT",
+            "program": &command.program,
+            "args": &command.args
+        }]
+    });
+    fs::write(
+        config_dir.join("verification-plan.json"),
+        serde_json::to_vec(&plan).expect("verification plan"),
+    )
+    .expect("verification plan");
+    let protected = ProtectedCriterionVerificationPlan::from_test_support(
+        &authority,
+        vec![CriterionProbeAuthorizationInput {
+            requirement_id: "P8-TEST-01".into(),
+            criterion_id: "P8-TEST-01-criterion".into(),
+            evidence_class: EvidenceClass::TestOutput,
+            collector_identity: CollectorIdentity::new("test-collector", "p8-v1"),
+            probe_identity: "cmd-exit-probe".into(),
+            command_digest: command.digest().unwrap(),
+        }],
+    )
+    .expect("protected criterion authority");
+    let store = store(root.path());
+
+    // First run fails because test inventory is missing
+    let first = VerificationCollectorOrchestrator::new(root.path())
+        .collect_required_evidence_with_protected_plan(&authority, &current, &store, &protected)
+        .expect("first collector run");
+    assert!(first.executed.iter().any(|e| e.contains("P8-TEST-01")));
+
+    let initial_id = store
+        .list()
+        .expect("list")
+        .into_iter()
+        .find(|art| {
+            art.metadata.requirement_ids == vec!["P8-TEST-01".to_string()]
+                && art.metadata.result != EvidenceResult::Pass
+        })
+        .expect("initial non-pass artifact")
+        .metadata
+        .evidence_id;
+
+    // Invalidate the initial evidence ID explicitly
+    store
+        .invalidate(&initial_id, "manual revocation test")
+        .expect("invalidate");
+
+    // Provide test file and rerun
+    fs::create_dir_all(root.path().join("tests")).expect("tests directory");
+    fs::write(
+        root.path().join("tests").join("progress.test.js"),
+        "// test inventory discoverable\n",
+    )
+    .expect("test file");
+
+    let second = VerificationCollectorOrchestrator::new(root.path())
+        .collect_required_evidence_with_protected_plan(&authority, &current, &store, &protected)
+        .expect("retry after revocation");
+    assert!(second.executed.iter().any(|e| e.contains("P8-TEST-01")));
+
+    let report = VerificationEngine::new_for_test(
+        store.clone(),
+        authority.clone(),
+        current.clone(),
+        Vec::new(),
+    )
+    .expect("engine")
+    .evaluate(None)
+    .expect("report");
+
+    let verified = report
+        .requirement_statuses
+        .iter()
+        .find(|status| status.requirement_id == "P8-TEST-01")
+        .expect("target requirement");
+    assert_eq!(verified.status, RequirementStatus::Verified);
+}
+
+#[test]
+fn fresh_deterministic_failure_blocks_verification() {
+    let (authority, current, root) = authority_fixture();
+    let config_dir = root.path().join(".relintor");
+    fs::create_dir_all(&config_dir).expect("verification config directory");
+    let command = command_for_exit(root.path(), false); // command exits with non-zero failure
+    let plan = serde_json::json!({
+        "collectors": [{
+            "class": "TEST_OUTPUT",
+            "program": &command.program,
+            "args": &command.args
+        }]
+    });
+    fs::write(
+        config_dir.join("verification-plan.json"),
+        serde_json::to_vec(&plan).expect("verification plan"),
+    )
+    .expect("verification plan");
+    let protected = ProtectedCriterionVerificationPlan::from_test_support(
+        &authority,
+        vec![CriterionProbeAuthorizationInput {
+            requirement_id: "P8-TEST-01".into(),
+            criterion_id: "P8-TEST-01-criterion".into(),
+            evidence_class: EvidenceClass::TestOutput,
+            collector_identity: CollectorIdentity::new("test-collector", "p8-v1"),
+            probe_identity: "cmd-exit-probe".into(),
+            command_digest: command.digest().unwrap(),
+        }],
+    )
+    .expect("protected criterion authority");
+    let store = store(root.path());
+
+    fs::create_dir_all(root.path().join("tests")).expect("tests directory");
+    fs::write(
+        root.path().join("tests").join("progress.test.js"),
+        "// test inventory discoverable\n",
+    )
+    .expect("test file");
+
+    let _ = VerificationCollectorOrchestrator::new(root.path())
+        .collect_required_evidence_with_protected_plan(&authority, &current, &store, &protected);
+
+    let report = VerificationEngine::new_for_test(
+        store.clone(),
+        authority.clone(),
+        current.clone(),
+        Vec::new(),
+    )
+    .expect("engine")
+    .evaluate(None)
+    .expect("report");
+
+    let status = report
+        .requirement_statuses
+        .iter()
+        .find(|status| status.requirement_id == "P8-TEST-01")
+        .expect("target requirement");
+    assert_ne!(status.status, RequirementStatus::Verified);
+    assert_ne!(report.decision.state, CompletionState::VerifiedComplete);
+}
+
+#[test]
 fn mutable_workspace_plan_cannot_mint_criterion_authority() {
     let (authority, current, root) = authority_fixture();
     let config_dir = root.path().join(".relintor");
     fs::create_dir_all(&config_dir).expect("verification config directory");
+    let command = command_for_exit(root.path(), true);
+    let plan = serde_json::json!({
+        "collectors": [{
+            "class": "TEST_OUTPUT",
+            "program": &command.program,
+            "args": &command.args,
+            "criteria": [{
+                "requirement_id": "P8-TEST-01",
+                "criterion_id": "P8-TEST-01-criterion",
+                "probe_identity": "cmd-exit-probe"
+            }]
+        }]
+    });
     fs::write(
         config_dir.join("verification-plan.json"),
-        r#"{"collectors":[
-            {"class":"TEST_OUTPUT","program":"cmd","args":["/C","exit","0"],
-             "criteria":[{"requirement_id":"P8-TEST-01","criterion_id":"P8-TEST-01-criterion","probe_identity":"cmd-exit-probe"}]}
-        ]}"#,
+        serde_json::to_vec(&plan).expect("portable verification plan"),
     )
     .expect("verification plan");
     let store = store(root.path());
@@ -231,23 +593,55 @@ fn mutable_workspace_plan_cannot_mint_criterion_authority() {
 }
 
 #[test]
+fn unavailable_machine_collector_persists_truthful_blocked_evidence() {
+    let (authority, current, root) = authority_fixture();
+    let config_dir = root.path().join(".relintor");
+    fs::create_dir_all(&config_dir).expect("verification config directory");
+    let plan = serde_json::json!({
+        "collectors": [{
+            "class": "TEST_OUTPUT",
+            "program": "relintor-deliberately-missing-test-runner",
+            "args": []
+        }]
+    });
+    fs::write(
+        config_dir.join("verification-plan.json"),
+        serde_json::to_vec(&plan).expect("verification plan"),
+    )
+    .expect("verification plan");
+    let store = store(root.path());
+    let result = VerificationCollectorOrchestrator::new(root.path())
+        .collect_required_evidence(&authority, &current, &store)
+        .expect("collector orchestration remains inspectable");
+
+    assert!(!result.blocked_external.is_empty());
+    let artifacts = store.list().expect("persisted collector failure");
+    assert!(!artifacts.is_empty());
+    assert!(artifacts.iter().all(|artifact| {
+        artifact.metadata.class == EvidenceClass::TestOutput
+            && artifact.metadata.result == EvidenceResult::Blocked
+            && artifact.metadata.confidence == EvidenceConfidence::Missing
+    }));
+}
+
+#[test]
 fn protected_criterion_mapping_mints_evidence_only_for_matching_candidate() {
     let (authority, current, root) = authority_fixture();
     let config_dir = root.path().join(".relintor");
     fs::create_dir_all(&config_dir).expect("verification config directory");
+    let command = command_for_exit(root.path(), true);
+    let plan = serde_json::json!({
+        "collectors": [{
+            "class": "TEST_OUTPUT",
+            "program": &command.program,
+            "args": &command.args
+        }]
+    });
     fs::write(
         config_dir.join("verification-plan.json"),
-        r#"{"collectors":[
-            {"class":"TEST_OUTPUT","program":"cmd","args":["/C","exit","0"]}
-        ]}"#,
+        serde_json::to_vec(&plan).expect("portable verification plan"),
     )
     .expect("verification plan");
-    let command = CommandSpec {
-        program: "cmd".into(),
-        args: vec!["/C".into(), "exit".into(), "0".into()],
-        working_directory: root.path().to_path_buf(),
-        environment: BTreeMap::new(),
-    };
     let protected = ProtectedCriterionVerificationPlan::from_test_support(
         &authority,
         vec![CriterionProbeAuthorizationInput {
@@ -781,6 +1175,52 @@ fn atomic_evidence_commit_reloads_and_partial_metadata_is_never_accepted() {
 }
 
 #[test]
+fn long_collector_evidence_ids_round_trip_without_using_path_length_as_failure_state() {
+    let (authority, current, root) = authority_fixture();
+    let evidence_store = store(root.path());
+    let evidence_id = format!(
+        "p8-collector-{}",
+        "requirement-criterion-project-blueprint-candidate-".repeat(8)
+    );
+    let artifact = evidence_store
+        .put_test_fixture(
+            metadata(
+                &authority,
+                &current,
+                &evidence_id,
+                EvidenceClass::TestOutput,
+                EvidenceResult::Pass,
+                EvidenceConfidence::StrongDeterministic,
+            ),
+            b"durable long-id proof",
+        )
+        .expect("long evidence metadata must commit");
+
+    let reopened = store(root.path());
+    assert_eq!(reopened.load(&evidence_id).unwrap().artifact, artifact);
+    assert!(reopened
+        .list()
+        .unwrap()
+        .iter()
+        .any(|item| item.metadata.evidence_id == evidence_id));
+    reopened
+        .invalidate(&evidence_id, "long-id invalidation regression")
+        .expect("long evidence invalidation must commit");
+    assert!(reopened
+        .invalidations()
+        .unwrap()
+        .iter()
+        .any(|item| item.evidence_id == evidence_id));
+    assert!(reopened.list().unwrap().is_empty());
+    #[cfg(windows)]
+    assert!(fs::read_dir(reopened.root().join("metadata"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+        .all(|entry| entry.file_name().to_string_lossy() != format!("{evidence_id}.json")));
+}
+
+#[test]
 fn unknown_evidence_store_version_is_rejected_before_use() {
     let (authority, current, root) = authority_fixture();
     let store = store(root.path());
@@ -989,7 +1429,7 @@ fn performance_threshold_failure_is_visible() {
         BTreeSet::new(),
     )
     .unwrap();
-    let collected = PerformanceCollector
+    let collected = PerformanceCollector::default()
         .measure(&binding, "p95", 400.0, 200.0, "ms", "real-runtime")
         .unwrap();
     assert_eq!(collected.observation.result, EvidenceResult::Fail);
@@ -1582,6 +2022,25 @@ fn process_collector_records_actual_exit_and_bounded_output() {
     assert!(!result.stdout.is_empty());
 }
 
+#[cfg(windows)]
+#[test]
+fn process_collector_runs_batch_script_commands_from_native_desktop_context() {
+    let root = tempdir().unwrap();
+    let script = root.path().join("collector with spaces.cmd");
+    fs::write(&script, "@echo off\r\necho native-batch\r\nexit /b 0\r\n").unwrap();
+    let command = CommandSpec::new(script.to_string_lossy(), root.path());
+    let result = ProcessCollector::default().run(&command).unwrap();
+    assert_eq!(
+        result.exit_code,
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.result, EvidenceResult::Pass);
+    assert!(String::from_utf8_lossy(&result.stdout).contains("native-batch"));
+}
+
 #[test]
 fn process_collector_has_a_bounded_wait() {
     let root = tempdir().unwrap();
@@ -1634,3 +2093,90 @@ fn source_fingerprint_changes_for_same_size_file_change() {
     let after = fingerprint_workspace(root.path()).unwrap();
     assert_ne!(before, after);
 }
+
+#[test]
+fn package_json_script_aliases_and_colon_delimiters_are_discovered() {
+    let root = tempdir().unwrap();
+    let package_json = root.path().join("package.json");
+    fs::write(
+        &package_json,
+        r#"{
+            "name": "alias-test",
+            "scripts": {
+                "accessibility:scan": "node scripts/a11y.js",
+                "security:scan": "node scripts/sec.js",
+                "test:unit": "node --test tests/*.test.js",
+                "lint:check": "eslint ."
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let plan = VerificationCollectorPlan::discover(root.path()).expect("discover package scripts");
+    assert!(plan.for_class(EvidenceClass::AccessibilityResult).is_some());
+    assert_eq!(
+        plan.for_class(EvidenceClass::AccessibilityResult)
+            .unwrap()
+            .command
+            .as_ref()
+            .unwrap()
+            .args,
+        vec!["run", "accessibility:scan"]
+    );
+    assert!(plan.for_class(EvidenceClass::SecurityScan).is_some());
+    assert!(plan.for_class(EvidenceClass::TestOutput).is_some());
+    assert!(plan.for_class(EvidenceClass::LintStaticAnalysis).is_some());
+}
+
+#[test]
+fn idempotent_repeated_verification_evaluation_produces_identical_reports() {
+    let (root, store, authority, current, _) = report_with_all_evidence();
+    let engine = VerificationEngine::new_for_test(
+        store.clone(),
+        authority.clone(),
+        current.clone(),
+        Vec::new(),
+    )
+    .unwrap();
+
+    let first = engine.evaluate(None).unwrap();
+    let second = engine.evaluate(None).unwrap();
+
+    assert_eq!(first.decision.state, second.decision.state);
+    assert_eq!(first.coverage_total, second.coverage_total);
+    assert_eq!(first.coverage_accounted, second.coverage_accounted);
+    assert_eq!(first.requirement_statuses.len(), second.requirement_statuses.len());
+    drop(root);
+}
+
+#[test]
+fn test_discovers_accessibility_test_file_when_package_script_is_absent() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(
+        root.path().join("package.json"),
+        r#"{
+            "name": "omnichat-test",
+            "scripts": {
+                "test": "node --test tests/*.test.js"
+            }
+        }"#,
+    )
+    .unwrap();
+    fs::create_dir_all(root.path().join("tests")).unwrap();
+    fs::write(
+        root.path().join("tests").join("accessibility-result.test.js"),
+        "// accessibility test",
+    )
+    .unwrap();
+
+    let plan = VerificationCollectorPlan::discover(root.path()).expect("discover package scripts");
+    assert!(plan.for_class(EvidenceClass::AccessibilityResult).is_some());
+    let a11y_spec = plan.for_class(EvidenceClass::AccessibilityResult).unwrap();
+    assert_eq!(a11y_spec.command.as_ref().unwrap().program, "node");
+    assert_eq!(
+        a11y_spec.command.as_ref().unwrap().args,
+        vec!["--test", "tests/accessibility-result.test.js"]
+    );
+}
+
+

@@ -10,14 +10,18 @@ use relintor_distribution::{
 };
 use relintor_evidence::{
     environment_fingerprint, export_manifest, fingerprint_workspace, AiVerifierInput,
-    AuthenticatedP7Execution, CompletionAuthority, CompletionCertificate, EvidenceManifest,
-    EvidenceStore, EvidenceSummary, FreshnessContext, ProductionAiProvider, VerificationAuthority,
-    VerificationCollectorOrchestrator, VerificationEngine,
+    AuthenticatedP7Execution, CollectorOrchestrationResult, CompletionAuthority,
+    CompletionCertificate, EvidenceManifest, EvidenceStore, EvidenceSummary,
+    ExplicitUserDecisionInput, ExplicitUserDecisionRecorder,
+    FreshnessContext, HumanScopeRefinement, is_final_human_acceptance_eligible, ProductionAiProvider,
+    validate_and_canonicalize_scope_path, VerificationAuthority,
+    VerificationCollectorOrchestrator, VerificationCollectorPlan, VerificationEngine,
 };
 use relintor_execution::{
-    CheckpointKind, ConservativeProcessInspector, ExecutionRun, ProcessInspector,
-    ProcessObservation, ProcessOwnershipRecord, RecoveryAuthority, RecoveryCoordinator,
-    RecoveryDisposition, RecoveryStore, SchedulerPolicy, SessionEndState,
+    CheckpointKind, ConservativeProcessInspector, ExecutionError, ExecutionRun,
+    ProcessInspector, ProcessObservation, ProcessOwnershipRecord,
+    RecoveryAuthority, RecoveryCoordinator, RecoveryDisposition, RecoveryStore, SchedulerPolicy,
+    SessionEndState,
 };
 use relintor_investigator::{
     persist_result, AnswerChoice, Blueprint, InvestigationView, Investigator, ProjectDraft,
@@ -35,7 +39,7 @@ use reqwest::blocking::Client;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -44,7 +48,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, Condvar, Mutex, OnceLock,
+    Arc, Condvar, LazyLock, Mutex, OnceLock,
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -660,7 +664,51 @@ struct VerificationStatusView {
     accepted_risks: Vec<String>,
     evidence_count: usize,
     certificate: Option<CompletionCertificateView>,
+    workflow_stage: String,
+    summary: String,
+    human_decisions: Vec<HumanDecisionPromptView>,
+    final_human_acceptance_eligible: bool,
+    final_human_acceptance_reasons: Vec<String>,
+    evidence_items: Vec<HumanDecisionEvidenceItemView>,
+    correction_scope: Option<CorrectionScopeView>,
+    collector_activity: Vec<String>,
+    collection_failures: Vec<String>,
     detail: String,
+}
+
+use relintor_evidence::CorrectionScopeView;
+
+#[derive(Debug, Clone, Serialize)]
+struct HumanDecisionEvidenceItemView {
+    requirement_id: String,
+    requirement_title: String,
+    intent: String,
+    status: String,
+    evidence_id: String,
+    evidence_class: String,
+    command: String,
+    exit_code: Option<i32>,
+    result: String,
+    relevant_files: Vec<String>,
+    artifact_path: String,
+    mission_id: String,
+    revision: u64,
+    source_fingerprint: String,
+    environment_fingerprint: String,
+    timestamp_ms: u64,
+    detail_snippet: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HumanDecisionPromptView {
+    requirement_id: String,
+    #[serde(default)]
+    requirement_ids: Vec<String>,
+    title: String,
+    question: String,
+    summary: String,
+    criterion_ids: Vec<String>,
+    evidence_items: Vec<HumanDecisionEvidenceItemView>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -1010,7 +1058,9 @@ fn local_appdata_root() -> Option<PathBuf> {
 }
 
 fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
-    let mut command = Command::new(program);
+    let command = Command::new(program);
+    #[cfg(windows)]
+    let mut command = command;
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -2679,6 +2729,20 @@ fn takeover_scan(app: AppHandle, root: String) -> Result<TakeoverScanResult, Str
         Connection::open(&path).map_err(|error| format!("open project database: {error}"))?;
     connection
         .execute(
+            "DELETE FROM takeover_findings WHERE takeover_id IN (
+                SELECT id FROM project_takeovers WHERE root = ?1 AND id != ?2
+            )",
+            params![report.takeover.root.as_str(), report.takeover.id.as_str()],
+        )
+        .ok();
+    connection
+        .execute(
+            "DELETE FROM project_takeovers WHERE root = ?1 AND id != ?2",
+            params![report.takeover.root.as_str(), report.takeover.id.as_str()],
+        )
+        .ok();
+    connection
+        .execute(
             "INSERT INTO projects(id, name, root_path, created_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(id) DO UPDATE SET name=excluded.name, root_path=excluded.root_path",
             params![
@@ -2784,7 +2848,78 @@ fn project_summaries(connection: &Connection) -> Result<Vec<ProjectSummaryView>,
         .collect()
 }
 
+fn reconcile_unsealed_project_takeover(path: &Path, project_id: &str) -> Result<(), String> {
+    let connection = Connection::open(path)
+        .map_err(|error| format!("open database for reconciliation: {error}"))?;
+
+    let mission_id = format!("mission-{project_id}");
+    let is_sealed: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM mission_revisions WHERE mission_id = ?1)",
+            params![mission_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+    if is_sealed {
+        return Ok(());
+    }
+
+    let root_path: Option<String> = connection
+        .query_row(
+            "SELECT root_path FROM projects WHERE id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("load project root path: {error}"))?
+        .flatten();
+
+    let Some(raw_root) = root_path else {
+        return Ok(());
+    };
+
+    let clean_root = raw_root.trim_start_matches(r"\\?\");
+    let p = PathBuf::from(clean_root);
+    if !p.is_dir() {
+        return Ok(());
+    }
+
+    let current_takeover: Option<(String, String, String)> = connection
+        .query_row(
+            "SELECT id, scanner_version, fingerprint FROM project_takeovers WHERE project_id = ?1 ORDER BY created_at DESC LIMIT 1",
+            params![project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|error| format!("query current takeover: {error}"))?;
+
+    drop(connection);
+
+    let Some((_, scanner_version, fingerprint)) = current_takeover else {
+        return Ok(());
+    };
+
+    if scanner_version == "p6-test" {
+        return Ok(());
+    }
+
+    let Ok(report) = TakeoverScanner::default().scan(&p) else {
+        return Ok(());
+    };
+    let needs_rescan = scanner_version != relintor_takeover::TAKEOVER_SCANNER_VERSION
+        || report.fingerprint != fingerprint;
+
+    if needs_rescan {
+        let _ = persist_takeover_for_project(path, &report, project_id);
+    }
+
+    Ok(())
+}
+
 fn open_project_at_path(path: &Path, project_id: &str) -> Result<ProjectOpenView, String> {
+    // Phase-1 Closed-Beta hardening: saved-project open is persisted-state only.
+    // Fresh workspace reconciliation remains enforced at the authority-review boundary.
     let connection =
         Connection::open(path).map_err(|error| format!("open project database: {error}"))?;
     let project = project_summaries(&connection)?
@@ -2912,6 +3047,7 @@ fn review_authority_at_path(
     project_id: &str,
     facts: &[AuthorityFactDecision],
 ) -> Result<AuthorityPreview, String> {
+    reconcile_unsealed_project_takeover(path, project_id)?;
     let (registry, trusted) = production_registry().map_err(|error| error.to_string())?;
     let connection =
         Connection::open(path).map_err(|error| format!("open authority database: {error}"))?;
@@ -3188,6 +3324,96 @@ fn project_execution_scope(connection: &Connection, project_id: &str) -> Result<
         );
     }
     Ok(path)
+}
+
+fn required_collector_blockers(
+    workspace: &Path,
+    required_classes: &[EvidenceClass],
+) -> Result<Vec<String>, String> {
+    let plan = VerificationCollectorPlan::discover(workspace)
+        .map_err(|error| format!("discover verification collectors: {error}"))?;
+    let mut blockers = Vec::new();
+    for class in required_classes {
+        if matches!(
+            class,
+            EvidenceClass::HumanDecision | EvidenceClass::AiVerifierJudgement
+        ) {
+            continue;
+        }
+        if blockers
+            .iter()
+            .any(|blocker: &String| blocker.starts_with(&format!("{class:?}:")))
+        {
+            continue;
+        }
+        let available = plan
+            .for_class(*class)
+            .and_then(|spec| spec.command.as_ref())
+            .is_some_and(|command| {
+                !command.program.trim().is_empty()
+                    && collector_program_available(&command.program, workspace)
+            });
+        if !available {
+            blockers.push(format!(
+                "{class:?}: no executable collector was discovered in workspace {}",
+                workspace.display()
+            ));
+        }
+    }
+    Ok(blockers)
+}
+
+fn collector_program_available(program: &str, workspace: &Path) -> bool {
+    let program_path = Path::new(program);
+    let has_path_component = program_path.components().count() > 1;
+    let mut candidates = Vec::new();
+    if has_path_component || program_path.is_absolute() {
+        let path = if program_path.is_absolute() {
+            program_path.to_path_buf()
+        } else {
+            workspace.join(program_path)
+        };
+        candidates.push(path);
+    } else if let Some(path_value) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path_value) {
+            candidates.push(directory.join(program));
+            #[cfg(windows)]
+            if Path::new(program).extension().is_none() {
+                for extension in [".com", ".exe", ".bat", ".cmd"] {
+                    candidates.push(directory.join(format!("{program}{extension}")));
+                }
+            }
+        }
+    }
+    candidates.into_iter().any(|candidate| candidate.is_file())
+}
+
+fn ensure_required_collectors_before_execution(
+    workspace: &Path,
+    revision: &MissionRevision,
+) -> Result<(), String> {
+    let required_classes = revision
+        .contract
+        .requirement_graph
+        .requirements
+        .iter()
+        .flat_map(|requirement| {
+            requirement
+                .verification_policy
+                .obligations
+                .iter()
+                .filter(|obligation| obligation.required)
+                .map(|obligation| obligation.class)
+        })
+        .collect::<Vec<_>>();
+    let blockers = required_collector_blockers(workspace, &required_classes)?;
+    if blockers.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "P8_COLLECTOR_AUTHORIZATION_REQUIRED: execution was not started because required machine evidence collectors are unavailable: {}",
+        blockers.join("; ")
+    ))
 }
 
 fn current_timestamp() -> String {
@@ -3566,6 +3792,7 @@ fn notify_user(app: &AppHandle, title: &str, body: &str) {
 }
 
 static EXECUTION_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static VERIFICATION_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct ActiveExecution {
     cancel: Arc<AtomicU64>,
@@ -3610,20 +3837,35 @@ fn persist_execution_boundary(
     kind: CheckpointKind,
     processes: Vec<ProcessOwnershipRecord>,
 ) -> Result<(), relintor_execution::ExecutionError> {
-    run.persist_snapshot(ledger_path)?;
-    RecoveryCoordinator::new(recovery.clone())
-        .checkpoint_run(
-            run,
-            recovery_authority(run, revision),
-            kind,
-            &run.workspace,
-            processes,
-            Vec::new(),
-            detail,
-            execution_now_ms(),
-        )
-        .map_err(|error| relintor_execution::ExecutionError::Ledger(error.to_string()))?;
-    Ok(())
+    let mut last_error = None;
+    for attempt in 0..3 {
+        let res = (|| -> Result<(), relintor_execution::ExecutionError> {
+            run.persist_snapshot(ledger_path)?;
+            RecoveryCoordinator::new(recovery.clone())
+                .checkpoint_run(
+                    run,
+                    recovery_authority(run, revision),
+                    kind,
+                    &run.workspace,
+                    processes.clone(),
+                    Vec::new(),
+                    detail,
+                    execution_now_ms(),
+                )
+                .map_err(|error| relintor_execution::ExecutionError::Ledger(error.to_string()))?;
+            Ok(())
+        })();
+        match res {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                last_error = Some(err);
+                if attempt < 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(50 * (attempt + 1)));
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap())
 }
 
 fn process_ownership_record(
@@ -3743,7 +3985,7 @@ fn run_execution_step_worker(
             }
             control.process_started.store(false, Ordering::Release);
             control.process_exited.store(false, Ordering::Release);
-            let dispatch = run.dispatch_next_with_adapter_with_callback(
+            let dispatch = run.dispatch_next_with_adapter_with_callbacks(
                 &mut adapter,
                 &revision,
                 &handoff,
@@ -3768,6 +4010,22 @@ fn run_execution_step_worker(
                         "task attempt started and executor process ownership persisted",
                         CheckpointKind::AfterTaskPersistence,
                         vec![record],
+                    )
+                },
+                |snapshot| {
+                    let processes = owned_process_records(
+                        &control,
+                        ProcessObservation::ProcessCompletedResultAvailable,
+                    )
+                    .map_err(relintor_execution::ExecutionError::Ledger)?;
+                    persist_execution_boundary(
+                        snapshot,
+                        &ledger_path,
+                        &recovery,
+                        &revision,
+                        "trusted executor completion receipt and exact post-workspace persisted before task promotion",
+                        CheckpointKind::AfterAtomicAction,
+                        processes,
                     )
                 },
             );
@@ -3850,6 +4108,14 @@ fn run_execution_step_worker(
             if control.cancel.load(Ordering::Acquire) != 0 {
                 continue;
             }
+            // A failed/expired attempt may have already received explicit
+            // bounded retry or progress-renewal authority. That is a different
+            // boundary from moving to the next successful task, so do not
+            // require a TASK_IMPLEMENTATION_FINISHED event before the fresh
+            // lease is issued.
+            if run.has_pending_retry() {
+                continue;
+            }
             match run.authorize_next_task_continuation(&revision, &handoff, execution_now_ms()) {
                 Ok(Some(_next_task)) => {
                     persist_execution_boundary(
@@ -3863,7 +4129,7 @@ fn run_execution_step_worker(
                     )
                     .map_err(|error| error.to_string())?;
                 }
-                Ok(None) => break,
+                Ok(None) | Err(relintor_execution::ExecutionError::ContinuationNotAvailable) => break,
                 Err(error) => {
                     run.state = relintor_execution::ExecutionRunState::RevalidationRequired;
                     run.last_error = Some(error.to_string());
@@ -3888,6 +4154,24 @@ fn run_execution_step_worker(
     }
     if let Ok(mut active) = active_executions().lock() {
         active.remove(&project_id);
+    }
+    // Normal healthy execution closes itself through evidence, verification,
+    // bounded correction (when deterministic work is actually wrong), and a
+    // completion certificate. The user should not have to babysit task-to-P8
+    // transitions.
+    if let Ok((run, _, _, _)) = load_execution_run(&app, &project_id) {
+        if run.state
+            == relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
+        {
+            if let Err(error) = automatic_verification_closure(&app, &project_id) {
+                eprintln!("Relintor automatic verification closure stopped: {error}");
+                notify_user(
+                    &app,
+                    "Relintor needs your attention",
+                    "Implementation is preserved, but verification could not close automatically. Review verification before retrying.",
+                );
+            }
+        }
     }
 }
 
@@ -3987,6 +4271,46 @@ fn reconcile_persisted_running_execution(
     revision: &MissionRevision,
     recovery: &RecoveryStore,
 ) -> Result<(), String> {
+    // First recover the narrow crash window where Antigravity already exited
+    // cleanly and Relintor durably persisted the exact completion receipt +
+    // post-workspace inventory, but the desktop stopped before promoting the
+    // task. This is stronger than process/file inference: the P7 receipt,
+    // lease, packet, attempt, and current workspace must all still match.
+    match run.recover_trusted_completion_after_restart(execution_now_ms()) {
+        Ok(true) => {
+            persist_execution_boundary(
+                run,
+                ledger_path,
+                recovery,
+                revision,
+                "restart recovered a previously persisted trusted executor completion before task promotion",
+                CheckpointKind::AfterAtomicAction,
+                Vec::new(),
+            )
+            .map_err(|error| format!("persist recovered trusted completion: {error}"))?;
+            return Ok(());
+        }
+        Ok(false) => {}
+        Err(relintor_execution::ExecutionError::RevalidationRequired(reason)) => {
+            run.state = relintor_execution::ExecutionRunState::RevalidationRequired;
+            run.last_error = Some(reason.clone());
+            persist_execution_boundary(
+                run,
+                ledger_path,
+                recovery,
+                revision,
+                &format!("trusted completion recovery requires revalidation: {reason}"),
+                CheckpointKind::RestartRecovery,
+                Vec::new(),
+            )
+            .map_err(|error| format!("persist trusted completion revalidation: {error}"))?;
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(format!("recover persisted trusted completion: {error}"));
+        }
+    }
+
     let latest = recovery
         .load_latest()
         .map_err(|error| format!("load persisted executor identity: {error}"))?;
@@ -4107,6 +4431,15 @@ fn with_execution_mutation_lock<T>(
     let _guard = EXECUTION_MUTATION_LOCK
         .lock()
         .map_err(|_| "execution authority lock is poisoned".to_string())?;
+    operation()
+}
+
+fn with_verification_mutation_lock<T>(
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _guard = VERIFICATION_MUTATION_LOCK
+        .lock()
+        .map_err(|_| "verification authority lock is poisoned".to_string())?;
     operation()
 }
 
@@ -4262,17 +4595,23 @@ fn execution_status_view_base(
             .as_ref()
             .is_some_and(|boundary| boundary.reached),
         last_event: run.events.last().map(|event| event.detail.clone()),
-        events: run
-            .events
-            .iter()
-            .map(|event| ExecutionEventView {
-                sequence: event.sequence,
-                occurred_at_ms: event.occurred_at_ms,
-                task_id: event.task_id.clone(),
-                kind: format!("{:?}", event.kind),
-                detail: event.detail.clone(),
-            })
-            .collect(),
+        events: {
+            let event_slice = if run.events.len() > 100 {
+                &run.events[run.events.len() - 100..]
+            } else {
+                &run.events[..]
+            };
+            event_slice
+                .iter()
+                .map(|event| ExecutionEventView {
+                    sequence: event.sequence,
+                    occurred_at_ms: event.occurred_at_ms,
+                    task_id: event.task_id.clone(),
+                    kind: format!("{:?}", event.kind),
+                    detail: event.detail.clone(),
+                })
+                .collect()
+        },
         ledger_path: ledger_path.display().to_string(),
         recovery_state: "P9_RECOVERY_NOT_EVALUATED".into(),
         last_safe_checkpoint: None,
@@ -4287,24 +4626,51 @@ fn execution_status_view_base(
     }
 }
 
+static RECOVERY_KEY_CACHE: LazyLock<Mutex<HashMap<String, Vec<u8>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static RECOVERY_STORE_CACHE: LazyLock<Mutex<HashMap<String, RecoveryStore>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 fn recovery_store(app: &AppHandle, revision: &MissionRevision) -> Result<RecoveryStore, String> {
+    let cache_key = format!("{}-{}", revision.seal.project_id, revision.revision);
+    {
+        let cache = RECOVERY_STORE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = cache.get(&cache_key) {
+            return Ok(existing.clone());
+        }
+    }
     let app_data = app
         .path()
         .app_data_dir()
         .map_err(|error| format!("resolve P9 recovery directory: {error}"))?;
-    let key = load_or_create_keychain_authority_key(
-        "Relintor.P9.Recovery",
-        &format!("{}-{}", revision.seal.project_id, revision.revision),
-    )
-    .map_err(|error| format!("load P9 OS keychain authority: {error}"))?;
-    RecoveryStore::new(
+    let key = {
+        let mut cache = RECOVERY_KEY_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = cache.get(&cache_key) {
+            existing.clone()
+        } else {
+            let loaded = load_or_create_keychain_authority_key(
+                "Relintor.P9.Recovery",
+                &cache_key,
+            )
+            .map_err(|error| format!("load P9 OS keychain authority: {error}"))?;
+            cache.insert(cache_key.clone(), loaded.clone());
+            loaded
+        }
+    };
+    let store = RecoveryStore::new(
         app_data.join("execution").join("recovery").join(format!(
             "{}-{}",
             revision.seal.mission_id, revision.revision
         )),
         key,
     )
-    .map_err(|error| format!("open P9 recovery store: {error}"))
+    .map_err(|error| format!("open P9 recovery store: {error}"))?;
+    {
+        let mut cache = RECOVERY_STORE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        cache.insert(cache_key, store.clone());
+    }
+    Ok(store)
 }
 
 fn recovery_authority(run: &ExecutionRun, revision: &MissionRevision) -> RecoveryAuthority {
@@ -4337,6 +4703,7 @@ fn expected_recovery_authority(
         .map_err(|error| format!("load P9 authority checkpoint: {error}"))?
     {
         authority.workspace_identity = record.content.authority.workspace_identity;
+        authority.source_identity = record.content.authority.source_identity;
     }
     Ok(authority)
 }
@@ -4443,7 +4810,6 @@ fn p9_status_view(
     )
     .into();
     let store = recovery_store(app, revision)?;
-    let coordinator = RecoveryCoordinator::new(store.clone());
     let latest = store
         .load_latest()
         .map_err(|error| format!("load P9 checkpoint: {error}"))?;
@@ -4451,7 +4817,11 @@ fn p9_status_view(
         .load_latest_revalidation()
         .map_err(|error| format!("load P9 revalidation decision: {error}"))?;
     let expected = expected_recovery_authority(&store, run, revision)?;
-    if !run.recovery_status_requires_attention() {
+    if run.all_tasks_finished()
+        || run.state == relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
+        || !run.recovery_status_requires_attention()
+        || run.current_recovery_attempt().is_none()
+    {
         if let Some(record) = latest.as_ref().filter(|record| record.is_safe_to_resume()) {
             view.last_safe_checkpoint =
                 Some(format!("{}#{}", record.checkpoint_id, record.sequence));
@@ -4464,77 +4834,93 @@ fn p9_status_view(
         view.recovery_action = "NONE".into();
         return Ok(view);
     }
-    let integrity = coordinator
-        .resume_integrity_for_run(
-            run,
-            &expected,
-            &run.workspace,
-            &ConservativeProcessInspector,
-            execution_now_ms(),
-        )
-        .map_err(|error| format!("evaluate P9 resume integrity: {error}"))?;
-    view.recovery_task_id = integrity
-        .target
+    let target = run.current_recovery_attempt();
+    view.recovery_task_id = target
         .as_ref()
         .map(|target| target.task_id.clone());
-    view.recovery_task_objective = integrity
-        .target
+    view.recovery_task_objective = target
         .as_ref()
         .and_then(|target| run.tasks.get(&target.task_id))
         .map(|task| task.objective.clone());
+    let failure_detail = target
+        .as_ref()
+        .and_then(|target| {
+            run.attempts
+                .iter()
+                .find(|attempt| attempt.attempt_id == target.attempt_id)
+                .and_then(|attempt| attempt.termination_reason.clone())
+        })
+        .or_else(|| run.last_error.clone());
+    let is_pre_execution = run.current_recovery_attempt_is_pre_execution();
     let revalidation_is_current = latest_revalidation.as_ref().is_some_and(|record| {
         record.project_id == expected.project_id
             && record.mission_id == expected.mission_id
             && record.mission_revision == expected.mission_revision
             && record.p7_run_id == expected.p7_run_id
-            && record.target == integrity.target
-            && !(integrity.disposition == RecoveryDisposition::PreExecutionRetryAuthorized
-                && record.disposition != RecoveryDisposition::PreExecutionRetryAuthorized)
+            && record.target == target
+            && (!is_pre_execution
+                || record.disposition == RecoveryDisposition::PreExecutionRetryAuthorized)
             && revalidation_record_is_current(record, latest.as_ref())
     });
+    let processes_gone = latest.as_ref().map_or(true, |record| {
+        record.content.processes.iter().all(|process| {
+            ConservativeProcessInspector.observe(process) == relintor_execution::ProcessObservation::ProcessGone
+        })
+    });
     view.recovery_action = if revalidation_is_current
-        && integrity.target.as_ref().is_some_and(|target| {
+        && ((target.as_ref().is_some_and(|target| {
             target.execution_boundary
                 == relintor_execution::AttemptExecutionBoundary::ExternalProcessStarted
-        })
-        && !integrity.process_observations.is_empty()
-        && integrity
-            .process_observations
-            .iter()
-            .all(|observation| *observation == relintor_execution::ProcessObservation::ProcessGone)
+        }) && processes_gone)
+            || is_pre_execution)
     {
         "MANUAL_REVIEW_RETRY".into()
     } else {
         "CHECK_SAFETY".into()
     };
-    if let Some(record) = latest_revalidation.filter(|_| revalidation_is_current) {
+    if let Some(record) = latest_revalidation.as_ref().filter(|_| revalidation_is_current) {
         view.recovery_state = format!("{:?}", record.disposition);
         view.resume_disposition = Some(format!("{:?}", record.disposition));
         view.resume_blocker = (record.disposition
             != RecoveryDisposition::PreExecutionRetryAuthorized)
-            .then(|| record.reasons.first().cloned())
+            .then(|| failure_detail.clone().or_else(|| record.reasons.first().cloned()))
             .flatten();
-        view.external_changes = record.affected_paths;
+        view.external_changes = record.affected_paths.clone();
         view.recovery_detected = true;
-    } else if let Some(record) = latest {
-        if record.is_safe_to_resume() {
+    } else if is_pre_execution {
+        if let Some(record) = latest.as_ref().filter(|record| record.is_safe_to_resume()) {
             view.last_safe_checkpoint =
                 Some(format!("{}#{}", record.checkpoint_id, record.sequence));
         }
-        view.recovery_state = format!("{:?}", integrity.disposition);
-        view.resume_disposition = Some(format!("{:?}", integrity.disposition));
-        view.resume_blocker = integrity.reasons.first().cloned();
-        view.external_changes = integrity.changed_paths;
-        view.recovery_detected = !integrity.reasons.is_empty();
+        view.recovery_state = "PreExecutionRetryAuthorized".into();
+        view.resume_disposition = Some("PreExecutionRetryAuthorized".into());
+        view.resume_blocker = None;
+        view.external_changes.clear();
+        view.recovery_detected = false;
+    } else if let Some(record) = latest.as_ref() {
+        if record.is_safe_to_resume() {
+            view.last_safe_checkpoint =
+                Some(format!("{}#{}", record.checkpoint_id, record.sequence));
+            view.recovery_state = "SafeToResume".into();
+            view.resume_disposition = Some("SafeToResume".into());
+            view.resume_blocker = None;
+            view.external_changes.clear();
+            view.recovery_detected = false;
+        } else {
+            view.recovery_state = "RevalidationRequired".into();
+            view.resume_disposition = Some("RevalidationRequired".into());
+            view.resume_blocker = failure_detail.clone().or_else(|| {
+                Some("checkpoint records durable state but not a safe automatic-resume boundary".into())
+            });
+            view.external_changes.clear();
+            view.recovery_detected = true;
+        }
     } else {
-        view.recovery_state = format!("{:?}", integrity.disposition);
-        view.resume_disposition = Some(format!("{:?}", integrity.disposition));
-        view.resume_blocker = (integrity.disposition
-            != RecoveryDisposition::PreExecutionRetryAuthorized)
-            .then(|| integrity.reasons.first().cloned())
-            .flatten();
-        view.external_changes = integrity.changed_paths;
-        view.recovery_detected = !integrity.reasons.is_empty();
+        view.recovery_state = "RevalidationRequired".into();
+        view.resume_disposition = Some("RevalidationRequired".into());
+        view.resume_blocker = failure_detail.clone();
+        view.external_changes.clear();
+        view.recovery_detected = failure_detail.is_some();
     }
     Ok(view)
 }
@@ -4565,16 +4951,7 @@ fn load_execution_run(
             if ledger.run_id != recovery.run_id {
                 return Err("P7 ledger and P9 checkpoint belong to different runs".into());
             }
-            let recovery_is_newer = recovery.events.len() > ledger.events.len()
-                || matches!(
-                    recovery.state,
-                    relintor_execution::ExecutionRunState::StoppedIncomplete
-                        | relintor_execution::ExecutionRunState::RevalidationRequired
-                ) && !matches!(
-                    ledger.state,
-                    relintor_execution::ExecutionRunState::StoppedIncomplete
-                        | relintor_execution::ExecutionRunState::RevalidationRequired
-                );
+            let recovery_is_newer = recovery.events.len() > ledger.events.len();
             if recovery_is_newer {
                 recovery
             } else {
@@ -4598,14 +4975,67 @@ fn load_execution_run(
     if run.state == relintor_execution::ExecutionRunState::Running
         && active_execution(project_id)?.is_none()
     {
-        reconcile_persisted_running_execution(
-            app,
-            project_id,
-            &mut run,
-            &ledger_path,
-            &revision,
-            &recovery,
-        )?;
+        with_execution_mutation_lock(|| {
+            if run.state == relintor_execution::ExecutionRunState::Running
+                && active_execution(project_id)?.is_none()
+            {
+                if let Ok(fresh_run) = ExecutionRun::restore_snapshot(&ledger_path) {
+                    if fresh_run.state != relintor_execution::ExecutionRunState::Running {
+                        run = fresh_run;
+                        return Ok(());
+                    }
+                }
+                reconcile_persisted_running_execution(
+                    app,
+                    project_id,
+                    &mut run,
+                    &ledger_path,
+                    &revision,
+                    &recovery,
+                )?;
+            }
+            Ok(())
+        })?;
+    }
+    if run.all_tasks_finished() {
+        if run.state != relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification {
+            run.state = relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification;
+            let _ = run.persist_snapshot(&ledger_path);
+        }
+    } else if (run.state == relintor_execution::ExecutionRunState::Ready || run.has_pending_retry())
+        && active_execution(project_id)?.is_none()
+        && run.current_recovery_attempt().is_none()
+        && !run.recovery_status_requires_attention()
+        && !run.runnable_tasks().is_empty()
+    {
+        // Clean task boundary: auto-dispatch next task backend-driven
+        let readiness = health_antigravity_for_app(Some(app));
+        if readiness.adapter_ready {
+            if let Some(cli_path) = configured_antigravity_cli(app) {
+                let _ = launch_execution_worker(app.clone(), project_id.to_string(), cli_path);
+            }
+        }
+    } else if run.state == relintor_execution::ExecutionRunState::BlockedExternal
+        && run.current_recovery_attempt_is_pre_execution()
+        && !run.recovery_status_requires_attention()
+        && active_execution(project_id)?.is_none()
+    {
+        let now = execution_now_ms();
+        if run
+            .resume_from_recovery(
+                relintor_execution::RecoveryDisposition::PreExecutionRetryAuthorized,
+                now,
+            )
+            .is_ok()
+        {
+            let _ = run.persist_snapshot(&ledger_path);
+            let readiness = health_antigravity_for_app(Some(app));
+            if readiness.adapter_ready {
+                if let Some(cli_path) = configured_antigravity_cli(app) {
+                    let _ = launch_execution_worker(app.clone(), project_id.to_string(), cli_path);
+                }
+            }
+        }
     }
     Ok((run, ledger_path, revision, handoff))
 }
@@ -4646,6 +5076,7 @@ fn authority_read_failure(error: String) -> String {
     "AUTHORITY_READ_FAILED: the sealed mission authority could not be read; restart Relintor and retry the authority read".into()
 }
 
+#[derive(Clone)]
 struct P8VerificationContext {
     authority: VerificationAuthority,
     current: FreshnessContext,
@@ -4654,13 +5085,84 @@ struct P8VerificationContext {
     local_key: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct P8EvaluationCacheKey {
+    project_id: String,
+    mission_id: String,
+    revision: u64,
+    source_fingerprint: String,
+    evidence_generation: String,
+    authority_ledger_identity: (u64, Option<std::time::SystemTime>),
+}
+
+#[derive(Clone)]
+struct P8EvaluationCacheEntry {
+    key: P8EvaluationCacheKey,
+    context: P8VerificationContext,
+    report: relintor_evidence::VerificationReport,
+    manifest: EvidenceManifest,
+    collection: CollectorOrchestrationResult,
+}
+
+static P8_EVALUATION_CACHE: LazyLock<Mutex<HashMap<String, P8EvaluationCacheEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn p8_evidence_generation(store_dir: &Path) -> String {
+    let metadata_dir = store_dir.join("metadata");
+    if !metadata_dir.is_dir() {
+        return "empty".into();
+    }
+    let mut files = Vec::new();
+    if let Ok(entries) = fs::read_dir(&metadata_dir) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    let mtime = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    files.push(format!(
+                        "{}:{}:{}",
+                        entry.file_name().to_string_lossy(),
+                        meta.len(),
+                        mtime
+                    ));
+                }
+            }
+        }
+    }
+    files.sort();
+    relintor_evidence::sha256(&files.join(";").into_bytes())
+}
+
+fn invalidate_p8_evaluation_cache(project_id: &str) {
+    if let Ok(mut cache) = P8_EVALUATION_CACHE.lock() {
+        cache.remove(project_id);
+    }
+}
+
+fn ensure_terminal_p7_workspace_matches(
+    current_workspace_fingerprint: &str,
+    terminal_p7_workspace_fingerprint: &str,
+) -> Result<(), String> {
+    if current_workspace_fingerprint != terminal_p7_workspace_fingerprint {
+        return Err(
+            "P8_REVALIDATION_REQUIRED: the workspace changed after the authenticated terminal P7 execution boundary; new evidence cannot be attributed to that completed run"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 fn load_p8_verification_context(
     app: &AppHandle,
     project_id: &str,
 ) -> Result<P8VerificationContext, String> {
     let path = database_path(app)?;
     migrate_database(&path)?;
-    let (revision, handoff, registry, trusted, workspace, workspace_fingerprint) =
+    let (revision, handoff, registry, trusted, workspace, _takeover_workspace_fingerprint) =
         latest_execution_context(&path, project_id)?;
     let ledger_path = execution_ledger_path(app, &revision.seal.mission_id, revision.revision)?;
     if !ledger_path.is_file() {
@@ -4672,6 +5174,10 @@ fn load_p8_verification_context(
     let p7_execution = AuthenticatedP7Execution::from_snapshot(&ledger_path)
         .map_err(|error| format!("authenticate P7 execution ledger: {error}"))?;
     let p7_run_id = p7_execution.run.run_id.clone();
+    // P8 verifies the exact terminal workspace produced by the authenticated P7 run.
+    // The takeover fingerprint describes the source state before execution and must
+    // never be substituted for the post-execution authority boundary.
+    let verification_workspace_fingerprint = p7_execution.run.workspace_fingerprint.clone();
     let p7_state = "EXECUTION_TASKS_FINISHED_AWAITING_VERIFICATION".into();
     let source_revision = Some(revision.contract.project_source_revision.clone());
     let environment = environment_fingerprint(
@@ -4695,7 +5201,7 @@ fn load_p8_verification_context(
         trusted_signers: trusted,
         p7_run_id,
         p7_state,
-        workspace_fingerprint: workspace_fingerprint.clone(),
+        workspace_fingerprint: verification_workspace_fingerprint.clone(),
         source_revision: source_revision.clone(),
         environment_fingerprint: environment_fingerprint.clone(),
     };
@@ -4724,6 +5230,10 @@ fn load_p8_verification_context(
     .map_err(|error| format!("open P8 evidence store: {error}"))?;
     let current_workspace_fingerprint = fingerprint_workspace(&workspace)
         .map_err(|error| format!("fingerprint current verification workspace: {error}"))?;
+    ensure_terminal_p7_workspace_matches(
+        &current_workspace_fingerprint,
+        &verification_workspace_fingerprint,
+    )?;
     let current = FreshnessContext {
         mission_id: authority.revision.seal.mission_id.clone(),
         mission_revision: authority.revision.revision,
@@ -4746,28 +5256,73 @@ fn load_p8_verification_context(
 fn evaluate_p8(
     app: &AppHandle,
     project_id: &str,
+    collect_machine_evidence: bool,
 ) -> Result<
     (
         P8VerificationContext,
         relintor_evidence::VerificationReport,
         EvidenceManifest,
+        CollectorOrchestrationResult,
     ),
     String,
 > {
+    if !collect_machine_evidence {
+        if let Ok(path) = database_path(app) {
+            if let Ok((revision, _, _, _, _, _)) = latest_execution_context(&path, project_id) {
+                if let Ok(ledger_path) = execution_ledger_path(app, &revision.seal.mission_id, revision.revision) {
+                    let ledger_meta = fs::metadata(&ledger_path).ok();
+                    let store_dir = app
+                        .path()
+                        .app_data_dir()
+                        .map(|d| d.join("verification").join(format!("{}-{}", revision.seal.mission_id, revision.revision)))
+                        .unwrap_or_default();
+                    let evidence_generation = p8_evidence_generation(&store_dir);
+                    let candidate_key = P8EvaluationCacheKey {
+                        project_id: project_id.to_string(),
+                        mission_id: revision.seal.mission_id.clone(),
+                        revision: revision.revision,
+                        source_fingerprint: revision.contract.project_source_revision.clone(),
+                        evidence_generation,
+                        authority_ledger_identity: (
+                            ledger_meta.as_ref().map(|m| m.len()).unwrap_or(0),
+                            ledger_meta.and_then(|m| m.modified().ok()),
+                        ),
+                    };
+                    if let Ok(cache) = P8_EVALUATION_CACHE.lock() {
+                        if let Some(entry) = cache.get(project_id) {
+                            if entry.key == candidate_key {
+                                return Ok((
+                                    entry.context.clone(),
+                                    entry.report.clone(),
+                                    entry.manifest.clone(),
+                                    entry.collection.clone(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let context = load_p8_verification_context(app, project_id)?;
-    let workspace = context
-        .current
-        .workspace_root
-        .clone()
-        .ok_or_else(|| "verification workspace is unavailable".to_string())?;
-    VerificationCollectorOrchestrator::new(workspace)
-        .run_required_collectors(
-            &context.authority,
-            &context.current,
-            &context.store,
-            &context.p7_execution,
-        )
-        .map_err(|error| format!("collect P8 verification evidence: {error}"))?;
+    let collection = if collect_machine_evidence {
+        let workspace = context
+            .current
+            .workspace_root
+            .clone()
+            .ok_or_else(|| "verification workspace is unavailable".to_string())?;
+        VerificationCollectorOrchestrator::new(workspace)
+            .run_required_collectors(
+                &context.authority,
+                &context.current,
+                &context.store,
+                &context.p7_execution,
+            )
+            .map_err(|error| format!("collect P8 verification evidence: {error}"))?
+    } else {
+        CollectorOrchestrationResult::default()
+    };
     let engine = VerificationEngine::new_with_p7_execution(
         context.store.clone(),
         context.authority.clone(),
@@ -4863,7 +5418,600 @@ fn evaluate_p8(
         None,
     )
     .map_err(|error| format!("export P8 evidence manifest: {error}"))?;
-    Ok((context, report, manifest))
+
+    if let Ok(ledger_path) = execution_ledger_path(app, &context.authority.revision.seal.mission_id, context.authority.revision.revision) {
+        let ledger_meta = fs::metadata(&ledger_path).ok();
+        let store_dir = app
+            .path()
+            .app_data_dir()
+            .map(|d| d.join("verification").join(format!("{}-{}", context.authority.revision.seal.mission_id, context.authority.revision.revision)))
+            .unwrap_or_default();
+        let evidence_generation = p8_evidence_generation(&store_dir);
+        let key = P8EvaluationCacheKey {
+            project_id: project_id.to_string(),
+            mission_id: context.authority.revision.seal.mission_id.clone(),
+            revision: context.authority.revision.revision,
+            source_fingerprint: context.authority.revision.contract.project_source_revision.clone(),
+            evidence_generation,
+            authority_ledger_identity: (
+                ledger_meta.as_ref().map(|m| m.len()).unwrap_or(0),
+                ledger_meta.and_then(|m| m.modified().ok()),
+            ),
+        };
+        if let Ok(mut cache) = P8_EVALUATION_CACHE.lock() {
+            cache.insert(
+                project_id.to_string(),
+                P8EvaluationCacheEntry {
+                    key,
+                    context: context.clone(),
+                    report: report.clone(),
+                    manifest: manifest.clone(),
+                    collection: collection.clone(),
+                },
+            );
+        }
+    }
+
+    Ok((context, report, manifest, collection))
+}
+
+fn build_verification_evidence_items(
+    context: &P8VerificationContext,
+    report: &relintor_evidence::VerificationReport,
+) -> Vec<HumanDecisionEvidenceItemView> {
+    let all_artifacts = context.store.list().unwrap_or_default();
+    context
+        .authority
+        .revision
+        .contract
+        .requirement_graph
+        .requirements
+        .iter()
+        .map(|req| {
+            let req_status_opt = report
+                .requirement_statuses
+                .iter()
+                .find(|s| s.requirement_id == req.requirement_id);
+            let status = if let Some(req_status) = req_status_opt {
+                if req_status.status == RequirementStatus::Verified {
+                    "PASS".to_string()
+                } else if req_status.status == RequirementStatus::Failed {
+                    "FAIL".to_string()
+                } else if req_status.missing_obligations.contains(&EvidenceClass::HumanDecision) {
+                    "PENDING_DECISION".to_string()
+                } else if !req_status.missing_obligations.is_empty()
+                    || !req_status.missing_acceptance_criteria.is_empty()
+                {
+                    "BLOCKED".to_string()
+                } else {
+                    "MISSING".to_string()
+                }
+            } else {
+                "MISSING".to_string()
+            };
+
+            let matching_art = all_artifacts
+                .iter()
+                .find(|art| art.metadata.requirement_ids.contains(&req.requirement_id))
+                .or_else(|| {
+                    req_status_opt
+                        .and_then(|s| s.failed_evidence.first())
+                        .and_then(|id| all_artifacts.iter().find(|art| &art.metadata.evidence_id == id))
+                })
+                .or_else(|| {
+                    req_status_opt
+                        .and_then(|s| s.evidence_ids.first())
+                        .and_then(|id| all_artifacts.iter().find(|art| &art.metadata.evidence_id == id))
+                })
+                .or_else(|| {
+                    all_artifacts.iter().find(|art| {
+                        context
+                            .authority
+                            .revision
+                            .contract
+                            .requirement_graph
+                            .requirements
+                            .iter()
+                            .any(|other| {
+                                other.requirement_id != req.requirement_id
+                                    && art.metadata.requirement_ids.contains(&other.requirement_id)
+                                    && relintor_evidence::is_human_decision_semantic_equivalent(req, other)
+                            })
+                    })
+                });
+
+            if let Some(art) = matching_art {
+                let class_str = format!("{:?}", art.metadata.class);
+                let command = if art.metadata.class == EvidenceClass::HumanDecision {
+                    "Explicit User Decision".to_string()
+                } else if art.metadata.class == EvidenceClass::SecurityScan {
+                    "npm run security-scan".to_string()
+                } else if art.metadata.class == EvidenceClass::TestOutput {
+                    "npm run test".to_string()
+                } else {
+                    format!("p8-collector: {}", class_str)
+                };
+                let mut relevant_files = Vec::new();
+                for ei in &art.metadata.execution_identities {
+                    for ac in &ei.artifact_changes {
+                        if !relevant_files.contains(&ac.path) {
+                            relevant_files.push(ac.path.clone());
+                        }
+                    }
+                }
+                let artifact_path = format!(
+                    "verification/{}-{}/blobs/{}.bin",
+                    art.metadata.mission_id,
+                    art.metadata.mission_revision,
+                    art.digest
+                );
+                let is_pass = art.metadata.result == relintor_evidence::EvidenceResult::Pass;
+                let detail_snippet = if art.metadata.class == EvidenceClass::HumanDecision {
+                    let user_notes = context
+                        .store
+                        .load(&art.metadata.evidence_id)
+                        .ok()
+                        .and_then(|stored| {
+                            if let Ok(obs) = serde_json::from_slice::<
+                                relintor_evidence::ExplicitUserDecisionObservation,
+                            >(&stored.bytes)
+                            {
+                                let n = obs.notes.trim().to_string();
+                                if !n.is_empty() {
+                                    return Some(n);
+                                }
+                            }
+                            let raw = String::from_utf8_lossy(&stored.bytes).trim().to_string();
+                            if !raw.is_empty() && !raw.starts_with('{') {
+                                Some(raw)
+                            } else {
+                                None
+                            }
+                        });
+                    if is_pass {
+                        match user_notes {
+                            Some(notes) => format!("User approved: {}", notes),
+                            None => "User approved the completed result.".to_string(),
+                        }
+                    } else {
+                        match user_notes {
+                            Some(notes) => format!("User rejected: {}", notes),
+                            None => "User rejected the completed result.".to_string(),
+                        }
+                    }
+                } else if is_pass {
+                    format!("{} passed deterministically with exit code 0", class_str)
+                } else {
+                    format!("{} evaluated with result {:?}", class_str, art.metadata.result)
+                };
+                HumanDecisionEvidenceItemView {
+                    requirement_id: req.requirement_id.clone(),
+                    requirement_title: req.title.clone(),
+                    intent: req.intent.clone(),
+                    status,
+                    evidence_id: art.metadata.evidence_id.clone(),
+                    evidence_class: class_str,
+                    command,
+                    exit_code: if is_pass { Some(0) } else { Some(1) },
+                    result: format!("{:?}", art.metadata.result),
+                    relevant_files,
+                    artifact_path,
+                    mission_id: art.metadata.mission_id.clone(),
+                    revision: art.metadata.mission_revision,
+                    source_fingerprint: art.metadata.workspace_fingerprint.clone(),
+                    environment_fingerprint: art.metadata.environment_fingerprint.clone(),
+                    timestamp_ms: art.metadata.created_at_ms,
+                    detail_snippet,
+                }
+            } else {
+                let default_class = req
+                    .verification_policy
+                    .obligations
+                    .first()
+                    .map(|o| format!("{:?}", o.class))
+                    .unwrap_or_default();
+                let detail_snippet = if status == "BLOCKED" {
+                    format!(
+                        "Blocked: missing {} evidence or collector dependency",
+                        default_class
+                    )
+                } else if status == "PENDING_DECISION" {
+                    "Awaiting explicit user decision.".to_string()
+                } else {
+                    "No automated evidence collector is bound to this requirement.".to_string()
+                };
+                HumanDecisionEvidenceItemView {
+                    requirement_id: req.requirement_id.clone(),
+                    requirement_title: req.title.clone(),
+                    intent: req.intent.clone(),
+                    status: status.clone(),
+                    evidence_id: String::new(),
+                    evidence_class: default_class,
+                    command: String::new(),
+                    exit_code: None,
+                    result: if status == "BLOCKED" {
+                        "Blocked".to_string()
+                    } else {
+                        status
+                    },
+                    relevant_files: Vec::new(),
+                    artifact_path: String::new(),
+                    mission_id: context.authority.revision.seal.mission_id.clone(),
+                    revision: context.authority.revision.revision,
+                    source_fingerprint: context.authority.workspace_fingerprint.clone(),
+                    environment_fingerprint: context.authority.environment_fingerprint.clone(),
+                    timestamp_ms: 0,
+                    detail_snippet,
+                }
+            }
+        })
+        .collect()
+}
+
+fn human_decision_prompts(
+    context: &P8VerificationContext,
+    report: &relintor_evidence::VerificationReport,
+) -> Vec<HumanDecisionPromptView> {
+    let any_user_rejected = report.requirement_statuses.iter().any(|status| {
+        status.failed_evidence.iter().any(|evidence_id| {
+            context
+                .store
+                .load(evidence_id)
+                .is_ok_and(|stored| stored.artifact.metadata.class == EvidenceClass::HumanDecision)
+        })
+    });
+
+    let has_unfinished_tasks = context.p7_execution.run.tasks.values().any(|t| {
+        matches!(
+            t.state,
+            relintor_execution::ExecutionTaskState::Pending
+                | relintor_execution::ExecutionTaskState::Ready
+                | relintor_execution::ExecutionTaskState::Running
+        )
+    });
+    let correction_scope = if any_user_rejected {
+        derive_correction_scope_from_context(context, report)
+    } else {
+        None
+    };
+    let scope_unauthorized = correction_scope.as_ref().map_or(false, |s| {
+        s.human_refinement_required || (s.user_reauthorization_required && !s.authorized)
+    });
+    let unresolved_corrections_count = if has_unfinished_tasks || scope_unauthorized {
+        1
+    } else {
+        0
+    };
+
+    if unresolved_corrections_count > 0 {
+        return Vec::new();
+    }
+
+    let contract_reqs = &context.authority.revision.contract.requirement_graph.requirements;
+    let blocked_strings: Vec<String> = report
+        .decision
+        .blocked_external
+        .iter()
+        .filter(|b| {
+            let req = contract_reqs.iter().find(|r| r.requirement_id == b.requirement_id);
+            let b_dep = b.dependency.to_lowercase();
+            let b_reason = b.reason.to_lowercase();
+            req.map_or(true, |r| r.requirement_type != "decision")
+                && !b.reason.contains("HumanDecision")
+                && !b.reason.contains("HUMAN_DECISION")
+                && !b_dep.contains("human")
+                && !b_dep.contains("decision")
+                && !b_reason.contains("human")
+                && !b_reason.contains("decision")
+        })
+        .map(|b| format!("{}: {}", b.requirement_id, b.reason))
+        .collect();
+
+    let eligibility = is_final_human_acceptance_eligible(
+        &context.authority.revision.contract.requirement_graph.requirements,
+        report,
+        &blocked_strings,
+        0,
+        unresolved_corrections_count,
+        context.authority.validate().is_ok(),
+        true,
+    );
+    if !eligibility.eligible {
+        return Vec::new();
+    }
+
+    let evidence_items = build_verification_evidence_items(context, report);
+
+    let pending_requirements: Vec<&relintor_standards::Requirement> = report
+        .requirement_statuses
+        .iter()
+        .filter(|status| {
+            status
+                .missing_obligations
+                .contains(&EvidenceClass::HumanDecision)
+        })
+        .filter_map(|status| {
+            context
+                .authority
+                .revision
+                .contract
+                .requirement_graph
+                .requirements
+                .iter()
+                .find(|requirement| requirement.requirement_id == status.requirement_id)
+        })
+        .collect();
+
+    let mut clusters: Vec<Vec<&relintor_standards::Requirement>> = Vec::new();
+    for req in pending_requirements {
+        if let Some(cluster) = clusters.iter_mut().find(|c| {
+            c.iter().any(|existing| relintor_evidence::is_human_decision_semantic_equivalent(existing, req))
+        }) {
+            cluster.push(req);
+        } else {
+            clusters.push(vec![req]);
+        }
+    }
+
+    clusters
+        .into_iter()
+        .map(|cluster| {
+            let primary = cluster[0];
+            let requirement_ids: Vec<String> = cluster.iter().map(|r| r.requirement_id.clone()).collect();
+            let mut criterion_ids: Vec<String> = Vec::new();
+            for req in &cluster {
+                for c in &req.acceptance_criteria {
+                    if !c.machine_checkable && !criterion_ids.contains(&c.criterion_id) {
+                        criterion_ids.push(c.criterion_id.clone());
+                    }
+                }
+            }
+            HumanDecisionPromptView {
+                requirement_id: primary.requirement_id.clone(),
+                requirement_ids,
+                title: primary.title.clone(),
+                question: format!(
+                    "Does the completed result satisfy the approved {} for this mission?",
+                    primary.title.to_lowercase()
+                ),
+                summary: primary.intent.clone(),
+                criterion_ids,
+                evidence_items: evidence_items.clone(),
+            }
+        })
+        .collect()
+}
+
+#[allow(dead_code)]
+fn default_verification_workflow_stage(
+    certificate_present: bool,
+    human_decision_pending: bool,
+    final_human_acceptance_eligible: bool,
+    evidence_present: bool,
+    completion_state: &relintor_evidence::CompletionState,
+    user_rejected: bool,
+    failed_count: usize,
+    correction_scope: Option<&relintor_evidence::CorrectionScopeView>,
+) -> &'static str {
+    if certificate_present {
+        return "VERIFIED_COMPLETE";
+    }
+    if human_decision_pending && final_human_acceptance_eligible {
+        return "WAITING_FOR_USER_DECISION";
+    }
+    if let Some(scope) = correction_scope {
+        if scope.authorized || !scope.user_reauthorization_required {
+            return "CORRECTING_FAILED_REQUIREMENT";
+        } else {
+            return "USER_DECISION_REJECTED";
+        }
+    }
+    if user_rejected {
+        "USER_DECISION_REJECTED"
+    } else if *completion_state == relintor_evidence::CompletionState::FailedVerification || failed_count > 0 {
+        "VERIFICATION_NEEDS_ATTENTION"
+    } else if *completion_state == relintor_evidence::CompletionState::BlockedExternal {
+        "COLLECTION_BLOCKED"
+    } else if *completion_state != relintor_evidence::CompletionState::VerifiedComplete && evidence_present {
+        "VERIFICATION_NEEDS_ATTENTION"
+    } else if !evidence_present {
+        "READY_TO_VERIFY"
+    } else if *completion_state == relintor_evidence::CompletionState::VerifiedComplete {
+        "VERIFIED_COMPLETE"
+    } else {
+        "VERIFICATION_FINISHED"
+    }
+}
+
+fn derive_verification_workflow_stage_for_context(
+    context: &P8VerificationContext,
+    report: &relintor_evidence::VerificationReport,
+    manifest: &EvidenceManifest,
+    certificate: Option<&CompletionCertificate>,
+    collection: &CollectorOrchestrationResult,
+) -> &'static str {
+    let contract_reqs = &context.authority.revision.contract.requirement_graph.requirements;
+    let user_rejected = report.requirement_statuses.iter().any(|status| {
+        status.failed_evidence.iter().any(|evidence_id| {
+            context
+                .store
+                .load(evidence_id)
+                .is_ok_and(|stored| stored.artifact.metadata.class == EvidenceClass::HumanDecision)
+        })
+    });
+    let correction_scope = if user_rejected {
+        derive_correction_scope_from_context(context, report)
+    } else {
+        None
+    };
+    let unresolved_corrections_count = if user_rejected {
+        let has_unfinished_tasks = context.p7_execution.run.tasks.values().any(|t| {
+            matches!(
+                t.state,
+                relintor_execution::ExecutionTaskState::Pending
+                    | relintor_execution::ExecutionTaskState::Ready
+                    | relintor_execution::ExecutionTaskState::Running
+            )
+        });
+        let scope_unauthorized = correction_scope.as_ref().map_or(false, |s| {
+            s.human_refinement_required || (s.user_reauthorization_required && !s.authorized)
+        });
+        if has_unfinished_tasks || scope_unauthorized {
+            1
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+    let active_corrections_count = context
+        .p7_execution
+        .run
+        .tasks
+        .values()
+        .filter(|t| t.state == relintor_execution::ExecutionTaskState::Running)
+        .count();
+    let authority_valid = context.authority.validate().is_ok();
+    let source_binding_valid = true;
+
+    relintor_evidence::derive_verification_workflow_stage(
+        contract_reqs,
+        report,
+        !manifest.evidence.is_empty(),
+        certificate.is_some(),
+        &collection.blocked_external,
+        active_corrections_count,
+        unresolved_corrections_count,
+        correction_scope.as_ref(),
+        authority_valid,
+        source_binding_valid,
+    )
+}
+
+fn correction_refinement_file_path(store_root: &Path) -> PathBuf {
+    store_root.join("correction_refinement.json")
+}
+
+fn load_correction_refinement(store_root: &Path) -> Option<HumanScopeRefinement> {
+    let path = correction_refinement_file_path(store_root);
+    if path.is_file() {
+        if let Ok(content) = fs::read_to_string(&path) {
+            if let Ok(refinement) = serde_json::from_str::<HumanScopeRefinement>(&content) {
+                return Some(refinement);
+            }
+        }
+    }
+    None
+}
+
+fn derive_correction_scope_from_context(
+    context: &P8VerificationContext,
+    report: &relintor_evidence::VerificationReport,
+) -> Option<CorrectionScopeView> {
+    let mut originating_evidence_id = String::new();
+    let mut user_rejection_notes = String::new();
+
+    for status in &report.requirement_statuses {
+        for evidence_id in &status.failed_evidence {
+            if let Ok(stored) = context.store.load(evidence_id) {
+                if stored.artifact.metadata.class == EvidenceClass::HumanDecision {
+                    originating_evidence_id = evidence_id.clone();
+                    if let Ok(obs) = serde_json::from_slice::<
+                        relintor_evidence::ExplicitUserDecisionObservation,
+                    >(&stored.bytes)
+                    {
+                        user_rejection_notes = obs.notes.trim().to_string();
+                    } else {
+                        let raw = String::from_utf8_lossy(&stored.bytes).trim().to_string();
+                        if !raw.is_empty() && !raw.starts_with('{') {
+                            user_rejection_notes = raw;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        if !originating_evidence_id.is_empty() {
+            break;
+        }
+    }
+
+    if originating_evidence_id.is_empty() {
+        return None;
+    }
+
+    // Collect file provenance by task from evidence store metadata directory
+    let mut provenance_paths_by_task: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    if let Ok(entries) = fs::read_dir(context.store.root().join("metadata")) {
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("json") {
+                if let Ok(file_str) = fs::read_to_string(&path) {
+                    if let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&file_str) {
+                        if let Some(meta) = envelope.get("artifact").and_then(|a| a.get("metadata")) {
+                            let mut paths = Vec::new();
+                            if let Some(execs) = meta.get("execution_identities").and_then(|e| e.as_array()) {
+                                for exec in execs {
+                                    if let Some(changes) = exec.get("artifact_changes").and_then(|c| c.as_array()) {
+                                        for change in changes {
+                                            if let Some(p) = change.get("path").and_then(|s| s.as_str()) {
+                                                paths.push(p.to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(rel_paths) = meta.get("relevant_paths").and_then(|r| r.as_array()) {
+                                for p in rel_paths {
+                                    if let Some(s) = p.as_str() {
+                                        paths.push(s.to_string());
+                                    }
+                                }
+                            }
+                            if !paths.is_empty() {
+                                if let Some(task_id) = meta.get("task_id").and_then(|t| t.as_str()) {
+                                    provenance_paths_by_task
+                                        .entry(task_id.to_string())
+                                        .or_default()
+                                        .extend(paths.clone());
+                                }
+                                if let Some(req_ids) = meta.get("requirement_ids").and_then(|r| r.as_array()) {
+                                    for req_val in req_ids {
+                                        if let Some(req_id) = req_val.as_str() {
+                                            for task in &context.authority.revision.contract.task_graph.tasks {
+                                                if task.requirement_ids.iter().any(|r| r == req_id) {
+                                                    provenance_paths_by_task
+                                                        .entry(task.task_id.clone())
+                                                        .or_default()
+                                                        .extend(paths.clone());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let refinement = load_correction_refinement(context.store.root());
+
+    relintor_evidence::derive_bounded_correction_scope(
+        &context.authority.revision.seal.mission_id,
+        context.authority.revision.revision,
+        &context.authority.revision.contract.requirement_graph.requirements,
+        &context.authority.revision.contract.task_graph.tasks,
+        &context.authority.revision.contract.task_graph.dependencies,
+        &report.requirement_statuses,
+        &context.p7_execution.run,
+        &originating_evidence_id,
+        &user_rejection_notes,
+        &provenance_paths_by_task,
+        refinement.as_ref(),
+    )
 }
 
 fn verification_view(
@@ -4872,20 +6020,175 @@ fn verification_view(
     report: &relintor_evidence::VerificationReport,
     manifest: &EvidenceManifest,
     certificate: Option<&CompletionCertificate>,
+    collection: &CollectorOrchestrationResult,
+    workflow_stage: Option<&str>,
 ) -> VerificationStatusView {
+    let contract_reqs = &context.authority.revision.contract.requirement_graph.requirements;
     let missing_evidence = report
         .requirement_statuses
         .iter()
         .flat_map(|status| {
-            status
+            let req = contract_reqs.iter().find(|r| r.requirement_id == status.requirement_id);
+            let is_machine = req.map_or(true, |r| r.requirement_type != "decision");
+            if !is_machine {
+                return Vec::new().into_iter();
+            }
+            let missing_machine_obls = status
                 .missing_obligations
                 .iter()
-                .map(move |class| format!("{}: missing {:?}", status.requirement_id, class))
-                .chain(status.missing_acceptance_criteria.iter().map(|criterion| {
-                    format!("{}: missing criterion {criterion}", status.requirement_id)
-                }))
+                .filter(|class| **class != EvidenceClass::HumanDecision)
+                .map(move |class| format!("{}: missing {:?}", status.requirement_id, class));
+            let missing_machine_crit = status
+                .missing_acceptance_criteria
+                .iter()
+                .filter(move |criterion_id| {
+                    req.map_or(true, |r| {
+                        r.acceptance_criteria
+                            .iter()
+                            .find(|c| &c.criterion_id == *criterion_id)
+                            .map_or(true, |c| c.machine_checkable)
+                    })
+                })
+                .map(move |criterion_id| {
+                    format!("{}: missing criterion {criterion_id}", status.requirement_id)
+                });
+            missing_machine_obls.chain(missing_machine_crit).collect::<Vec<_>>().into_iter()
         })
         .collect::<Vec<_>>();
+    let human_decisions = human_decision_prompts(context, report);
+    let evidence_items = build_verification_evidence_items(context, report);
+    let failed_count = report
+        .requirement_statuses
+        .iter()
+        .filter(|status| status.status == RequirementStatus::Failed)
+        .count();
+    let user_rejected = report.requirement_statuses.iter().any(|status| {
+        status.failed_evidence.iter().any(|evidence_id| {
+            context
+                .store
+                .load(evidence_id)
+                .is_ok_and(|stored| stored.artifact.metadata.class == EvidenceClass::HumanDecision)
+        })
+    });
+    let blocked_strings: Vec<String> = report
+        .decision
+        .blocked_external
+        .iter()
+        .filter(|b| {
+            let req = contract_reqs.iter().find(|r| r.requirement_id == b.requirement_id);
+            let b_dep = b.dependency.to_lowercase();
+            let b_reason = b.reason.to_lowercase();
+            req.map_or(true, |r| r.requirement_type != "decision")
+                && !b.reason.contains("HumanDecision")
+                && !b.reason.contains("HUMAN_DECISION")
+                && !b_dep.contains("human")
+                && !b_dep.contains("decision")
+                && !b_reason.contains("human")
+                && !b_reason.contains("decision")
+        })
+        .map(|b| format!("{}: {}", b.requirement_id, b.reason))
+        .chain(collection.blocked_external.iter().filter(|item| {
+            let lower = item.to_lowercase();
+            !item.contains("HumanDecision")
+                && !item.contains("HUMAN_DECISION")
+                && !lower.contains("human")
+                && !lower.contains("decision")
+        }).cloned())
+        .collect();
+    let correction_scope = if user_rejected {
+        derive_correction_scope_from_context(context, report)
+    } else {
+        None
+    };
+    let unresolved_corrections_count = if user_rejected {
+        let has_unfinished_tasks = context.p7_execution.run.tasks.values().any(|t| {
+            matches!(
+                t.state,
+                relintor_execution::ExecutionTaskState::Pending
+                    | relintor_execution::ExecutionTaskState::Ready
+                    | relintor_execution::ExecutionTaskState::Running
+            )
+        });
+        let scope_unauthorized = correction_scope.as_ref().map_or(false, |s| {
+            s.human_refinement_required || (s.user_reauthorization_required && !s.authorized)
+        });
+        if has_unfinished_tasks || scope_unauthorized {
+            1
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+    let active_corrections_count = context
+        .p7_execution
+        .run
+        .tasks
+        .values()
+        .filter(|t| t.state == relintor_execution::ExecutionTaskState::Running)
+        .count();
+    let eligibility = is_final_human_acceptance_eligible(
+        &context.authority.revision.contract.requirement_graph.requirements,
+        report,
+        &blocked_strings,
+        active_corrections_count,
+        unresolved_corrections_count,
+        context.authority.validate().is_ok(),
+        true,
+    );
+    let collection_failures = collection
+        .blocked_external
+        .iter()
+        .filter_map(|item| {
+            let lower = item.to_lowercase();
+            if lower.contains("human") || lower.contains("decision") {
+                None
+            } else if item.contains("TestOutput") {
+                Some("The project test command could not be completed.".to_string())
+            } else if item.contains("AccessibilityResult") {
+                Some("The accessibility check could not be completed.".to_string())
+            } else if item.contains("PerformanceResult") {
+                Some("The performance check could not be completed.".to_string())
+            } else if item.contains("SecurityScan") {
+                Some("The security check could not be completed.".to_string())
+            } else {
+                Some("A required automated verification check could not be completed.".to_string())
+            }
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let derived_stage = derive_verification_workflow_stage_for_context(
+        context,
+        report,
+        manifest,
+        certificate,
+        collection,
+    );
+    let stage = workflow_stage.unwrap_or(derived_stage);
+    let summary = match stage {
+        "VERIFIED_COMPLETE" => "All required evidence passed and the completion certificate is valid.",
+        "WAITING_FOR_USER_DECISION" => {
+            "Relintor independently verified all machine-checkable requirements. Your final acceptance is now required."
+        }
+        "CORRECTING_FAILED_REQUIREMENT" => {
+            if user_rejected {
+                "You rejected the completed result. Relintor derived a bounded correction and continues under sealed authority."
+            } else {
+                "A real automated check failed. Antigravity is correcting only the affected work before Relintor verifies again."
+            }
+        }
+        "COLLECTION_BLOCKED" => {
+            "Verification could not collect every required automated result. The mission remains safely incomplete."
+        }
+        "USER_DECISION_REJECTED" => {
+            "You rejected the completed result. Relintor preserved your decision and halted execution pending required human review or scope refinement."
+        }
+        _ if failed_count > 0 => {
+            "One or more automated checks failed. Relintor has not called the mission complete."
+        }
+        _ => "Verification finished. Relintor is waiting for all required evidence.",
+    };
     VerificationStatusView {
         project_id: project_id.into(),
         mission_id: context.authority.revision.seal.mission_id.clone(),
@@ -4921,7 +6224,20 @@ fn verification_view(
             .decision
             .blocked_external
             .iter()
+            .filter(|item| {
+                let req = contract_reqs.iter().find(|r| r.requirement_id == item.requirement_id);
+                req.map_or(true, |r| r.requirement_type != "decision")
+                    && !item.reason.contains("HumanDecision")
+                    && !item.reason.contains("HUMAN_DECISION")
+            })
             .map(|item| format!("{}: {}", item.requirement_id, item.reason))
+            .chain(collection.blocked_external.iter().filter_map(|item| {
+                if item.contains("HUMAN_DECISION") || item.contains("HumanDecision") {
+                    None
+                } else {
+                    Some(item.clone())
+                }
+            }))
             .collect(),
         accepted_risks: report
             .decision
@@ -4935,6 +6251,20 @@ fn verification_view(
             final_state: format!("{:?}", item.final_state),
             digest: item.digest().unwrap_or_default(),
         }),
+        workflow_stage: stage.into(),
+        summary: summary.into(),
+        human_decisions,
+        final_human_acceptance_eligible: eligibility.eligible,
+        final_human_acceptance_reasons: eligibility.reasons,
+        evidence_items,
+        correction_scope,
+        collector_activity: collection
+            .executed
+            .iter()
+            .chain(collection.reused_fresh.iter())
+            .cloned()
+            .collect(),
+        collection_failures,
         detail: report.decision.reason.clone(),
     }
 }
@@ -4962,9 +6292,7 @@ fn load_persisted_certificate(
     if !path.is_file() {
         return Ok(None);
     }
-    let bytes = fs::read(&path).map_err(|error| format!("read completion certificate: {error}"))?;
-    let certificate: CompletionCertificate = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("parse completion certificate: {error}"))?;
+    let certificate = read_completion_certificate_file(&path)?;
     let authority = CompletionAuthority::new(&context.local_key)
         .map_err(|error| format!("open P8 completion authority: {error}"))?;
     authority
@@ -4979,12 +6307,15 @@ fn load_persisted_certificate(
     Ok(Some(certificate))
 }
 
-fn persist_completion_certificate(
-    app: &AppHandle,
-    context: &P8VerificationContext,
+fn read_completion_certificate_file(path: &Path) -> Result<CompletionCertificate, String> {
+    let bytes = fs::read(path).map_err(|error| format!("read completion certificate: {error}"))?;
+    serde_json::from_slice(&bytes).map_err(|error| format!("parse completion certificate: {error}"))
+}
+
+fn persist_completion_certificate_file(
+    path: &Path,
     certificate: &CompletionCertificate,
 ) -> Result<(), String> {
-    let path = completion_certificate_path(app, context)?;
     let parent = path
         .parent()
         .ok_or_else(|| "certificate storage has no parent directory".to_string())?;
@@ -5003,8 +6334,317 @@ fn persist_completion_certificate(
     file.sync_all()
         .map_err(|error| format!("sync completion certificate: {error}"))?;
     drop(file);
-    atomic_replace_file(&temporary, &path)
+    atomic_replace_file(&temporary, path)
         .map_err(|error| format!("commit completion certificate: {error}"))
+}
+
+fn persist_completion_certificate(
+    app: &AppHandle,
+    context: &P8VerificationContext,
+    certificate: &CompletionCertificate,
+) -> Result<(), String> {
+    let path = completion_certificate_path(app, context)?;
+    persist_completion_certificate_file(&path, certificate)
+}
+
+fn ensure_verified_completion_certificate(
+    app: &AppHandle,
+    context: &P8VerificationContext,
+    report: &relintor_evidence::VerificationReport,
+    manifest: &EvidenceManifest,
+) -> Result<Option<CompletionCertificate>, String> {
+    if report.decision.state != relintor_evidence::CompletionState::VerifiedComplete {
+        return Ok(None);
+    }
+    if let Some(existing) = load_persisted_certificate(app, context, manifest)? {
+        return Ok(Some(existing));
+    }
+    let authority = CompletionAuthority::new(&context.local_key)
+        .map_err(|error| format!("open P8 completion authority: {error}"))?;
+    let certificate = authority
+        .issue_with_p7_execution(report, &context.authority, &context.p7_execution)
+        .map_err(|error| format!("issue completion certificate: {error}"))?;
+    authority
+        .validate_with_store(
+            &certificate,
+            &context.authority,
+            &context.store,
+            manifest,
+            &context.current,
+        )
+        .map_err(|error| format!("validate completion certificate: {error}"))?;
+    persist_completion_certificate(app, context, &certificate)?;
+    notify_user(
+        app,
+        "Relintor verified complete",
+        "All sealed requirements are verified and the completion certificate is valid.",
+    );
+    Ok(Some(certificate))
+}
+
+fn deterministic_failed_requirement_ids(
+    report: &relintor_evidence::VerificationReport,
+    store: &EvidenceStore,
+) -> BTreeSet<String> {
+    report
+        .requirement_statuses
+        .iter()
+        .filter(|status| {
+            status.status == RequirementStatus::Failed
+                && status.failed_evidence.iter().any(|evidence_id| {
+                    store.load(evidence_id).is_ok_and(|stored| {
+                        !matches!(
+                            stored.artifact.metadata.class,
+                            EvidenceClass::HumanDecision
+                                | EvidenceClass::AiVerifierJudgement
+                                | EvidenceClass::ExternalServiceReceipt
+                        )
+                    })
+                })
+        })
+        .map(|status| status.requirement_id.clone())
+        .collect()
+}
+
+#[allow(dead_code)]
+fn machine_evidence_class(class: EvidenceClass) -> bool {
+    !matches!(
+        class,
+        EvidenceClass::HumanDecision
+            | EvidenceClass::AiVerifierJudgement
+            | EvidenceClass::ExternalServiceReceipt
+    )
+}
+
+#[allow(dead_code)]
+fn missing_machine_requirement_ids(
+    report: &relintor_evidence::VerificationReport,
+) -> BTreeSet<String> {
+    report
+        .requirement_statuses
+        .iter()
+        .filter(|status| {
+            status
+                .missing_obligations
+                .iter()
+                .any(|class| machine_evidence_class(*class))
+                || (!status.missing_acceptance_criteria.is_empty()
+                    && !status
+                        .missing_obligations
+                        .iter()
+                        .any(|class| *class == EvidenceClass::HumanDecision))
+        })
+        .map(|status| status.requirement_id.clone())
+        .collect()
+}
+
+fn authorize_and_launch_verification_correction(
+    app: &AppHandle,
+    project_id: &str,
+    report: &relintor_evidence::VerificationReport,
+    store: &EvidenceStore,
+) -> Result<bool, String> {
+    let failed = deterministic_failed_requirement_ids(report, store);
+    if failed.is_empty() {
+        return Ok(false);
+    }
+    let project_id = canonical_project_id(project_id)?;
+    with_execution_mutation_lock(|| {
+        require_execution_not_active(&project_id)?;
+        let (mut run, ledger_path, revision, _handoff) = load_execution_run(app, &project_id)?;
+        let affected = match run.authorize_verification_correction(&failed, execution_now_ms()) {
+            Ok(affected) => affected,
+            Err(ExecutionError::PolicyDenied(detail)) => {
+                eprintln!("Verification correction policy limit reached: {detail}");
+                return Ok(false);
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        let recovery = recovery_store(app, &revision)?;
+        persist_execution_boundary(
+            &run,
+            &ledger_path,
+            &recovery,
+            &revision,
+            &format!(
+                "machine verification evidence failed deterministically; bounded corrective execution authorized for {}",
+                affected.join(",")
+            ),
+            CheckpointKind::AfterTaskPersistence,
+            Vec::new(),
+        )
+        .map_err(|error| format!("persist verification correction authority: {error}"))?;
+
+        let readiness = health_antigravity_for_app(Some(app));
+        if !readiness.adapter_ready {
+            return Err(format!("ANTIGRAVITY_SETUP_REQUIRED: {}", readiness.detail));
+        }
+        let cli_path = configured_antigravity_cli(app).ok_or_else(|| {
+            "ANTIGRAVITY_SETUP_REQUIRED: the verified Antigravity CLI path is unavailable"
+                .to_string()
+        })?;
+        launch_execution_worker(app.clone(), project_id.clone(), cli_path)
+            .map_err(|error| format!("launch bounded verification correction: {error}"))?;
+        Ok(true)
+    })
+}
+
+fn ensure_autonomous_correction_authorized(
+    app: &AppHandle,
+    project_id: &str,
+    context: &P8VerificationContext,
+    report: &relintor_evidence::VerificationReport,
+) -> Result<bool, String> {
+    let scope = match derive_correction_scope_from_context(context, report) {
+        Some(s) => s,
+        None => return Ok(false),
+    };
+
+    if scope.user_reauthorization_required || scope.authorized {
+        return Ok(false);
+    }
+
+    let canonical_id = canonical_project_id(project_id)?;
+    with_execution_mutation_lock(|| {
+        require_execution_not_active(&canonical_id)?;
+        let (mut run, ledger_path, rev, _handoff) = load_execution_run(app, &canonical_id)?;
+
+        if run.state != relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification {
+            return Ok(false);
+        }
+
+        let known_requirements = run
+            .tasks
+            .values()
+            .flat_map(|t| t.requirement_ids.iter().cloned())
+            .collect::<BTreeSet<_>>();
+
+        let target_reqs: BTreeSet<String> = scope
+            .affected_task_ids
+            .iter()
+            .filter_map(|tid| run.tasks.get(tid))
+            .flat_map(|t| t.requirement_ids.iter().cloned())
+            .filter(|r| known_requirements.contains(r))
+            .collect();
+
+        if target_reqs.is_empty() {
+            return Ok(false);
+        }
+
+        let affected = run
+            .authorize_verification_correction(&target_reqs, execution_now_ms())
+            .map_err(|error| format!("autonomous verification correction: {error}"))?;
+
+        let recovery = recovery_store(app, &rev)?;
+        persist_execution_boundary(
+            &run,
+            &ledger_path,
+            &recovery,
+            &rev,
+            &format!(
+                "autonomous bounded correction authorized under sealed authority for {}",
+                affected.join(",")
+            ),
+            CheckpointKind::AfterTaskPersistence,
+            Vec::new(),
+        )
+        .map_err(|error| format!("persist autonomous correction boundary: {error}"))?;
+
+        invalidate_p8_evaluation_cache(&canonical_id);
+        Ok(true)
+    })
+}
+
+fn automatic_verification_closure(app: &AppHandle, project_id: &str) -> Result<(), String> {
+    with_verification_mutation_lock(|| automatic_verification_closure_inner(app, project_id))
+}
+
+fn automatic_verification_closure_inner(app: &AppHandle, project_id: &str) -> Result<(), String> {
+    let (context, report, manifest, collection) = evaluate_p8(app, project_id, true)?;
+    let certificate = load_persisted_certificate(app, &context, &manifest).ok().flatten();
+    let user_rejected = report.requirement_statuses.iter().any(|status| {
+        status.failed_evidence.iter().any(|evidence_id| {
+            context
+                .store
+                .load(evidence_id)
+                .is_ok_and(|stored| stored.artifact.metadata.class == EvidenceClass::HumanDecision)
+        })
+    });
+    if user_rejected {
+        if let Ok(true) = ensure_autonomous_correction_authorized(app, project_id, &context, &report) {
+            let readiness = health_antigravity_for_app(Some(app));
+            if readiness.adapter_ready {
+                if let Some(cli_path) = configured_antigravity_cli(app) {
+                    let _ = launch_execution_worker(app.clone(), project_id.to_string(), cli_path);
+                }
+            }
+            return Ok(());
+        }
+    }
+    let stage = derive_verification_workflow_stage_for_context(
+        &context,
+        &report,
+        &manifest,
+        certificate.as_ref(),
+        &collection,
+    );
+    match stage {
+        "VERIFIED_COMPLETE" => {
+            ensure_verified_completion_certificate(app, &context, &report, &manifest)?;
+        }
+        "WAITING_FOR_USER_DECISION" => {
+            // Relintor independently verified all machine checks; waiting for user decision.
+        }
+        "CORRECTING_FAILED_REQUIREMENT" => {
+            // Bounded correction active
+        }
+        "COLLECTION_BLOCKED" => {
+            notify_user(
+                app,
+                "Relintor needs your attention",
+                "Verification could not collect every required automated result. The mission remains safely incomplete.",
+            );
+        }
+        "USER_DECISION_REJECTED" => {
+            notify_user(
+                app,
+                "Relintor needs your attention",
+                "You rejected the completed result. Relintor preserved your decision and halted execution pending required human review or scope refinement.",
+            );
+        }
+        _ => {
+            if !deterministic_failed_requirement_ids(&report, &context.store).is_empty() {
+                match authorize_and_launch_verification_correction(
+                    app,
+                    project_id,
+                    &report,
+                    &context.store,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => notify_user(
+                        app,
+                        "Relintor needs your attention",
+                        "Verification is incomplete, and no automatic correction could be authorized.",
+                    ),
+                    Err(error) => {
+                        eprintln!("Relintor missing-evidence correction was not authorized: {error}");
+                        notify_user(
+                            app,
+                            "Relintor needs your attention",
+                            "Verification is incomplete, and bounded automatic correction could not be authorized safely.",
+                        );
+                    }
+                }
+            } else {
+                notify_user(
+                    app,
+                    "Relintor needs your attention",
+                    "The mission is preserved, but completion still requires an explicit verification or external decision.",
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -5012,14 +6652,70 @@ fn verification_start(
     app: AppHandle,
     project_id: String,
 ) -> Result<VerificationStatusView, String> {
-    let (context, report, manifest) = evaluate_p8(&app, &project_id)?;
-    let certificate = load_persisted_certificate(&app, &context, &manifest)?;
+    with_verification_mutation_lock(|| verification_start_inner(app, project_id))
+}
+
+fn verification_start_inner(
+    app: AppHandle,
+    project_id: String,
+) -> Result<VerificationStatusView, String> {
+    let (mut context, mut report, mut manifest, mut collection) = evaluate_p8(&app, &project_id, true)?;
+    let certificate = ensure_verified_completion_certificate(&app, &context, &report, &manifest)?;
+    let user_rejected = report.requirement_statuses.iter().any(|status| {
+        status.failed_evidence.iter().any(|evidence_id| {
+            context
+                .store
+                .load(evidence_id)
+                .is_ok_and(|stored| stored.artifact.metadata.class == EvidenceClass::HumanDecision)
+        })
+    });
+    let mut correction_launched = false;
+    if user_rejected {
+        if let Ok(true) = ensure_autonomous_correction_authorized(&app, &project_id, &context, &report) {
+            correction_launched = true;
+            if let Ok((c, r, m, col)) = evaluate_p8(&app, &project_id, false) {
+                context = c;
+                report = r;
+                manifest = m;
+                collection = col;
+            }
+        }
+    } else if report.decision.state == relintor_evidence::CompletionState::FailedVerification
+        || (!deterministic_failed_requirement_ids(&report, &context.store).is_empty()
+            && human_decision_prompts(&context, &report).is_empty())
+    {
+        // A failed machine proof is not handed back to the user as "done".
+        // Relintor authorizes one bounded correction path for the exact affected
+        // requirement/dependents when policy still permits it.
+        match authorize_and_launch_verification_correction(&app, &project_id, &report, &context.store) {
+            Ok(true) => {
+                correction_launched = true;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("Verification correction could not be launched: {error}");
+            }
+        }
+    }
+    let stage = if correction_launched {
+        "CORRECTING_FAILED_REQUIREMENT"
+    } else {
+        derive_verification_workflow_stage_for_context(
+            &context,
+            &report,
+            &manifest,
+            certificate.as_ref(),
+            &collection,
+        )
+    };
     Ok(verification_view(
         &project_id,
         &context,
         &report,
         &manifest,
         certificate.as_ref(),
+        &collection,
+        Some(stage),
     ))
 }
 
@@ -5028,7 +6724,37 @@ fn verification_status(
     app: AppHandle,
     project_id: String,
 ) -> Result<VerificationStatusView, String> {
-    verification_start(app, project_id)
+    let (mut context, mut report, mut manifest, mut collection) = evaluate_p8(&app, &project_id, false)?;
+    if let Ok(true) = ensure_autonomous_correction_authorized(&app, &project_id, &context, &report) {
+        if let Ok((c, r, m, col)) = evaluate_p8(&app, &project_id, false) {
+            context = c;
+            report = r;
+            manifest = m;
+            collection = col;
+        }
+    }
+    let certificate =
+        if report.decision.state == relintor_evidence::CompletionState::VerifiedComplete {
+            load_persisted_certificate(&app, &context, &manifest)?
+        } else {
+            None
+        };
+    let stage = derive_verification_workflow_stage_for_context(
+        &context,
+        &report,
+        &manifest,
+        certificate.as_ref(),
+        &collection,
+    );
+    Ok(verification_view(
+        &project_id,
+        &context,
+        &report,
+        &manifest,
+        certificate.as_ref(),
+        &collection,
+        Some(stage),
+    ))
 }
 
 #[tauri::command]
@@ -5040,11 +6766,238 @@ fn verification_rerun(
 }
 
 #[tauri::command]
+async fn verification_submit_human_decision(
+    app: AppHandle,
+    project_id: String,
+    requirement_id: String,
+    approved: bool,
+    notes: String,
+) -> Result<VerificationStatusView, String> {
+    if notes.trim().len() > 4_000 {
+        return Err("Decision notes exceed the 4,000 character limit.".into());
+    }
+    with_verification_mutation_lock(|| {
+        let (context, report, _, _) = evaluate_p8(&app, &project_id, false)?;
+        let prompt = human_decision_prompts(&context, &report)
+            .into_iter()
+            .find(|prompt| prompt.requirement_id == requirement_id || prompt.requirement_ids.contains(&requirement_id))
+            .ok_or_else(|| {
+                "This decision is not currently requested by the sealed verification authority."
+                    .to_string()
+            })?;
+        ExplicitUserDecisionRecorder
+            .record(
+                &context.authority,
+                &context.current,
+                &context.store,
+                &context.p7_execution,
+                ExplicitUserDecisionInput {
+                    requirement_id: &prompt.requirement_id,
+                    approved,
+                    notes: &notes,
+                },
+            )
+            .map_err(|error| format!("record explicit user decision: {error}"))?;
+        invalidate_p8_evaluation_cache(&project_id);
+        let continuation_app = app.clone();
+        let continuation_project_id = project_id.clone();
+        thread::Builder::new()
+            .name(format!("relintor-verification-{}", continuation_project_id))
+            .spawn(move || {
+                if let Err(error) = automatic_verification_closure(
+                    &continuation_app,
+                    &continuation_project_id,
+                ) {
+                    eprintln!(
+                        "Relintor post-decision verification closure stopped: {error}"
+                    );
+                    notify_user(
+                        &continuation_app,
+                        "Relintor needs your attention",
+                        "Your decision was saved. Verification could not continue automatically; review the preserved mission before retrying.",
+                    );
+                }
+            })
+            .map_err(|error| format!("launch post-decision verification closure: {error}"))?;
+        verification_status(app, project_id)
+    })
+}
+
+#[tauri::command]
+fn verification_authorize_correction(
+    app: AppHandle,
+    project_id: String,
+    mission_id: String,
+    revision: u64,
+    scope_hash: String,
+) -> Result<ExecutionStatusView, String> {
+    with_execution_mutation_lock(|| {
+        let project_id = canonical_project_id(&project_id)?;
+        require_execution_not_active(&project_id)?;
+
+        let (context, report, _manifest, _collection) = evaluate_p8(&app, &project_id, false)?;
+
+        let scope = derive_correction_scope_from_context(&context, &report)
+            .ok_or_else(|| "NO_CORRECTION_SCOPE: There is no active human rejection requiring correction.".to_string())?;
+
+        if scope.human_refinement_required {
+            return Err("HUMAN_SCOPE_REFINEMENT_REQUIRED: The correction scope cannot be safely bounded without explicit human refinement.".to_string());
+        }
+
+        if scope.mission_id != mission_id {
+            return Err(format!(
+                "WRONG_MISSION_AUTHORIZATION: Requested mission {mission_id} does not match authoritative mission {}",
+                scope.mission_id
+            ));
+        }
+
+        if scope.revision != revision {
+            return Err(format!(
+                "WRONG_REVISION_AUTHORIZATION: Requested revision {revision} does not match authoritative revision {}",
+                scope.revision
+            ));
+        }
+
+        if scope.scope_hash != scope_hash {
+            return Err(
+                "STALE_CORRECTION_SCOPE: The correction scope is stale, invalid, or has been modified.".to_string(),
+            );
+        }
+
+        let (mut run, ledger_path, rev, _handoff) = load_execution_run(&app, &project_id)?;
+
+        if scope.authorized {
+            return p9_status_view(&app, &project_id, &ledger_path, &run, &rev);
+        }
+
+        if run.state != relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification {
+            return Err(format!(
+                "CONFLICTING_AUTHORIZATION: Correction cannot be authorized while execution is in state {:?}",
+                run.state
+            ));
+        }
+
+        let known_requirements = run
+            .tasks
+            .values()
+            .flat_map(|t| t.requirement_ids.iter().cloned())
+            .collect::<BTreeSet<_>>();
+
+        // Only target requirements matching canonical affected tasks (deduplicated tasks are not reopened)
+        let target_reqs: BTreeSet<String> = scope
+            .affected_task_ids
+            .iter()
+            .filter_map(|tid| run.tasks.get(tid))
+            .flat_map(|t| t.requirement_ids.iter().cloned())
+            .filter(|r| known_requirements.contains(r))
+            .collect();
+
+        if target_reqs.is_empty() {
+            return Err(
+                "NO_CORRECTION_TARGETS: No sealed tasks found matching the unverified requirements.".to_string(),
+            );
+        }
+
+        let affected = run
+            .authorize_verification_correction(&target_reqs, execution_now_ms())
+            .map_err(|error| format!("authorize verification correction: {error}"))?;
+
+        let recovery = recovery_store(&app, &rev)?;
+        persist_execution_boundary(
+            &run,
+            &ledger_path,
+            &recovery,
+            &rev,
+            &format!(
+                "user explicitly authorized scoped correction for {}",
+                affected.join(",")
+            ),
+            CheckpointKind::AfterTaskPersistence,
+            Vec::new(),
+        )
+        .map_err(|error| format!("persist authorized correction boundary: {error}"))?;
+
+        invalidate_p8_evaluation_cache(&project_id);
+
+        p9_status_view(&app, &project_id, &ledger_path, &run, &rev)
+    })
+}
+
+#[tauri::command]
+fn verification_get_correction_refinement(
+    app: AppHandle,
+    project_id: String,
+) -> Result<Option<HumanScopeRefinement>, String> {
+    let (context, _, _, _) = evaluate_p8(&app, &project_id, false)?;
+    Ok(load_correction_refinement(context.store.root()))
+}
+
+#[tauri::command]
+fn verification_save_correction_refinement(
+    app: AppHandle,
+    project_id: String,
+    refinement: HumanScopeRefinement,
+) -> Result<VerificationStatusView, String> {
+    with_verification_mutation_lock(|| {
+        let (context, _, _, _) = evaluate_p8(&app, &project_id, false)?;
+        let workspace = context
+            .current
+            .workspace_root
+            .as_deref()
+            .ok_or_else(|| "verification workspace is unavailable".to_string())?;
+
+        let mut validated_entries = Vec::new();
+        for entry in &refinement.entries {
+            let clean_rel = validate_and_canonicalize_scope_path(
+                workspace,
+                &entry.path,
+                entry.path_type,
+            )
+            .map_err(|err| format!("Invalid scope refinement path '{}': {err}", entry.path))?;
+
+            if entry.reason.trim().is_empty() {
+                return Err(format!("A reason is required for path '{}'", entry.path));
+            }
+            if entry.permitted_operations.is_empty() {
+                return Err(format!(
+                    "At least one permitted operation is required for path '{}'",
+                    entry.path
+                ));
+            }
+
+            let mut valid_entry = entry.clone();
+            valid_entry.path = clean_rel;
+            validated_entries.push(valid_entry);
+        }
+
+        let validated_refinement = HumanScopeRefinement {
+            mission_id: context.authority.revision.seal.mission_id.clone(),
+            revision: context.authority.revision.revision,
+            originating_evidence_id: refinement.originating_evidence_id,
+            entries: validated_entries,
+            last_modified_ms: execution_now_ms(),
+        };
+
+        let file_path = correction_refinement_file_path(context.store.root());
+        let json_bytes = serde_json::to_vec_pretty(&validated_refinement)
+            .map_err(|e| format!("serialize correction refinement: {e}"))?;
+        let tmp_path = file_path.with_extension("tmp");
+        fs::write(&tmp_path, &json_bytes)
+            .map_err(|e| format!("write temp refinement file: {e}"))?;
+        fs::rename(&tmp_path, &file_path)
+            .map_err(|e| format!("persist correction refinement file: {e}"))?;
+
+        invalidate_p8_evaluation_cache(&project_id);
+        verification_status(app, project_id)
+    })
+}
+
+#[tauri::command]
 fn verification_evidence(
     app: AppHandle,
     project_id: String,
 ) -> Result<Vec<VerificationEvidenceView>, String> {
-    let (_, _, manifest) = evaluate_p8(&app, &project_id)?;
+    let (_, _, manifest, _) = evaluate_p8(&app, &project_id, false)?;
     Ok(manifest
         .evidence
         .into_iter()
@@ -5063,7 +7016,7 @@ fn verification_certificate(
     app: AppHandle,
     project_id: String,
 ) -> Result<CompletionCertificateView, String> {
-    let (context, report, manifest) = evaluate_p8(&app, &project_id)?;
+    let (context, report, manifest, _) = evaluate_p8(&app, &project_id, false)?;
     let authority = CompletionAuthority::new(&context.local_key)
         .map_err(|error| format!("open P8 completion authority: {error}"))?;
     let certificate = authority
@@ -5095,7 +7048,7 @@ fn verification_certificate(
 
 #[tauri::command]
 fn verification_export_manifest(app: AppHandle, project_id: String) -> Result<String, String> {
-    let (_, _, manifest) = evaluate_p8(&app, &project_id)?;
+    let (_, _, manifest, _) = evaluate_p8(&app, &project_id, false)?;
     String::from_utf8(manifest.export_json().map_err(|error| error.to_string())?)
         .map_err(|error| format!("manifest is not UTF-8: {error}"))
 }
@@ -5118,11 +7071,16 @@ fn execution_start_inner(
     project_id: String,
 ) -> Result<ExecutionStatusView, String> {
     let project_id = canonical_project_id(&project_id)?;
+    if active_execution(&project_id)?.is_some() {
+        let (run, ledger_path, revision, _) = load_execution_run(&app, &project_id)?;
+        return p9_status_view(&app, &project_id, &ledger_path, &run, &revision);
+    }
     require_execution_not_active(&project_id)?;
     let (mut run, ledger_path, revision, handoff) = load_execution_run(&app, &project_id)?;
     let now = execution_now_ms();
     run.validate_authority_identity(&revision, &handoff, now)
         .map_err(|error| error.to_string())?;
+    ensure_required_collectors_before_execution(&run.workspace, &revision)?;
     let recovery = recovery_store(&app, &revision)?;
     let crash = recovery
         .begin_session(
@@ -5190,6 +7148,10 @@ fn execution_step(app: AppHandle, project_id: String) -> Result<ExecutionStatusV
 
 fn execution_step_inner(app: AppHandle, project_id: String) -> Result<ExecutionStatusView, String> {
     let project_id = canonical_project_id(&project_id)?;
+    if active_execution(&project_id)?.is_some() {
+        let (run, ledger_path, revision, _) = load_execution_run(&app, &project_id)?;
+        return p9_status_view(&app, &project_id, &ledger_path, &run, &revision);
+    }
     require_execution_not_active(&project_id)?;
     let readiness = health_antigravity_for_app(Some(&app));
     if !readiness.adapter_ready {
@@ -5199,6 +7161,11 @@ fn execution_step_inner(app: AppHandle, project_id: String) -> Result<ExecutionS
         "ANTIGRAVITY_SETUP_REQUIRED: the verified Antigravity CLI path is unavailable".to_string()
     })?;
     let (run, ledger_path, revision, _) = load_execution_run(&app, &project_id)?;
+    if run.all_tasks_finished()
+        || run.state == relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
+    {
+        return p9_status_view(&app, &project_id, &ledger_path, &run, &revision);
+    }
     if run.state == relintor_execution::ExecutionRunState::Running {
         return Err("EXECUTION_RUNNING: this mission already has a running task attempt".into());
     }
@@ -5331,13 +7298,13 @@ fn execution_continue_inner(
                     && record.mission_id == expected.mission_id
                     && record.mission_revision == expected.mission_revision
                     && record.p7_run_id == expected.p7_run_id
-                    && matches!(
+                    && (matches!(
                         record.disposition,
                         RecoveryDisposition::SafeToResume
                             | RecoveryDisposition::SafeToResumeAfterProcessReconciliation
                             | RecoveryDisposition::PreExecutionRetryAuthorized
                             | RecoveryDisposition::StoppedIncomplete
-                    )
+                    ) || record.decision == "MANUAL_RETRY_AUTHORIZED")
                     && revalidation_record_is_current(&record, latest_checkpoint.as_ref())
             })
         } else {
@@ -5431,6 +7398,14 @@ fn execution_revalidate_inner(
     let project_id = canonical_project_id(&project_id)?;
     require_execution_not_active(&project_id)?;
     let (mut run, ledger_path, revision, handoff) = load_execution_run(&app, &project_id)?;
+    if run.all_tasks_finished()
+        || run.state == relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
+    {
+        run.state = relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification;
+        run.persist_snapshot(&ledger_path)
+            .map_err(|error| error.to_string())?;
+        return p9_status_view(&app, &project_id, &ledger_path, &run, &revision);
+    }
     let now = execution_now_ms();
     run.validate_authority_identity(&revision, &handoff, now)
         .map_err(|error| error.to_string())?;
@@ -5451,7 +7426,8 @@ fn execution_revalidate_inner(
                 && record.mission_revision == expected.mission_revision
                 && record.p7_run_id == expected.p7_run_id
                 && record.target == run.current_recovery_attempt()
-                && record.disposition == RecoveryDisposition::PreExecutionRetryAuthorized
+                && (record.disposition == RecoveryDisposition::PreExecutionRetryAuthorized
+                    || record.decision == "MANUAL_RETRY_AUTHORIZED")
                 && revalidation_record_is_current(&record, latest_checkpoint.as_ref())
         });
         if retry_already_authorized {
@@ -5561,7 +7537,8 @@ fn execution_retry_recovered_task_inner(
             && record.mission_revision == expected.mission_revision
             && record.p7_run_id == expected.p7_run_id
             && record.target == integrity.target
-            && record.disposition == RecoveryDisposition::RevalidationRequired
+            && (record.disposition == RecoveryDisposition::RevalidationRequired
+                || record.disposition == RecoveryDisposition::PreExecutionRetryAuthorized)
             && revalidation_record_is_current(record, latest.as_ref())
     });
     if !reviewed {
@@ -5573,10 +7550,22 @@ fn execution_retry_recovered_task_inner(
     let target = integrity.target.clone().ok_or_else(|| {
         "RECOVERY_REVIEW_REQUIRED: the interrupted task identity is unavailable".to_string()
     })?;
-    recovery
+    let reval_record = recovery
         .authorize_manual_retry(&expected, &integrity, now)
         .map_err(|error| error.to_string())?;
-    run.authorize_manual_recovery_retry(&target, now)
+    let delta = relintor_execution::ReviewedRecoveryDelta {
+        mission_id: run.mission_id.clone(),
+        mission_revision: run.mission_revision,
+        seal_hash: run.seal_hash.clone(),
+        task_id: target.task_id.clone(),
+        attempt_id: target.attempt_id.clone(),
+        checkpoint_id: latest.as_ref().map(|c| c.checkpoint_id.clone()),
+        affected_paths: reval_record.affected_paths.clone(),
+        baseline_fingerprint: run.workspace_fingerprint.clone(),
+        authorized_starting_fingerprint: String::new(),
+        authorized_at_ms: now,
+    };
+    run.authorize_manual_recovery_retry_with_delta(&target, Some(&delta), now)
         .map_err(|error| format!("authorize reviewed recovery retry: {error}"))?;
     run.persist_snapshot(&ledger_path)
         .map_err(|error| error.to_string())?;
@@ -5669,6 +7658,41 @@ fn seal_project_mission_at_path(
     if expected_review_digest != review_digest || review_digest != recomputed_review_digest {
         return Err("STALE_AUTHORITY_REVIEW: reviewed authority changed before sealing".into());
     }
+
+    // Seal-Time Lineage Guard: verify that every requirement originating from a takeover finding
+    // belongs to the current authoritative takeover snapshot.
+    if let Some((authoritative_takeover_id, _)) = connection
+        .query_row(
+            "SELECT id, fingerprint FROM project_takeovers WHERE project_id = ?1 ORDER BY created_at DESC LIMIT 1",
+            params![&project_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| format!("verify takeover lineage: {error}"))?
+    {
+        let mut valid_finding_ids = BTreeSet::new();
+        let mut stmt = connection
+            .prepare("SELECT id FROM takeover_findings WHERE takeover_id = ?1")
+            .map_err(|error| format!("query valid takeover findings: {error}"))?;
+        let rows = stmt
+            .query_map(params![&authoritative_takeover_id], |row| row.get::<_, String>(0))
+            .map_err(|error| format!("read valid takeover findings: {error}"))?;
+        for row in rows {
+            valid_finding_ids.insert(row.map_err(|e| e.to_string())?);
+        }
+
+        for req in &draft.requirement_graph.requirements {
+            if let RequirementSource::TakeoverFinding { reference } = &req.source {
+                let finding_id = reference.trim_start_matches("takeover://");
+                if !valid_finding_ids.contains(finding_id) {
+                    return Err(format!(
+                        "SEAL_DENIED_STALE_DERIVED_STATE: Requirement {} references non-authoritative or superseded takeover finding {}",
+                        req.requirement_id, reference
+                    ));
+                }
+            }
+        }
+    }
     let previous_revision: u64 = connection
         .query_row(
             "SELECT COALESCE(MAX(revision), 0) FROM mission_revisions WHERE mission_id = ?1",
@@ -5705,6 +7729,38 @@ fn sha256_hex(value: &[u8]) -> String {
         .collect()
 }
 
+fn resume_pending_verification_on_startup(app: AppHandle) {
+    std::thread::spawn(move || {
+        // Let Tauri finish constructing its runtime before evidence collectors
+        // or notifications are used. This is not a timer-based completion
+        // decision; it only resumes already-finished P7 runs.
+        std::thread::sleep(Duration::from_millis(750));
+        let projects = match projects_list(app.clone()) {
+            Ok(projects) => projects,
+            Err(error) => {
+                eprintln!("Relintor startup verification scan skipped: {error}");
+                return;
+            }
+        };
+        for project in projects {
+            let Ok((run, _, _, _)) = load_execution_run(&app, &project.project_id) else {
+                continue;
+            };
+            if run.state
+                != relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
+            {
+                continue;
+            }
+            if let Err(error) = automatic_verification_closure(&app, &project.project_id) {
+                eprintln!(
+                    "Relintor startup verification closure stopped for {}: {error}",
+                    project.project_id
+                );
+            }
+        }
+    });
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -5716,6 +7772,8 @@ pub fn run() {
                 Ok(path) => {
                     if let Err(error) = migrate_database(&path) {
                         eprintln!("Relintor local database initialization failed: {error}");
+                    } else {
+                        resume_pending_verification_on_startup(handle.clone());
                     }
                 }
                 Err(error) => {
@@ -5757,6 +7815,10 @@ pub fn run() {
             verification_start,
             verification_status,
             verification_rerun,
+            verification_submit_human_decision,
+            verification_authorize_correction,
+            verification_get_correction_refinement,
+            verification_save_correction_refinement,
             verification_evidence,
             verification_certificate,
             verification_export_manifest,
@@ -5801,6 +7863,224 @@ mod tests {
                 params![project_id, format!("Project {project_id}"), root],
             )
             .expect("project identity");
+    }
+
+    #[test]
+    fn p8_rejects_workspace_changed_after_authenticated_terminal_p7_boundary() {
+        ensure_terminal_p7_workspace_matches("terminal", "terminal")
+            .expect("exact terminal workspace is verification-eligible");
+        assert!(ensure_terminal_p7_workspace_matches("changed", "terminal")
+            .expect_err("post-P7 edit must require revalidation")
+            .contains("P8_REVALIDATION_REQUIRED"));
+    }
+
+    #[test]
+    fn pending_human_decision_is_reconstructed_when_no_machine_evidence_is_accepted() {
+        assert_eq!(
+            default_verification_workflow_stage(
+                false,
+                true,
+                true,
+                false,
+                &relintor_evidence::CompletionState::StoppedIncomplete,
+                false,
+                0,
+                None,
+            ),
+            "WAITING_FOR_USER_DECISION"
+        );
+    }
+
+    #[test]
+    fn machine_gates_precedence_blocks_human_decision_stage() {
+        assert_eq!(
+            default_verification_workflow_stage(
+                false,
+                true,
+                false,
+                true,
+                &relintor_evidence::CompletionState::StoppedIncomplete,
+                false,
+                0,
+                None,
+            ),
+            "VERIFICATION_NEEDS_ATTENTION"
+        );
+    }
+
+    fn verification_report_with(
+        statuses: Vec<relintor_evidence::RequirementVerification>,
+    ) -> relintor_evidence::VerificationReport {
+        relintor_evidence::VerificationReport {
+            verification_run_id: "verification-test".into(),
+            authority_digest: "authority-test".into(),
+            requirement_statuses: statuses,
+            decision: relintor_evidence::CompletionDecision {
+                state: relintor_evidence::CompletionState::StoppedIncomplete,
+                reason: "test".into(),
+                deterministic_gates: Vec::new(),
+                accepted_risks: Vec::new(),
+                blocked_external: Vec::new(),
+            },
+            builder_claim: None,
+            coverage_total: 0,
+            coverage_accounted: 0,
+            evidence_manifest_hash: "manifest-test".into(),
+            p7_ledger_digest: None,
+            ai_judgements: Vec::new(),
+            integrity_tag: "integrity-test".into(),
+        }
+    }
+
+    #[test]
+    fn missing_machine_evidence_is_a_verification_correction_target() {
+        let report = verification_report_with(vec![
+            relintor_evidence::RequirementVerification {
+                requirement_id: "requirement-security".into(),
+                status: RequirementStatus::ImplementedUnverified,
+                evidence_ids: Vec::new(),
+                missing_obligations: vec![EvidenceClass::SecurityScan],
+                missing_acceptance_criteria: vec!["criterion-security".into()],
+                stale_evidence: Vec::new(),
+                failed_evidence: Vec::new(),
+                reason: "missing security evidence".into(),
+            },
+            relintor_evidence::RequirementVerification {
+                requirement_id: "requirement-accessibility".into(),
+                status: RequirementStatus::ImplementedUnverified,
+                evidence_ids: Vec::new(),
+                missing_obligations: vec![EvidenceClass::AccessibilityResult],
+                missing_acceptance_criteria: vec!["criterion-accessibility".into()],
+                stale_evidence: Vec::new(),
+                failed_evidence: Vec::new(),
+                reason: "missing accessibility evidence".into(),
+            },
+        ]);
+
+        let missing = missing_machine_requirement_ids(&report);
+        assert_eq!(
+            missing,
+            BTreeSet::from([
+                "requirement-accessibility".to_string(),
+                "requirement-security".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn pending_human_decision_is_not_machine_correction_work() {
+        let report = verification_report_with(vec![relintor_evidence::RequirementVerification {
+            requirement_id: "requirement-human".into(),
+            status: RequirementStatus::ImplementedUnverified,
+            evidence_ids: Vec::new(),
+            missing_obligations: vec![EvidenceClass::HumanDecision],
+            missing_acceptance_criteria: vec!["criterion-human".into()],
+            stale_evidence: Vec::new(),
+            failed_evidence: Vec::new(),
+            reason: "waiting for user".into(),
+        }]);
+
+        assert!(missing_machine_requirement_ids(&report).is_empty());
+    }
+
+    #[test]
+    fn production_custom_protocol_is_active_to_prevent_localhost_devurl() {
+        assert!(
+            cfg!(feature = "custom-protocol"),
+            "tauri custom-protocol feature must be active to bundle frontendDist and prevent devUrl localhost navigation in packaged builds"
+        );
+    }
+
+    #[test]
+    fn execution_preflight_rejects_required_collectors_missing_from_workspace() {
+        let workspace = std::env::temp_dir().join(format!(
+            "relintor-collector-preflight-missing-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&workspace).expect("collector preflight workspace");
+        fs::write(
+            workspace.join("package.json"),
+            br#"{"scripts":{"test":"node --test"}}"#,
+        )
+        .expect("package manifest");
+
+        let blockers = required_collector_blockers(
+            &workspace,
+            &[
+                EvidenceClass::TestOutput,
+                EvidenceClass::AccessibilityResult,
+                EvidenceClass::SecurityScan,
+            ],
+        )
+        .expect("collector plan discovery");
+        assert_eq!(blockers.len(), 2);
+        assert!(blockers
+            .iter()
+            .any(|item| item.starts_with("AccessibilityResult:")));
+        assert!(blockers
+            .iter()
+            .any(|item| item.starts_with("SecurityScan:")));
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn execution_preflight_accepts_discovered_machine_collectors() {
+        let workspace = std::env::temp_dir().join(format!(
+            "relintor-collector-preflight-ready-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&workspace).expect("collector preflight workspace");
+        fs::write(
+            workspace.join("package.json"),
+            br#"{"scripts":{"test":"node --test","accessibility-audit":"node --test","security-scan":"node --test","performance-result":"node --test"}}"#,
+        )
+        .expect("package manifest");
+
+        let blockers = required_collector_blockers(
+            &workspace,
+            &[
+                EvidenceClass::TestOutput,
+                EvidenceClass::AccessibilityResult,
+                EvidenceClass::SecurityScan,
+                EvidenceClass::PerformanceResult,
+            ],
+        )
+        .expect("collector plan discovery");
+        assert!(blockers.is_empty(), "{blockers:?}");
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn completion_certificate_survives_atomic_persistence_and_fresh_reload() {
+        let path = test_path("certificate-reload").with_extension("json");
+        let certificate = CompletionCertificate {
+            certificate_version: "p8-completion-certificate-v1".into(),
+            certificate_id: "certificate-reload-fixture".into(),
+            project_id: "project-reload".into(),
+            mission_id: "mission-project-reload".into(),
+            mission_revision: 1,
+            p6_seal_hash: "seal".into(),
+            registry_id: "registry".into(),
+            registry_version: 1,
+            registry_digest: "registry-digest".into(),
+            p7_execution_run_id: "run".into(),
+            workspace_source_fingerprint: "workspace".into(),
+            verification_run_id: "verification".into(),
+            requirement_status_ledger_hash: "requirements".into(),
+            evidence_manifest_hash: "evidence".into(),
+            accepted_risks: Vec::new(),
+            blocked_external: Vec::new(),
+            final_state: relintor_evidence::CompletionState::VerifiedComplete,
+            issued_at_ms: 1,
+            authority_version: "authority".into(),
+            signature: "signature".into(),
+        };
+
+        persist_completion_certificate_file(&path, &certificate)
+            .expect("persist certificate atomically");
+        let reloaded = read_completion_certificate_file(&path).expect("reload certificate");
+        assert_eq!(reloaded, certificate);
+        let _ = fs::remove_file(path);
     }
 
     #[test]
@@ -5850,6 +8130,164 @@ mod tests {
             .expect("stored revision");
         assert_eq!(stored_revision, 1);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn inspect_live_production_mission() {
+        let app_data = PathBuf::from(r"C:\Users\A\AppData\Roaming\com.relintor.desktop");
+        let db_path = app_data.join("relintor.sqlite");
+        if !db_path.is_file() {
+            return;
+        }
+        let project_id = "mission-takeover-project-takeover_719ad83a558ede1be5868c6d";
+        let (revision, handoff, registry, trusted, workspace, _takeover_fingerprint) =
+            latest_execution_context(&db_path, project_id).expect("latest execution context");
+        let ledger_path = app_data
+            .join("execution")
+            .join(format!("{}-{}.json", revision.seal.mission_id, revision.revision));
+        let p7_execution = AuthenticatedP7Execution::from_snapshot(&ledger_path)
+            .expect("authenticate P7 execution ledger");
+        let p7_run_id = p7_execution.run.run_id.clone();
+        let verification_workspace_fingerprint = p7_execution.run.workspace_fingerprint.clone();
+        let p7_state = "EXECUTION_TASKS_FINISHED_AWAITING_VERIFICATION".into();
+        let source_revision = Some(revision.contract.project_source_revision.clone());
+        let environment = environment_fingerprint(
+            &workspace,
+            &revision.seal.mission_id,
+            revision.revision,
+            &revision.seal.contract_hash,
+            &registry,
+            source_revision.clone(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .expect("fingerprint verification environment");
+        let environment_fingerprint = environment.digest().expect("digest verification environment");
+        let authority = VerificationAuthority {
+            revision,
+            handoff,
+            registry,
+            trusted_signers: trusted,
+            p7_run_id,
+            p7_state,
+            workspace_fingerprint: verification_workspace_fingerprint.clone(),
+            source_revision: source_revision.clone(),
+            environment_fingerprint: environment_fingerprint.clone(),
+        };
+        p7_execution
+            .validate_against(&authority)
+            .expect("validate P7 execution authority");
+        let local_key = load_or_create_keychain_authority_key(
+            "Relintor.P8.Authority",
+            &format!("{}-{}", authority.revision.seal.project_id, authority.revision.revision),
+        )
+        .expect("load P8 OS keychain authority");
+        let store = EvidenceStore::new(
+            app_data.join("verification").join(format!(
+                "{}-{}",
+                authority.revision.seal.mission_id, authority.revision.revision
+            )),
+            &local_key,
+        )
+        .expect("open P8 evidence store");
+        let current_workspace_fingerprint = fingerprint_workspace(&workspace)
+            .expect("fingerprint current verification workspace");
+        ensure_terminal_p7_workspace_matches(
+            &current_workspace_fingerprint,
+            &verification_workspace_fingerprint,
+        )
+        .expect("workspace matches");
+        let current = FreshnessContext {
+            mission_id: authority.revision.seal.mission_id.clone(),
+            mission_revision: authority.revision.revision,
+            p6_seal_hash: authority.revision.seal.contract_hash.clone(),
+            workspace_fingerprint: current_workspace_fingerprint,
+            source_revision,
+            environment_fingerprint: authority.environment_fingerprint.clone(),
+            dependency_lock_hashes: BTreeMap::new(),
+            workspace_root: Some(workspace),
+        };
+        let context = P8VerificationContext {
+            authority,
+            current,
+            store,
+            p7_execution,
+            local_key,
+        };
+        let engine = VerificationEngine::new_with_p7_execution(
+            context.store.clone(),
+            context.authority.clone(),
+            context.current.clone(),
+            Vec::new(),
+            context.p7_execution.clone(),
+        )
+        .expect("start P8 verification");
+        let report = engine.evaluate(None).expect("evaluate P8 requirements");
+        let manifest = export_manifest(&report, &context.authority, &context.store, Vec::new(), None)
+            .expect("export P8 evidence manifest");
+        let collection = CollectorOrchestrationResult::default();
+        let certificate = None;
+        let stage = derive_verification_workflow_stage_for_context(
+            &context,
+            &report,
+            &manifest,
+            certificate,
+            &collection,
+        );
+        let view = verification_view(
+            project_id,
+            &context,
+            &report,
+            &manifest,
+            certificate,
+            &collection,
+            Some(stage),
+        );
+
+        let contract_reqs = &context.authority.revision.contract.requirement_graph.requirements;
+        let machine_reqs: Vec<_> = contract_reqs.iter().filter(|r| r.requirement_type != "decision").collect();
+        let machine_req_ids: BTreeSet<_> = machine_reqs.iter().map(|r| &r.requirement_id).collect();
+        let machine_verified_count = report
+            .requirement_statuses
+            .iter()
+            .filter(|s| machine_req_ids.contains(&s.requirement_id) && s.status == RequirementStatus::Verified)
+            .count();
+
+        let has_human_decision_pending = report.requirement_statuses.iter().any(|status| {
+            if status.missing_obligations.contains(&EvidenceClass::HumanDecision) {
+                return true;
+            }
+            let req = contract_reqs.iter().find(|r| r.requirement_id == status.requirement_id);
+            req.map_or(false, |r| {
+                r.requirement_type == "decision" && status.status != RequirementStatus::Verified
+            })
+        });
+
+        let eligibility = is_final_human_acceptance_eligible(
+            contract_reqs,
+            &report,
+            &view.blocked_external,
+            0,
+            0,
+            context.authority.validate().is_ok(),
+            true,
+        );
+
+        assert_eq!(view.state, "VERIFICATION_FINISHED");
+        assert_eq!(view.workflow_stage, "WAITING_FOR_USER_DECISION");
+        assert!(view.final_human_acceptance_eligible);
+        assert!(view.final_human_acceptance_reasons.is_empty());
+        assert_eq!(view.requirements_total, 15);
+        assert_eq!(view.requirements_verified, 13);
+        assert_eq!(machine_reqs.len(), 13);
+        assert_eq!(machine_verified_count, 13);
+        assert!(view.missing_evidence.is_empty());
+        assert!(view.blocked_external.is_empty());
+        assert!(view.collection_failures.is_empty());
+        assert_eq!(view.human_decisions.len(), 1);
+        assert_eq!(eligibility.technical_blockers_count, 0);
+        assert_eq!(eligibility.missing_required_evidence_count, 0);
+        assert!(has_human_decision_pending);
     }
 
     #[test]
@@ -6378,6 +8816,142 @@ mod tests {
         seal_project_mission_at_path(&path, "stale-project", &review_b.review_digest)
             .expect("current review B seals");
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn seal_denied_when_requirement_references_stale_takeover_finding() {
+        let path = test_path("stale-finding-seal");
+        let ws_root = test_path("seal-stale-finding-ws");
+        let _ = fs::create_dir_all(&ws_root);
+        migrate_database(&path).expect("migrate");
+        let connection = Connection::open(&path).expect("open");
+        let project_id = "takeover-stale-test";
+        connection
+            .execute(
+                "INSERT INTO projects(id, name, root_path, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![project_id, "Takeover Test", ws_root.to_string_lossy().as_ref(), 1000],
+            )
+            .expect("insert project");
+        // Insert an initial takeover snapshot with an old finding
+        connection
+            .execute(
+                "INSERT INTO project_takeovers(id, project_id, root, fingerprint, scanner_version, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params!["takeover-1", project_id, ws_root.to_string_lossy().as_ref(), "fp1", "p6-test", 1000],
+            )
+            .expect("insert takeover 1");
+        connection
+            .execute(
+                "INSERT INTO takeover_findings(id, takeover_id, finding_type, summary, severity, evidence)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params!["finding-old", "takeover-1", "hidden-route", "old finding", "medium", "{}"],
+            )
+            .expect("insert finding old");
+        drop(connection);
+
+        // Build review from takeover-1
+        let review = review_authority_at_path(&path, project_id, &reviewed_facts(&["backend"]))
+            .expect("review");
+
+        // Now a new scan occurs: takeover-2 is created with no findings, superseding takeover-1
+        let connection = Connection::open(&path).expect("open 2");
+        connection
+            .execute(
+                "INSERT INTO project_takeovers(id, project_id, root, fingerprint, scanner_version, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params!["takeover-2", project_id, ws_root.to_string_lossy().as_ref(), "fp2", "p6-test", 2000],
+            )
+            .expect("insert takeover 2");
+        connection
+            .execute(
+                "DELETE FROM takeover_findings WHERE takeover_id = 'takeover-1'",
+                [],
+            )
+            .expect("delete old findings");
+        drop(connection);
+
+        // Attempting to seal using the old review (which contained finding-old) must fail closed with SEAL_DENIED_STALE_DERIVED_STATE or STALE_AUTHORITY_REVIEW
+        let seal_err = seal_project_mission_at_path(&path, project_id, &review.review_digest)
+            .expect_err("seal must be denied when findings are superseded");
+        assert!(
+            seal_err.contains("STALE_AUTHORITY_REVIEW") || seal_err.contains("SEAL_DENIED_STALE_DERIVED_STATE"),
+            "Unexpected error: {seal_err}"
+        );
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir_all(ws_root);
+    }
+
+    #[test]
+    fn reopen_existing_unsealed_workspace_reconciles_stale_findings_and_requirements() {
+        let db_path = test_path("reopen-reconciliation");
+        let ws_root = test_path("reopen-ws");
+        let _ = fs::create_dir_all(&ws_root);
+        fs::write(ws_root.join("Cargo.toml"), b"[package]\nname=\"reopen-demo\"\nversion=\"0.1.0\"\n").unwrap();
+        fs::create_dir_all(ws_root.join("src")).unwrap();
+        fs::write(ws_root.join("src/main.rs"), b"fn main() {}\n").unwrap();
+
+        migrate_database(&db_path).expect("migrate");
+        let project_id = "test-reopen-project";
+
+        // 1. Simulate an old database record created with p5-takeover-scanner-1 having 5 false findings
+        let connection = Connection::open(&db_path).expect("open");
+        connection
+            .execute(
+                "INSERT INTO projects(id, name, root_path, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![project_id, "Reopen Test", ws_root.to_string_lossy().as_ref(), 1000],
+            )
+            .expect("insert project");
+        connection
+            .execute(
+                "INSERT INTO project_takeovers(id, project_id, root, fingerprint, scanner_version, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params!["takeover-old-v1", project_id, ws_root.to_string_lossy().as_ref(), "old-fingerprint", "p5-takeover-scanner-1", 1000],
+            )
+            .expect("insert old takeover");
+        for i in 1..=5 {
+            connection
+                .execute(
+                    "INSERT INTO takeover_findings(id, takeover_id, finding_type, summary, severity, evidence)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![format!("finding-false-{i}"), "takeover-old-v1", "hidden-route", format!("false finding {i}"), "medium", "{}"],
+                )
+                .expect("insert finding");
+        }
+        drop(connection);
+
+        // 2. Open project normally (as desktop application does on startup / open)
+        let open_view = open_project_at_path(&db_path, project_id).expect("open project");
+        assert_eq!(open_view.project.project_id, project_id);
+
+        // 3. Request authority preview (as desktop standards page does on render)
+        let preview = review_authority_at_path(&db_path, project_id, &reviewed_facts(&["backend"])).expect("preview");
+
+        // 4. Assert that stale findings were purged and requirements reconciled to clean state
+        let connection = Connection::open(&db_path).expect("open check");
+        let stale_findings_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM takeover_findings WHERE takeover_id = 'takeover-old-v1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(stale_findings_count, 0, "All stale findings from older scanner version must be evicted");
+
+        let active_takeover_scanner: String = connection
+            .query_row(
+                "SELECT scanner_version FROM project_takeovers WHERE project_id = ?1 ORDER BY created_at DESC LIMIT 1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .expect("active takeover scanner");
+        assert_eq!(active_takeover_scanner, relintor_takeover::TAKEOVER_SCANNER_VERSION);
+
+        // Sealing with current review must succeed
+        seal_project_mission_at_path(&db_path, project_id, &preview.review_digest)
+            .expect("reconciled plan seals cleanly");
+
+        let _ = fs::remove_file(db_path);
+        let _ = fs::remove_dir_all(ws_root);
     }
 
     #[test]

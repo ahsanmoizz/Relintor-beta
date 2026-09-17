@@ -1,0 +1,250 @@
+name: Relintor Phase 4 Windows Package
+
+on:
+  push:
+    branches:
+      - phase2-4-ci
+    paths:
+      - ".github/workflows/phase4_windows_package.yml"
+      - "apps/desktop/**"
+      - "crates/**"
+      - "services/**"
+      - "integrations/**"
+      - "spec/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "package.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CI: "true"
+  RUST_BACKTRACE: "1"
+  WEBVIEW_VERSION: "151.0.4129.107"
+  WEBVIEW_CAB_URL: "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/ab25c23c-1b43-4759-826f-75267a2235d9/Microsoft.WebView2.FixedVersionRuntime.151.0.4129.107.x64.cab"
+  WEBVIEW_CAB_SHA256: "F1E1C2C9B34C79BA4D88DF77FB79A05441E1BD7481D6A985D76DD377CDA45F33"
+
+jobs:
+  package:
+    name: Windows x64 fixed-WebView NSIS package
+    runs-on: windows-2022
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout exact branch commit
+        uses: actions/checkout@v4
+
+      - name: Setup Rust 1.96
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.96.0
+
+      - name: Setup pnpm 11.17
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.17.0
+          run_install: false
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Install locked JavaScript dependencies
+        shell: pwsh
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare and verify Microsoft Fixed Version WebView2
+        id: webview
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $runtimeName = "Microsoft.WebView2.FixedVersionRuntime.$env:WEBVIEW_VERSION.x64"
+          $work = Join-Path $env:RUNNER_TEMP 'relintor-p4'
+          $cab = Join-Path $work "$runtimeName.cab"
+          $extract = Join-Path $work 'runtime'
+          $stage = Join-Path $PWD "apps\desktop\src-tauri\$runtimeName"
+
+          New-Item -ItemType Directory -Force $work | Out-Null
+          Invoke-WebRequest -Uri $env:WEBVIEW_CAB_URL -OutFile $cab
+
+          $actualCabHash = (Get-FileHash $cab -Algorithm SHA256).Hash
+          if ($actualCabHash -ne $env:WEBVIEW_CAB_SHA256) {
+            throw "Fixed WebView CAB SHA256 mismatch. Expected $env:WEBVIEW_CAB_SHA256, got $actualCabHash"
+          }
+
+          New-Item -ItemType Directory -Force $extract | Out-Null
+          & expand.exe $cab -F:* $extract | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "expand.exe failed with exit code $LASTEXITCODE"
+          }
+
+          $runtimeRoot = Join-Path $extract $runtimeName
+          $runtimeExe = Join-Path $runtimeRoot 'msedgewebview2.exe'
+          if (!(Test-Path $runtimeExe)) {
+            throw "Fixed WebView runtime executable missing: $runtimeExe"
+          }
+
+          $sig = Get-AuthenticodeSignature $runtimeExe
+          if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'Microsoft Corporation') {
+            throw "Fixed WebView runtime is not valid Microsoft-signed code."
+          }
+
+          if (Test-Path $stage) {
+            Remove-Item $stage -Recurse -Force
+          }
+          Copy-Item $runtimeRoot $stage -Recurse
+
+          "runtime_name=$runtimeName" >> $env:GITHUB_OUTPUT
+          "runtime_stage=$stage" >> $env:GITHUB_OUTPUT
+          "runtime_exe_sha256=$((Get-FileHash $runtimeExe -Algorithm SHA256).Hash)" >> $env:GITHUB_OUTPUT
+
+          Write-Host "Fixed runtime staged: $stage"
+          Write-Host "CAB SHA256: $actualCabHash"
+          Write-Host "Runtime signature: $($sig.Status)"
+          Write-Host "Runtime signer: $($sig.SignerCertificate.Subject)"
+
+      - name: Generate Phase 4 fixed-runtime overlay and NSIS hook
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $runtimeName = '${{ steps.webview.outputs.runtime_name }}'
+          $work = Join-Path $env:RUNNER_TEMP 'relintor-p4'
+          $hook = Join-Path $work 'phase4-fixed-runtime-acl.nsh'
+          $overlay = Join-Path $work 'phase4-overlay.json'
+
+          @'
+          !macro NSIS_HOOK_POSTINSTALL
+            DetailPrint "Applying WebView2 Fixed Runtime AppContainer permissions..."
+            nsExec::ExecToLog '"$SYSDIR\icacls.exe" "$INSTDIR\Microsoft.WebView2.FixedVersionRuntime.151.0.4129.107.x64" /grant *S-1-15-2-2:(OI)(CI)(RX) /T /C /Q'
+            Pop $0
+            DetailPrint "ALL APPLICATION PACKAGES ACL exit code: $0"
+            nsExec::ExecToLog '"$SYSDIR\icacls.exe" "$INSTDIR\Microsoft.WebView2.FixedVersionRuntime.151.0.4129.107.x64" /grant *S-1-15-2-1:(OI)(CI)(RX) /T /C /Q'
+            Pop $0
+            DetailPrint "ALL RESTRICTED APPLICATION PACKAGES ACL exit code: $0"
+          !macroend
+          '@ | Set-Content $hook -Encoding ASCII
+
+          $hookText = Get-Content $hook -Raw
+          if (($hookText -split "`r?`n" | Where-Object { $_.Trim() -eq 'Pop $0' }).Count -ne 2) {
+            throw 'Generated NSIS hook failed Pop $0 validation.'
+          }
+
+          $overlayObject = @{
+            bundle = @{
+              targets = @('nsis')
+              windows = @{
+                webviewInstallMode = @{
+                  type = 'fixedRuntime'
+                  path = "./$runtimeName"
+                }
+                nsis = @{
+                  installerHooks = $hook
+                  compression = 'none'
+                }
+              }
+            }
+          }
+
+          $overlayObject | ConvertTo-Json -Depth 10 | Set-Content $overlay -Encoding UTF8
+          "PHASE4_OVERLAY=$overlay" >> $env:GITHUB_ENV
+
+          Write-Host "Overlay: $overlay"
+          Get-Content $overlay
+
+      - name: Build unsigned Windows x64 NSIS candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pnpm --dir apps/desktop tauri build `
+            --target x86_64-pc-windows-msvc `
+            --bundles nsis `
+            --config "$env:PHASE4_OVERLAY" `
+            --no-sign
+
+      - name: Verify package and write provenance
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $installer = Join-Path $PWD 'target\x86_64-pc-windows-msvc\release\bundle\nsis\Relintor_0.1.0_x64-setup.exe'
+          $app = Join-Path $PWD 'target\x86_64-pc-windows-msvc\release\relintor-desktop.exe'
+          $runtimeName = '${{ steps.webview.outputs.runtime_name }}'
+          $runtimeStage = Join-Path $PWD "apps\desktop\src-tauri\$runtimeName"
+
+          if (!(Test-Path $installer)) { throw "Installer missing: $installer" }
+          if (!(Test-Path $app)) { throw "App missing: $app" }
+
+          $installerHash = (Get-FileHash $installer -Algorithm SHA256).Hash
+          $appHash = (Get-FileHash $app -Algorithm SHA256).Hash
+          $installerSig = Get-AuthenticodeSignature $installer
+
+          New-Item -ItemType Directory -Force 'phase4-artifact' | Out-Null
+          Copy-Item $installer 'phase4-artifact\Relintor_0.1.0_FIXED_WEBVIEW_UNSIGNED_x64-setup.exe'
+
+          @"
+          RELINTOR PHASE 4 WINDOWS PACKAGE
+          source_commit=$env:GITHUB_SHA
+          source_ref=$env:GITHUB_REF
+          runner=$env:RUNNER_NAME
+          runner_os=$env:RUNNER_OS
+          webview_version=$env:WEBVIEW_VERSION
+          webview_cab_sha256=$env:WEBVIEW_CAB_SHA256
+          webview_runtime_exe_sha256=${{ steps.webview.outputs.runtime_exe_sha256 }}
+          webview_mode=fixedRuntime
+          webview_config_path=./$runtimeName
+          nsis_compression=none
+          installer_authenticode=$($installerSig.Status)
+          release_label=UNSIGNED FIRST-FELLOWS BETA
+          installer_bytes=$((Get-Item $installer).Length)
+          installer_sha256=$installerHash
+          app_bytes=$((Get-Item $app).Length)
+          app_sha256=$appHash
+          "@ | Set-Content 'phase4-artifact\PROVENANCE.txt' -Encoding UTF8
+
+          Get-ChildItem $runtimeStage -Recurse -File |
+            Get-FileHash -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash)  $($_.Path.Substring($runtimeStage.Length + 1))" } |
+            Set-Content 'phase4-artifact\WEBVIEW_RUNTIME_MANIFEST.sha256' -Encoding UTF8
+
+          Get-Content 'phase4-artifact\PROVENANCE.txt'
+
+      - name: Upload Phase 4 installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: relintor-phase4-windows-fixed-webview-${{ github.sha }}
+          path: phase4-artifact/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Final source guard
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $runtimeName = '${{ steps.webview.outputs.runtime_name }}'
+          $stage = Join-Path $PWD "apps\desktop\src-tauri\$runtimeName"
+          if (Test-Path $stage) {
+            Remove-Item $stage -Recurse -Force
+          }
+
+          $tracked = @(git diff --name-only)
+          $staged = @(git diff --cached --name-only)
+
+          if ($tracked.Count -gt 0 -or $staged.Count -gt 0) {
+            Write-Host "Tracked diff:"
+            git diff --name-only
+            Write-Host "Staged diff:"
+            git diff --cached --name-only
+            throw 'Packaging workflow changed tracked product source.'
+          }
+
+          Write-Host 'Source guard PASS'
+          Write-Host 'UNSIGNED FIRST-FELLOWS BETA'

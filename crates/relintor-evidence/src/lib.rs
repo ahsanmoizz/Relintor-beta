@@ -6,13 +6,13 @@
 
 use hmac::{Hmac, Mac};
 use relintor_execution::{
-    ExecutionRun, ExecutionRunState, ExecutionTaskState, SuccessfulExecutionIdentity,
-    TaskAttemptState,
+    ExecutionEventKind, ExecutionRun, ExecutionRunState, ExecutionTaskState,
+    SuccessfulExecutionIdentity, TaskAttemptState,
 };
 use relintor_standards::{
     AuthorityEngine, DecisionActor, DecisionKind, EvidenceClass, EvidenceConfidence,
-    ExecutionHandoff, ExplicitDecision, MissionRevision, Requirement, RequirementStatus,
-    StandardsRegistry, TrustedSignerSet,
+    ExecutionHandoff, ExplicitDecision, MissionRevision, Requirement, RequirementSource,
+    RequirementStatus, StandardsRegistry, TrustedSignerSet,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -28,7 +28,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
 pub use relintor_standards::{
-    AcceptanceCriterion, EvidenceObligation, RequirementGraph, RequirementRisk, VerificationPolicy,
+    AcceptanceCriterion, EvidenceObligation, RequirementGraph, RequirementRisk, Task,
+    TaskDependency, TaskGraph, VerificationPolicy,
 };
 
 const STORE_VERSION: &str = "p8-evidence-store-v1";
@@ -36,7 +37,13 @@ const MANIFEST_VERSION: &str = "p8-evidence-manifest-v1";
 const CERTIFICATE_VERSION: &str = "p8-completion-certificate-v1";
 const INVALIDATION_INDEX_VERSION: &str = "p8-invalidation-index-v1";
 const MAX_PATH_COMPONENTS: usize = 128;
+pub const EXPLICIT_USER_DECISION_COLLECTOR: &str = "explicit-user-decision";
 type HmacSha256 = Hmac<Sha256>;
+
+pub fn is_user_authored_human_decision_artifact(metadata: &EvidenceMetadata) -> bool {
+    metadata.class == EvidenceClass::HumanDecision
+        && metadata.collector.name == EXPLICIT_USER_DECISION_COLLECTOR
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EvidenceError {
@@ -471,7 +478,11 @@ pub mod test_support {
             execution_identities: metadata.execution_identities,
             workspace_fingerprint: metadata.workspace_fingerprint,
             source_revision: metadata.source_revision,
-            collector: CollectorIdentity::new("test-support-collector", "p8-test-only"),
+            collector: if metadata.collector.name.is_empty() {
+                CollectorIdentity::new("test-support-collector", "p8-test-only")
+            } else {
+                metadata.collector
+            },
             collector_kind: "TEST_SUPPORT_ONLY".into(),
             command_digest: metadata.command_digest,
             environment_fingerprint: metadata.environment_fingerprint,
@@ -609,25 +620,47 @@ impl EvidenceStore {
         evidence_id: &str,
         digest: &str,
     ) -> Result<(PathBuf, PathBuf, PathBuf), EvidenceError> {
-        if evidence_id.is_empty()
-            || evidence_id.contains(['/', '\\'])
-            || evidence_id.contains("..")
-            || digest.len() != 64
-            || !digest.chars().all(|c| c.is_ascii_hexdigit())
-        {
+        validate_evidence_id(evidence_id)?;
+        if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(EvidenceError::InvalidInput(
                 "unsafe evidence path component".into(),
             ));
         }
         Ok((
             self.root.join("blobs").join(digest),
-            self.root
-                .join("metadata")
-                .join(format!("{evidence_id}.json")),
-            self.root
-                .join("invalidations")
-                .join(format!("{evidence_id}.json")),
+            self.metadata_path(evidence_id)?,
+            self.invalidation_path(evidence_id)?,
         ))
+    }
+
+    fn metadata_path(&self, evidence_id: &str) -> Result<PathBuf, EvidenceError> {
+        validate_evidence_id(evidence_id)?;
+        let legacy = self
+            .root
+            .join("metadata")
+            .join(format!("{evidence_id}.json"));
+        if legacy.is_file() || !requires_safe_store_path(&legacy) {
+            return Ok(legacy);
+        }
+        Ok(self
+            .root
+            .join("metadata")
+            .join(format!("evidence-{}.json", sha256(evidence_id.as_bytes()))))
+    }
+
+    fn invalidation_path(&self, evidence_id: &str) -> Result<PathBuf, EvidenceError> {
+        validate_evidence_id(evidence_id)?;
+        let legacy = self
+            .root
+            .join("invalidations")
+            .join(format!("{evidence_id}.json"));
+        if legacy.is_file() || !requires_safe_store_path(&legacy) {
+            return Ok(legacy);
+        }
+        Ok(self.root.join("invalidations").join(format!(
+            "invalidation-{}.json",
+            sha256(evidence_id.as_bytes())
+        )))
     }
 
     pub fn put(
@@ -686,10 +719,7 @@ impl EvidenceStore {
     }
 
     pub fn load(&self, evidence_id: &str) -> Result<StoredEvidence, EvidenceError> {
-        let metadata_path = self
-            .root
-            .join("metadata")
-            .join(format!("{evidence_id}.json"));
+        let metadata_path = self.metadata_path(evidence_id)?;
         if !metadata_path.is_file() {
             return Err(EvidenceError::EvidenceNotFound(evidence_id.into()));
         }
@@ -754,12 +784,7 @@ impl EvidenceStore {
         evidence_id: &str,
         reason: impl Into<String>,
     ) -> Result<(), EvidenceError> {
-        if !self
-            .root
-            .join("metadata")
-            .join(format!("{evidence_id}.json"))
-            .is_file()
-        {
+        if !self.metadata_path(evidence_id)?.is_file() {
             return Err(EvidenceError::EvidenceNotFound(evidence_id.into()));
         }
         let index = self.load_invalidation_index()?;
@@ -777,10 +802,7 @@ impl EvidenceStore {
             integrity: String::new(),
         };
         record.integrity = hmac_hex(&self.key, &canonical(&record.signing_body())?)?;
-        let path = self
-            .root
-            .join("invalidations")
-            .join(format!("{evidence_id}.json"));
+        let path = self.invalidation_path(evidence_id)?;
         write_atomic_file(&path, &canonical(&record)?)?;
         let mut records = index.records;
         records.insert(evidence_id.into(), sha256(&canonical(&record)?));
@@ -794,12 +816,13 @@ impl EvidenceStore {
             if !entry.path().is_file() || entry.file_name().to_string_lossy().starts_with('.') {
                 continue;
             }
-            let evidence_id = entry
-                .path()
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .ok_or_else(|| EvidenceError::IntegrityFailure("invalid evidence filename".into()))?
-                .to_owned();
+            let envelope: EvidenceEnvelope =
+                serde_json::from_slice(&fs::read(entry.path()).map_err(io_error)?)
+                    .map_err(json_error)?;
+            let evidence_id = envelope.artifact.metadata.evidence_id;
+            if self.is_revoked(&evidence_id)? {
+                continue;
+            }
             artifacts.push(self.load(&evidence_id)?.artifact);
         }
         artifacts.sort_by(|left, right| left.metadata.evidence_id.cmp(&right.metadata.evidence_id));
@@ -917,10 +940,7 @@ impl EvidenceStore {
         let index = self.load_invalidation_index()?;
         let mut records = Vec::new();
         for evidence_id in index.records.keys() {
-            let path = self
-                .root
-                .join("invalidations")
-                .join(format!("{evidence_id}.json"));
+            let path = self.invalidation_path(evidence_id)?;
             if !path.is_file() {
                 return Err(EvidenceError::IntegrityFailure(
                     "invalidation record is missing from authenticated index".into(),
@@ -982,12 +1002,11 @@ impl EvidenceStore {
                 && !entry.file_name().to_string_lossy().starts_with('.')
             {
                 let invalidation_path = entry.path();
-                let evidence_id = invalidation_path
-                    .file_stem()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or_default()
-                    .to_owned();
-                if !index.records.contains_key(&evidence_id) {
+                let record: EvidenceInvalidation =
+                    serde_json::from_slice(&fs::read(invalidation_path).map_err(io_error)?)
+                        .map_err(json_error)?;
+                self.validate_invalidation(&record)?;
+                if !index.records.contains_key(&record.evidence_id) {
                     return Err(EvidenceError::IntegrityFailure(
                         "unindexed invalidation record detected".into(),
                     ));
@@ -1033,6 +1052,26 @@ impl EvidenceStore {
             .records
             .contains_key(evidence_id))
     }
+}
+
+fn validate_evidence_id(evidence_id: &str) -> Result<(), EvidenceError> {
+    if evidence_id.is_empty() || evidence_id.contains(['/', '\\']) || evidence_id.contains("..") {
+        return Err(EvidenceError::InvalidInput(
+            "unsafe evidence path component".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn requires_safe_store_path(path: &Path) -> bool {
+    // Keep room for the atomic-write temporary suffix and for filesystems'
+    // per-component limits. The legacy evidence-id filename is retained when
+    // it already exists so old stores remain readable, while new long IDs use
+    // a stable hash on every supported platform.
+    let filename_is_long = path
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().len() >= 220);
+    filename_is_long || path.to_string_lossy().len() >= 220
 }
 
 fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), EvidenceError> {
@@ -1685,13 +1724,25 @@ impl VerificationCollectorPlan {
             } else {
                 "npm"
             };
-            for (script, class) in [
-                ("build", EvidenceClass::BuildOutput),
+            let canonical_candidates = [
                 ("test", EvidenceClass::TestOutput),
                 ("lint", EvidenceClass::LintStaticAnalysis),
                 ("security-scan", EvidenceClass::SecurityScan),
+                ("security:scan", EvidenceClass::SecurityScan),
+                ("appsec:scan", EvidenceClass::SecurityScan),
+                ("appsec-scan", EvidenceClass::SecurityScan),
                 ("accessibility-audit", EvidenceClass::AccessibilityResult),
-            ] {
+                ("accessibility-check", EvidenceClass::AccessibilityResult),
+                ("accessibility-scan", EvidenceClass::AccessibilityResult),
+                ("accessibility:scan", EvidenceClass::AccessibilityResult),
+                ("a11y-scan", EvidenceClass::AccessibilityResult),
+                ("a11y:scan", EvidenceClass::AccessibilityResult),
+                ("performance-result", EvidenceClass::PerformanceResult),
+                ("performance-scan", EvidenceClass::PerformanceResult),
+                ("performance-budget", EvidenceClass::PerformanceResult),
+                ("build", EvidenceClass::BuildOutput),
+            ];
+            for (script, class) in canonical_candidates {
                 if scripts.is_some_and(|items| items.contains_key(script)) {
                     add_discovered_command(
                         &mut collectors,
@@ -1704,6 +1755,76 @@ impl VerificationCollectorPlan {
                         },
                         &format!("package.json scripts.{script}"),
                     );
+                }
+            }
+            if let Some(scripts_map) = scripts {
+                for (script_name, _) in scripts_map {
+                    if let Some(class) = match_package_script_class(script_name) {
+                        add_discovered_command(
+                            &mut collectors,
+                            class,
+                            CommandSpec {
+                                program: manager.into(),
+                                args: vec!["run".into(), script_name.clone()],
+                                working_directory: workspace_root.to_path_buf(),
+                                environment: BTreeMap::new(),
+                            },
+                            &format!("package.json scripts.{script_name}"),
+                        );
+                    }
+                }
+            }
+            if collectors.iter().all(|c| c.evidence_class != EvidenceClass::AccessibilityResult) {
+                let tests_dir = workspace_root.join("tests");
+                if tests_dir.is_dir() {
+                    if let Ok(entries) = fs::read_dir(&tests_dir) {
+                        let mut candidates = Vec::new();
+                        for entry in entries.filter_map(Result::ok) {
+                            let path = entry.path();
+                            if path.is_file() {
+                                let name = path.file_name().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
+                                if (name.contains("accessibility") || name.contains("a11y"))
+                                    && (name.ends_with(".test.js") || name.ends_with(".test.mjs") || name.ends_with(".test.cjs") || name.ends_with(".spec.js"))
+                                {
+                                    candidates.push(path);
+                                }
+                            }
+                        }
+                        candidates.sort();
+                        if let Some(first) = candidates.first() {
+                            let rel = first.strip_prefix(workspace_root).unwrap_or(first).to_string_lossy().replace('\\', "/");
+                            add_discovered_command(
+                                &mut collectors,
+                                EvidenceClass::AccessibilityResult,
+                                CommandSpec {
+                                    program: "node".into(),
+                                    args: vec!["--test".into(), rel.clone()],
+                                    working_directory: workspace_root.to_path_buf(),
+                                    environment: BTreeMap::new(),
+                                },
+                                &format!("discovered accessibility test: {rel}"),
+                            );
+                        }
+                    }
+                }
+                if collectors.iter().all(|c| c.evidence_class != EvidenceClass::AccessibilityResult) {
+                    for script_rel in &["scripts/accessibility-scan.js", "scripts/a11y-scan.js", "accessibility-scan.js", "a11y-scan.js"] {
+                        let script_path = workspace_root.join(script_rel);
+                        if script_path.is_file() {
+                            add_discovered_command(
+                                &mut collectors,
+                                EvidenceClass::AccessibilityResult,
+                                CommandSpec {
+                                    program: "node".into(),
+                                    args: vec![script_rel.to_string()],
+                                    working_directory: workspace_root.to_path_buf(),
+                                    environment: BTreeMap::new(),
+                                },
+                                &format!("discovered accessibility script: {script_rel}"),
+                            );
+                            break;
+                        }
+                    }
                 }
             }
             if project_kind == "unknown" {
@@ -1745,6 +1866,38 @@ impl VerificationCollectorPlan {
                     },
                     "pyproject.toml ruff configuration",
                 );
+            }
+        }
+        if collectors.iter().all(|c| c.evidence_class != EvidenceClass::AccessibilityResult) {
+            let tests_dir = workspace_root.join("tests");
+            if tests_dir.is_dir() {
+                if let Ok(entries) = fs::read_dir(&tests_dir) {
+                    let mut candidates = Vec::new();
+                    for entry in entries.filter_map(Result::ok) {
+                        let path = entry.path();
+                        if path.is_file() {
+                            let name = path.file_name().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
+                            if (name.contains("accessibility") || name.contains("a11y")) && name.ends_with(".py") {
+                                candidates.push(path);
+                            }
+                        }
+                    }
+                    candidates.sort();
+                    if let Some(first) = candidates.first() {
+                        let rel = first.strip_prefix(workspace_root).unwrap_or(first).to_string_lossy().replace('\\', "/");
+                        add_discovered_command(
+                            &mut collectors,
+                            EvidenceClass::AccessibilityResult,
+                            CommandSpec {
+                                program: "python".into(),
+                                args: vec!["-m".into(), "pytest".into(), rel.clone()],
+                                working_directory: workspace_root.to_path_buf(),
+                                environment: BTreeMap::new(),
+                            },
+                            &format!("discovered python accessibility test {rel}"),
+                        );
+                    }
+                }
             }
         }
         let gradle_wrapper = if cfg!(windows) {
@@ -1811,6 +1964,19 @@ struct VerificationPlanFileEntry {
     adapter: Option<String>,
     route: Option<String>,
     threshold: Option<f64>,
+}
+
+fn match_package_script_class(name: &str) -> Option<EvidenceClass> {
+    let normalized = name.to_ascii_lowercase().replace([':', '_'], "-");
+    match normalized.as_str() {
+        "test" | "test-unit" | "test-all" | "tests" | "check-tests" | "test-integration" | "test-e2e" | "test-int" | "test-ci" | "web-test" | "api-test" => Some(EvidenceClass::TestOutput),
+        "lint" | "lint-check" | "check-lint" | "check" | "lint-ci" | "web-lint" | "api-lint" => Some(EvidenceClass::LintStaticAnalysis),
+        "security-scan" | "security" | "sec-scan" | "security-audit" | "audit" | "appsec" | "appsec-scan" | "application-security-scan" | "application-security" => Some(EvidenceClass::SecurityScan),
+        "accessibility-audit" | "accessibility-check" | "accessibility-scan" | "accessibility" | "a11y-audit" | "a11y-check" | "a11y-scan" | "a11y" => Some(EvidenceClass::AccessibilityResult),
+        "performance-result" | "performance-scan" | "performance-budget" | "performance" | "perf-scan" | "perf-budget" | "perf" | "perf-baseline" | "perf-benchmark" | "performance-benchmark" | "perf-test" | "performance-test" => Some(EvidenceClass::PerformanceResult),
+        "build" | "build-prod" | "build-web" | "web-build" | "api-build" => Some(EvidenceClass::BuildOutput),
+        _ => None,
+    }
 }
 
 fn add_discovered_command(
@@ -1890,9 +2056,8 @@ impl ProcessCollector {
             ));
         }
         let started_at_ms = now_ms();
-        let mut process = Command::new(&command.program);
+        let mut process = process_command(command);
         process
-            .args(&command.args)
             .current_dir(&command.working_directory)
             .envs(&command.environment)
             .stdout(Stdio::piped())
@@ -1954,6 +2119,73 @@ impl ProcessCollector {
                 EvidenceResult::Fail
             },
         })
+    }
+}
+
+fn process_command(command: &CommandSpec) -> Command {
+    #[cfg(windows)]
+    if let Some(script) = windows_script_program(&command.program) {
+        let command_line = std::iter::once(script)
+            .chain(command.args.iter().cloned())
+            .map(|argument| quote_cmd_argument(&argument))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut process = Command::new("cmd.exe");
+        process.args(["/D", "/S", "/C"]);
+        // `cmd.exe` parses its `/C` payload itself. A normal `Command::arg`
+        // escapes embedded quotes for CreateProcess, which makes cmd.exe see
+        // literal backslashes. Use a pre-quoted raw payload so `/S /C` can
+        // remove the outer pair and preserve the quoted script path.
+        use std::os::windows::process::CommandExt;
+        process.raw_arg(format!(" \"{command_line}\""));
+        process.creation_flags(0x0800_0000);
+        return process;
+    }
+
+    let mut process = Command::new(&command.program);
+    process.args(&command.args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        process.creation_flags(0x0800_0000);
+    }
+    process
+}
+
+#[cfg(windows)]
+fn windows_script_program(program: &str) -> Option<String> {
+    let path = Path::new(program);
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if extension == "cmd" || extension == "bat" {
+        return Some(program.to_owned());
+    }
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(name.as_str(), "npm" | "npx" | "pnpm" | "yarn") {
+        Some(format!("{program}.cmd"))
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn quote_cmd_argument(argument: &str) -> String {
+    if argument.is_empty() {
+        return "\"\"".into();
+    }
+    if argument.chars().any(|character| {
+        character.is_whitespace() || matches!(character, '"' | '&' | '|' | '<' | '>' | '^')
+    }) {
+        format!("\"{}\"", argument.replace('"', "\\\""))
+    } else {
+        argument.to_owned()
     }
 }
 
@@ -2200,6 +2432,14 @@ pub struct CollectorOrchestrationResult {
     pub blocked_external: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CollectorFailureObservation {
+    evidence_class: EvidenceClass,
+    command_digest: String,
+    error_digest: String,
+    result: EvidenceResult,
+}
+
 /// Rust-owned P8 collector planning and execution. The sealed requirement
 /// graph is the sole source of requirement IDs, evidence classes, and
 /// acceptance criteria. Missing live dependencies are left incomplete rather
@@ -2215,6 +2455,67 @@ impl VerificationCollectorOrchestrator {
         }
     }
 
+    fn persist_collector_failure(
+        &self,
+        binding: &CollectorBinding,
+        class: EvidenceClass,
+        command: &CommandSpec,
+        error: &EvidenceError,
+        store: &EvidenceStore,
+    ) -> Result<(), EvidenceError> {
+        let collector = trusted_collector_identity(class).ok_or_else(|| {
+            EvidenceError::CollectorUnavailable(
+                "no trusted collector identity exists for the failed check".into(),
+            )
+        })?;
+        let command_digest = command.digest()?;
+        let observation = CollectorFailureObservation {
+            evidence_class: class,
+            command_digest: command_digest.clone(),
+            error_digest: sha256(error.to_string().as_bytes()),
+            result: EvidenceResult::Blocked,
+        };
+        let bytes = canonical(&observation)?;
+        let mut failure_binding = binding.clone();
+        failure_binding.evidence_id = format!(
+            "{}-blocked-{}",
+            binding.evidence_id,
+            &observation.error_digest[..16]
+        );
+        if store.load(&failure_binding.evidence_id).is_ok() {
+            return Ok(());
+        }
+        let receipt = failure_binding.receipt(
+            collector,
+            "COLLECTOR_EXECUTION_BLOCKED",
+            command_digest,
+            EvidenceResult::Blocked,
+            class,
+            EvidenceConfidence::Missing,
+            &bytes,
+        )?;
+        store.put(receipt, &bytes)?;
+        Ok(())
+    }
+
+    fn invalidate_resolved_collector_failures(
+        &self,
+        binding: &CollectorBinding,
+        class: EvidenceClass,
+        store: &EvidenceStore,
+    ) -> Result<(), EvidenceError> {
+        let prefix = format!("{}-blocked-", binding.evidence_id);
+        for artifact in store.list()?.into_iter().filter(|artifact| {
+            artifact.metadata.evidence_id.starts_with(&prefix) && artifact.metadata.class == class
+        }) {
+            store.invalidate(
+                &artifact.metadata.evidence_id,
+                "superseded by a successful rerun of the same authenticated collector",
+            )?;
+        }
+        Ok(())
+    }
+
     fn execute_binding(
         &self,
         binding: &CollectorBinding,
@@ -2227,7 +2528,11 @@ impl VerificationCollectorOrchestrator {
         match class {
             EvidenceClass::BuildOutput => {
                 let collected = BuildCollector::default().collect(binding, command)?;
-                store.put(collected.receipt, &collected.artifact_bytes)?;
+                put_collector_receipt_preserving_history(
+                    store,
+                    collected.receipt,
+                    &collected.artifact_bytes,
+                )?;
             }
             EvidenceClass::TestOutput => {
                 let collected = TestCollector::default().collect(
@@ -2236,16 +2541,28 @@ impl VerificationCollectorOrchestrator {
                     project_kind,
                     BTreeSet::new(),
                 )?;
-                store.put(collected.receipt, &collected.artifact_bytes)?;
+                put_collector_receipt_preserving_history(
+                    store,
+                    collected.receipt,
+                    &collected.artifact_bytes,
+                )?;
             }
             EvidenceClass::LintStaticAnalysis => {
                 let collected = StaticAnalysisCollector::default().collect(binding, command)?;
-                store.put(collected.receipt, &collected.artifact_bytes)?;
+                put_collector_receipt_preserving_history(
+                    store,
+                    collected.receipt,
+                    &collected.artifact_bytes,
+                )?;
             }
             EvidenceClass::ApiResponse | EvidenceClass::DatabaseQuery => {
                 let collected =
                     ApiDatabaseCollector::default().collect_for_class(binding, command, class)?;
-                store.put(collected.receipt, &collected.artifact_bytes)?;
+                put_collector_receipt_preserving_history(
+                    store,
+                    collected.receipt,
+                    &collected.artifact_bytes,
+                )?;
             }
             EvidenceClass::BrowserRecording => {
                 let mut adapter = CommandBrowserAdapter {
@@ -2258,7 +2575,11 @@ impl VerificationCollectorOrchestrator {
                     spec.route.as_deref().unwrap_or("/"),
                     &[],
                 )?;
-                store.put(collected.receipt, &collected.artifact_bytes)?;
+                put_collector_receipt_preserving_history(
+                    store,
+                    collected.receipt,
+                    &collected.artifact_bytes,
+                )?;
             }
             EvidenceClass::Screenshot => {
                 let mut adapter = CommandScreenshotAdapter {
@@ -2272,7 +2593,11 @@ impl VerificationCollectorOrchestrator {
                     0,
                     0,
                 )?;
-                store.put(collected.receipt, &collected.artifact_bytes)?;
+                put_collector_receipt_preserving_history(
+                    store,
+                    collected.receipt,
+                    &collected.artifact_bytes,
+                )?;
             }
             EvidenceClass::AccessibilityResult => {
                 let collected = AccessibilityCollector::default().collect_process(
@@ -2280,7 +2605,11 @@ impl VerificationCollectorOrchestrator {
                     command,
                     spec.route.as_deref().unwrap_or("workspace"),
                 )?;
-                store.put(collected.receipt, &collected.artifact_bytes)?;
+                put_collector_receipt_preserving_history(
+                    store,
+                    collected.receipt,
+                    &collected.artifact_bytes,
+                )?;
             }
             EvidenceClass::SecurityScan => {
                 let tool = CollectorIdentity::new(
@@ -2293,12 +2622,23 @@ impl VerificationCollectorOrchestrator {
                     tool,
                     spec.route.as_deref().unwrap_or("workspace"),
                 )?;
-                store.put(collected.receipt, &collected.artifact_bytes)?;
+                put_collector_receipt_preserving_history(
+                    store,
+                    collected.receipt,
+                    &collected.artifact_bytes,
+                )?;
             }
             EvidenceClass::PerformanceResult => {
-                return Err(EvidenceError::CollectorUnavailable(
-                    "performance collector requires a measured value and sealed threshold".into(),
-                ));
+                let collected = PerformanceCollector::default().collect_process(
+                    binding,
+                    command,
+                    spec.route.as_deref().unwrap_or("workspace"),
+                )?;
+                put_collector_receipt_preserving_history(
+                    store,
+                    collected.receipt,
+                    &collected.artifact_bytes,
+                )?;
             }
             _ => {
                 return Err(EvidenceError::CollectorUnavailable(
@@ -2364,6 +2704,33 @@ impl VerificationCollectorOrchestrator {
                 .filter(|item| item.required)
             {
                 let operation = format!("{}:{:?}", requirement.requirement_id, obligation.class);
+                if obligation.class == EvidenceClass::HumanDecision {
+                    let fresh = existing.iter().any(|artifact| {
+                        artifact.metadata.requirement_ids
+                            == vec![requirement.requirement_id.clone()]
+                            && is_user_authored_human_decision_artifact(&artifact.metadata)
+                            && artifact.metadata.result == EvidenceResult::Pass
+                            && confidence_meets(
+                                artifact.metadata.confidence,
+                                obligation.minimum_confidence,
+                            )
+                            && p7_execution.is_none_or(|p7| {
+                                p7.validates_evidence_metadata(authority, &artifact.metadata)
+                                    .is_ok_and(|valid| valid)
+                            })
+                            && store
+                                .freshness(&artifact.metadata.evidence_id, current)
+                                .is_ok_and(|value| value == EvidenceFreshness::Fresh)
+                    });
+                    if fresh {
+                        result.reused_fresh.push(operation);
+                        continue;
+                    }
+                    result.blocked_external.push(format!(
+                        "{operation}: an explicit user decision is required; Relintor will not infer or generate HUMAN_DECISION evidence"
+                    ));
+                    continue;
+                }
                 let Some(spec) = plan.for_class(obligation.class) else {
                     result.blocked_external.push(format!(
                         "{operation}: no trusted collector was discovered for {:?}",
@@ -2441,11 +2808,19 @@ impl VerificationCollectorOrchestrator {
                         &plan.project_kind,
                         store,
                     ) {
+                        let _ = self.persist_collector_failure(
+                            &binding,
+                            obligation.class,
+                            &command,
+                            &error,
+                            store,
+                        );
                         result
                             .blocked_external
                             .push(format!("{operation}: {error}"));
                         continue;
                     }
+                    self.invalidate_resolved_collector_failures(&binding, obligation.class, store)?;
                     result.executed.push(format!(
                         "{operation} via {} ({})",
                         command.program, spec.provenance
@@ -2519,11 +2894,19 @@ impl VerificationCollectorOrchestrator {
                         &plan.project_kind,
                         store,
                     ) {
+                        let _ = self.persist_collector_failure(
+                            &binding,
+                            obligation.class,
+                            &command,
+                            &error,
+                            store,
+                        );
                         result
                             .blocked_external
                             .push(format!("{criterion_operation}: {error}"));
                         continue;
                     }
+                    self.invalidate_resolved_collector_failures(&binding, obligation.class, store)?;
                     result.executed.push(format!(
                         "{criterion_operation} via {} ({}) probe={}",
                         command.program, spec.provenance, probe.probe_identity
@@ -2569,6 +2952,44 @@ impl VerificationCollectorOrchestrator {
             authority, current, store, None, protected,
         )
     }
+}
+
+fn put_collector_receipt_preserving_history(
+    store: &EvidenceStore,
+    mut receipt: CollectorReceipt,
+    bytes: &[u8],
+) -> Result<EvidenceArtifact, EvidenceError> {
+    let base_id = receipt.evidence_id.clone();
+    let mut retry_count: u32 = 0;
+    loop {
+        let needs_retargeting = match store.load(&receipt.evidence_id) {
+            Ok(existing) => {
+                if let Ok(candidate) = receipt.clone().into_metadata(bytes) {
+                    existing.bytes != bytes || existing.artifact.metadata != candidate
+                } else {
+                    true
+                }
+            }
+            Err(_) => store.is_revoked(&receipt.evidence_id).unwrap_or(false),
+        };
+
+        if !needs_retargeting {
+            break;
+        }
+
+        retry_count += 1;
+        let retry_digest = sha256(&canonical(&(
+            &base_id,
+            &receipt.class,
+            &receipt.command_digest,
+            &receipt.result,
+            sha256(bytes),
+            retry_count,
+        ))?);
+        receipt.evidence_id = format!("{base_id}-rerun-{}", &retry_digest[..16]);
+        receipt.integrity = sha256(&receipt.signing_body()?);
+    }
+    store.put(receipt, bytes)
 }
 
 impl StaticAnalysisCollector {
@@ -2646,6 +3067,261 @@ pub struct PerformanceObservation {
     pub unit: String,
     pub probe_definition: String,
     pub result: EvidenceResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PerformanceProcessObservation {
+    pub probe_definition: String,
+    pub process: ProcessEvidence,
+    pub result: EvidenceResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HumanDecisionObservation {
+    pub requirement_id: String,
+    pub source_reference: String,
+    pub sealed_requirement_digest: String,
+    pub accepted_criteria: BTreeSet<String>,
+    pub seal_hash: String,
+    pub result: EvidenceResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExplicitUserDecisionObservation {
+    pub requirement_id: String,
+    pub source_reference: String,
+    pub sealed_requirement_digest: String,
+    pub accepted_criteria: BTreeSet<String>,
+    pub seal_hash: String,
+    pub approved: bool,
+    pub notes: String,
+    pub recorded_at_ms: u64,
+    pub result: EvidenceResult,
+}
+
+#[derive(Default)]
+pub struct ExplicitUserDecisionRecorder;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplicitUserDecisionInput<'a> {
+    pub requirement_id: &'a str,
+    pub approved: bool,
+    pub notes: &'a str,
+}
+
+impl ExplicitUserDecisionRecorder {
+    pub fn record(
+        &self,
+        authority: &VerificationAuthority,
+        current: &FreshnessContext,
+        store: &EvidenceStore,
+        p7_execution: &AuthenticatedP7Execution,
+        input: ExplicitUserDecisionInput<'_>,
+    ) -> Result<EvidenceArtifact, EvidenceError> {
+        let requirement_id = input.requirement_id;
+        let approved = input.approved;
+        let notes = input.notes.trim();
+        if notes.len() > 4_000 {
+            return Err(EvidenceError::InvalidInput(
+                "user decision notes exceed the 4,000 character limit".into(),
+            ));
+        }
+        let requirement = authority
+            .revision
+            .contract
+            .requirement_graph
+            .requirements
+            .iter()
+            .find(|item| item.requirement_id == requirement_id)
+            .ok_or_else(|| {
+                EvidenceError::InvalidAuthority(
+                    "user decision does not match a sealed requirement".into(),
+                )
+            })?;
+        let source_reference = sealed_user_decision_source(requirement)?;
+        if !requirement
+            .verification_policy
+            .obligations
+            .iter()
+            .any(|item| {
+                item.required
+                    && item.class == EvidenceClass::HumanDecision
+                    && confidence_meets(EvidenceConfidence::HumanAsserted, item.minimum_confidence)
+            })
+        {
+            return Err(EvidenceError::InvalidAuthority(
+                "sealed requirement does not authorize explicit human decision evidence".into(),
+            ));
+        }
+        let accepted_criteria = requirement
+            .acceptance_criteria
+            .iter()
+            .filter(|criterion| !criterion.machine_checkable)
+            .map(|criterion| criterion.criterion_id.clone())
+            .collect::<BTreeSet<_>>();
+        if accepted_criteria.is_empty() {
+            return Err(EvidenceError::InvalidAuthority(
+                "sealed human decision has no user-review criterion".into(),
+            ));
+        }
+        let decision_digest = sha256(&canonical(&(
+            authority.identity_digest()?,
+            requirement_id,
+            approved,
+            notes,
+        ))?);
+        let evidence_id = format!(
+            "p8-user-decision-{requirement_id}-{}",
+            &decision_digest[..16]
+        );
+        let recorded_at_ms = now_ms();
+        let collector = CollectorIdentity::new(EXPLICIT_USER_DECISION_COLLECTOR, "p8-v1");
+        let probe_identity = "EXPLICIT_USER_ACTION".to_string();
+        let command_digest = sha256(&canonical(&(
+            &collector,
+            &probe_identity,
+            requirement_id,
+            approved,
+            notes,
+        ))?);
+        let plan_digest = sha256(&canonical(&(
+            authority.identity_digest()?,
+            requirement_id,
+            &accepted_criteria,
+            &collector,
+            &probe_identity,
+            &command_digest,
+        ))?);
+        let mut bound_requirement_ids = vec![requirement_id.to_string()];
+        let mut all_accepted_criteria = accepted_criteria.clone();
+        for other in &authority.revision.contract.requirement_graph.requirements {
+            if other.requirement_id != requirement_id
+                && is_human_decision_semantic_equivalent(requirement, other)
+            {
+                if !bound_requirement_ids.contains(&other.requirement_id) {
+                    bound_requirement_ids.push(other.requirement_id.clone());
+                }
+                for criterion in &other.acceptance_criteria {
+                    if !criterion.machine_checkable {
+                        all_accepted_criteria.insert(criterion.criterion_id.clone());
+                    }
+                }
+            }
+        }
+        let mut binding = CollectorBinding::from_authority_internal(
+            authority,
+            current,
+            evidence_id,
+            bound_requirement_ids.clone(),
+            true,
+            all_accepted_criteria.clone(),
+            BTreeSet::new(),
+        )?;
+        binding.criterion_provenance = all_accepted_criteria
+            .iter()
+            .map(|criterion_id| {
+                let req_id = authority
+                    .revision
+                    .contract
+                    .requirement_graph
+                    .requirements
+                    .iter()
+                    .find(|r| {
+                        r.acceptance_criteria
+                            .iter()
+                            .any(|c| &c.criterion_id == criterion_id)
+                    })
+                    .map(|r| r.requirement_id.as_str())
+                    .unwrap_or(requirement_id);
+                CriterionVerificationPlan {
+                    mission_id: authority.revision.seal.mission_id.clone(),
+                    mission_revision: authority.revision.revision,
+                    project_id: authority.revision.seal.project_id.clone(),
+                    p6_seal_hash: authority.revision.seal.contract_hash.clone(),
+                    requirement_id: req_id.into(),
+                    criterion_id: criterion_id.clone(),
+                    evidence_class: EvidenceClass::HumanDecision,
+                    collector_identity: collector.clone(),
+                    probe_identity: probe_identity.clone(),
+                    command_digest: command_digest.clone(),
+                    verification_plan_authority_digest: plan_digest.clone(),
+                }
+            })
+            .collect();
+        let current_identities = p7_execution.identities_for_requirement(authority, requirement_id)?;
+        let current_attempt = current_identities.first().map(|i| i.attempt_number).unwrap_or(0);
+        if let Ok(all_artifacts) = store.list() {
+            for artifact in &all_artifacts {
+                if artifact.metadata.mission_id == authority.revision.seal.mission_id
+                    && artifact.metadata.mission_revision == authority.revision.revision
+                    && artifact.metadata.class == EvidenceClass::HumanDecision
+                    && is_user_authored_human_decision_artifact(&artifact.metadata)
+                {
+                    let is_target = bound_requirement_ids.iter().any(|id| artifact.metadata.requirement_ids.contains(id));
+                    let is_semantic_sibling = authority
+                        .revision
+                        .contract
+                        .requirement_graph
+                        .requirements
+                        .iter()
+                        .any(|other| {
+                            bound_requirement_ids.contains(&other.requirement_id)
+                                || (artifact.metadata.requirement_ids.contains(&other.requirement_id)
+                                    && is_human_decision_semantic_equivalent(requirement, other))
+                        });
+                    if is_target || is_semantic_sibling {
+                        let existing_approved = artifact.metadata.result == EvidenceResult::Pass;
+                        let is_same_attempt = artifact.metadata.p7_attempt.is_none()
+                            || artifact.metadata.p7_attempt == Some(current_attempt);
+                        if is_same_attempt {
+                            if approved != existing_approved {
+                                return Err(EvidenceError::InvalidAuthority(
+                                    "conflicting human decision: cannot alter an existing human decision on this mission outcome without an authorized revision".into(),
+                                ));
+                            } else {
+                                // Idempotent repetition of identical decision
+                                return Ok(artifact.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        binding = binding.bind_successful_execution(p7_execution, authority, requirement_id)?;
+        if let Ok(existing) = store.load(&binding.evidence_id) {
+            return Ok(existing.artifact);
+        }
+        let result = if approved {
+            EvidenceResult::Pass
+        } else {
+            EvidenceResult::Fail
+        };
+        let observation = ExplicitUserDecisionObservation {
+            requirement_id: requirement_id.into(),
+            source_reference,
+            sealed_requirement_digest: requirement
+                .sealed_hash
+                .clone()
+                .ok_or_else(|| EvidenceError::InvalidAuthority("sealed hash is missing".into()))?,
+            accepted_criteria: all_accepted_criteria,
+            seal_hash: authority.revision.seal.contract_hash.clone(),
+            approved,
+            notes: notes.into(),
+            recorded_at_ms,
+            result,
+        };
+        let bytes = canonical(&observation)?;
+        let receipt = binding.receipt(
+            collector,
+            &probe_identity,
+            command_digest,
+            result,
+            EvidenceClass::HumanDecision,
+            EvidenceConfidence::HumanAsserted,
+            &bytes,
+        )?;
+        store.put(receipt, &bytes)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3292,9 +3968,41 @@ impl AccessibilityCollector {
     }
 }
 
-pub struct PerformanceCollector;
+#[derive(Default)]
+pub struct PerformanceCollector {
+    process: ProcessCollector,
+}
 
 impl PerformanceCollector {
+    pub fn collect_process(
+        &self,
+        binding: &CollectorBinding,
+        command: &CommandSpec,
+        probe_definition: &str,
+    ) -> Result<CollectedEvidence<PerformanceProcessObservation>, EvidenceError> {
+        let process = self.process.run(command)?;
+        let bytes = process_output_bytes(&process)?;
+        let observation = PerformanceProcessObservation {
+            probe_definition: probe_definition.into(),
+            process: process.clone(),
+            result: process.result,
+        };
+        let receipt = binding.receipt(
+            CollectorIdentity::new("performance-collector", "p8-v1"),
+            "CONFIGURED_PERFORMANCE_PROCESS",
+            command.digest()?,
+            process.result,
+            EvidenceClass::PerformanceResult,
+            EvidenceConfidence::StrongRuntime,
+            &bytes,
+        )?;
+        Ok(CollectedEvidence {
+            receipt,
+            observation,
+            artifact_bytes: bytes,
+        })
+    }
+
     pub fn measure(
         &self,
         binding: &CollectorBinding,
@@ -3332,6 +4040,1738 @@ impl PerformanceCollector {
             observation,
             artifact_bytes: bytes,
         })
+    }
+}
+
+fn sealed_user_decision_source(requirement: &Requirement) -> Result<String, EvidenceError> {
+    if requirement.requirement_type != "decision" {
+        return Err(EvidenceError::InvalidAuthority(
+            "human decision evidence requires a sealed decision requirement".into(),
+        ));
+    }
+    if requirement
+        .sealed_hash
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        return Err(EvidenceError::InvalidAuthority(
+            "human decision evidence requires the requirement to be sealed".into(),
+        ));
+    }
+    match &requirement.source {
+        RequirementSource::User { reference } if !reference.trim().is_empty() => {
+            Ok(reference.clone())
+        }
+        _ => Err(EvidenceError::InvalidAuthority(
+            "human decision evidence may only attest a directly user-authored sealed decision"
+                .into(),
+        )),
+    }
+}
+
+pub fn normalize_decision_intent(intent: &str) -> String {
+    let s = intent.trim();
+    let prefix = "The owner needs a reliable way to turn this outcome into an agreed, reviewable product plan:";
+    let stripped = if let Some(rest) = s.strip_prefix(prefix) {
+        rest.trim()
+    } else {
+        s
+    };
+    stripped
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+pub fn is_human_decision_semantic_equivalent(
+    r1: &Requirement,
+    r2: &Requirement,
+) -> bool {
+    if r1.requirement_id == r2.requirement_id {
+        return true;
+    }
+    let r1_has_hd = r1.requirement_type == "decision"
+        || r1
+            .verification_policy
+            .obligations
+            .iter()
+            .any(|o| o.class == EvidenceClass::HumanDecision && o.required);
+    let r2_has_hd = r2.requirement_type == "decision"
+        || r2
+            .verification_policy
+            .obligations
+            .iter()
+            .any(|o| o.class == EvidenceClass::HumanDecision && o.required);
+    if !r1_has_hd || !r2_has_hd {
+        return false;
+    }
+    let norm1 = normalize_decision_intent(&r1.intent);
+    let norm2 = normalize_decision_intent(&r2.intent);
+    !norm1.is_empty() && norm1 == norm2
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CorrectionUnit {
+    pub correction_id: String,
+    pub semantic_finding: String,
+    pub triggering_human_decision: String,
+    pub affected_requirements: Vec<String>,
+    pub affected_tasks: Vec<String>,
+    pub affected_source_or_artifact_scope: Vec<String>,
+    pub why_scope_is_included: String,
+    pub required_fresh_evidence: Vec<String>,
+    pub dependencies: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum PathType {
+    File,
+    Directory,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum PermittedOperation {
+    Read,
+    Modify,
+    CreateWithin,
+    Delete,
+    Rename,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeRefinementEntry {
+    pub path: String,
+    pub path_type: PathType,
+    pub reason: String,
+    pub target_task_id: String,
+    #[serde(default)]
+    pub correction_unit_ids: Vec<String>,
+    #[serde(default)]
+    pub requirement_ids: Vec<String>,
+    #[serde(default)]
+    pub permitted_operations: Vec<PermittedOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HumanScopeRefinement {
+    pub mission_id: String,
+    pub revision: u64,
+    pub originating_evidence_id: String,
+    pub entries: Vec<ScopeRefinementEntry>,
+    pub last_modified_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopePathError {
+    EmptyPath,
+    TraversalForbidden,
+    OutsideWorkspace,
+    DriveMismatch,
+    UncPathForbidden,
+    DevicePathForbidden,
+    SymlinkEscapeForbidden,
+    InvalidPathFormat(String),
+    ParentDirectoryNotAuthorized(String),
+    OperationNotPermitted(String),
+}
+
+impl std::fmt::Display for ScopePathError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScopePathError::EmptyPath => write!(f, "Path cannot be empty"),
+            ScopePathError::TraversalForbidden => write!(f, "Path traversal (..) is forbidden"),
+            ScopePathError::OutsideWorkspace => write!(f, "Path must be strictly within workspace root"),
+            ScopePathError::DriveMismatch => write!(f, "Path must reside on the same drive as the workspace"),
+            ScopePathError::UncPathForbidden => write!(f, "UNC network paths are forbidden"),
+            ScopePathError::DevicePathForbidden => write!(f, "Device and \\\\?\\ namespace paths are forbidden"),
+            ScopePathError::SymlinkEscapeForbidden => write!(f, "Symlink or reparse point escaping workspace is forbidden"),
+            ScopePathError::InvalidPathFormat(e) => write!(f, "Invalid path format: {e}"),
+            ScopePathError::ParentDirectoryNotAuthorized(e) => write!(f, "Parent directory not authorized for file creation: {e}"),
+            ScopePathError::OperationNotPermitted(e) => write!(f, "Operation not permitted: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ScopePathError {}
+
+pub fn validate_and_canonicalize_scope_path(
+    workspace_root: &std::path::Path,
+    input_path: &str,
+    _path_type: PathType,
+) -> Result<String, ScopePathError> {
+    let trimmed = input_path.trim();
+    if trimmed.is_empty() {
+        return Err(ScopePathError::EmptyPath);
+    }
+
+    // Reject Device namespaces e.g. \\?\ or \\.\ or //?/
+    if trimmed.starts_with(r"\\?\")
+        || trimmed.starts_with(r"\\.\")
+        || trimmed.starts_with(r"//?/")
+        || trimmed.starts_with(r"//./")
+    {
+        return Err(ScopePathError::DevicePathForbidden);
+    }
+
+    // Reject UNC paths e.g. \\server\share or //server/share
+    if trimmed.starts_with(r"\\") || trimmed.starts_with("//") {
+        return Err(ScopePathError::UncPathForbidden);
+    }
+
+    // Normalize forward slashes
+    let normalized = trimmed.replace('\\', "/");
+
+    // Check for traversal components before resolution
+    for part in normalized.split('/') {
+        if part == ".." {
+            return Err(ScopePathError::TraversalForbidden);
+        }
+    }
+
+    // Check for invalid chars / NUL
+    if trimmed.contains('\0') {
+        return Err(ScopePathError::InvalidPathFormat("Path contains null byte".into()));
+    }
+
+    // Canonicalize workspace root if possible, or use clean Path
+    let canon_ws = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
+
+    // If input is absolute path:
+    let candidate = if std::path::Path::new(trimmed).is_absolute() {
+        std::path::PathBuf::from(trimmed)
+    } else {
+        workspace_root.join(trimmed)
+    };
+
+    // Check drive letters on Windows if candidate has prefix
+    let ws_drive = match canon_ws.components().next() {
+        Some(std::path::Component::Prefix(p)) => match p.kind() {
+            std::path::Prefix::Disk(c) | std::path::Prefix::VerbatimDisk(c) => Some((c as char).to_ascii_uppercase()),
+            _ => None,
+        },
+        _ => None,
+    };
+    let cand_drive = match candidate.components().next() {
+        Some(std::path::Component::Prefix(p)) => match p.kind() {
+            std::path::Prefix::Disk(c) | std::path::Prefix::VerbatimDisk(c) => Some((c as char).to_ascii_uppercase()),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let (Some(d1), Some(d2)) = (ws_drive, cand_drive) {
+        if d1 != d2 {
+            return Err(ScopePathError::DriveMismatch);
+        }
+    }
+
+    // If candidate file/dir exists on disk, canonicalize and check containment
+    if candidate.exists() {
+        let canon_cand = candidate
+            .canonicalize()
+            .map_err(|_| ScopePathError::OutsideWorkspace)?;
+
+        // Ensure canon_cand starts with canon_ws
+        if !canon_cand.starts_with(&canon_ws) {
+            return Err(ScopePathError::OutsideWorkspace);
+        }
+
+        let rel = canon_cand
+            .strip_prefix(&canon_ws)
+            .map_err(|_| ScopePathError::OutsideWorkspace)?;
+
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if rel_str.is_empty() {
+            return Err(ScopePathError::InvalidPathFormat("Cannot target workspace root as a file scope".into()));
+        }
+        Ok(rel_str)
+    } else {
+        // If candidate does NOT exist yet, check closest existing ancestor for symlink escape
+        let mut cur = candidate.as_path();
+        while !cur.exists() {
+            match cur.parent() {
+                Some(p) => cur = p,
+                None => break,
+            }
+        }
+        if cur.exists() {
+            if let Ok(canon_parent) = cur.canonicalize() {
+                if !canon_parent.starts_with(&canon_ws) {
+                    return Err(ScopePathError::SymlinkEscapeForbidden);
+                }
+            }
+        }
+
+        // Logical containment check
+        let rel_candidate = if std::path::Path::new(trimmed).is_absolute() {
+            candidate
+                .strip_prefix(workspace_root)
+                .map_err(|_| ScopePathError::OutsideWorkspace)?
+        } else {
+            std::path::Path::new(trimmed)
+        };
+
+        let clean_rel = rel_candidate.to_string_lossy().replace('\\', "/");
+        let clean_rel = clean_rel.trim_start_matches('/').to_string();
+        if clean_rel.is_empty() {
+            return Err(ScopePathError::InvalidPathFormat("Path cannot be empty or root".into()));
+        }
+        Ok(clean_rel)
+    }
+}
+
+pub fn validate_new_file_creation(
+    workspace_root: &std::path::Path,
+    file_path: &str,
+    refinement_entries: &[ScopeRefinementEntry],
+) -> Result<String, ScopePathError> {
+    let clean_path = validate_and_canonicalize_scope_path(workspace_root, file_path, PathType::File)?;
+
+    let parent_dir = std::path::Path::new(&clean_path)
+        .parent()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+
+    let authorized_parent = refinement_entries.iter().any(|entry| {
+        entry.path_type == PathType::Directory
+            && entry.permitted_operations.contains(&PermittedOperation::CreateWithin)
+            && (entry.path == parent_dir || (entry.path == "." && parent_dir.is_empty()) || parent_dir.starts_with(&format!("{}/", entry.path)))
+    });
+
+    if !authorized_parent {
+        return Err(ScopePathError::ParentDirectoryNotAuthorized(format!(
+            "Parent directory '{parent_dir}' must be authorized with CreateWithin permission to create '{clean_path}'"
+        )));
+    }
+
+    Ok(clean_path)
+}
+
+pub fn validate_file_deletion(
+    clean_path: &str,
+    refinement_entries: &[ScopeRefinementEntry],
+) -> Result<(), ScopePathError> {
+    let permitted = refinement_entries.iter().any(|entry| {
+        (entry.path == clean_path || (entry.path_type == PathType::Directory && clean_path.starts_with(&format!("{}/", entry.path))))
+            && entry.permitted_operations.contains(&PermittedOperation::Delete)
+    });
+    if !permitted {
+        return Err(ScopePathError::OperationNotPermitted(format!(
+            "Delete operation not permitted for '{clean_path}'"
+        )));
+    }
+    Ok(())
+}
+
+pub fn validate_file_rename(
+    clean_path: &str,
+    refinement_entries: &[ScopeRefinementEntry],
+) -> Result<(), ScopePathError> {
+    let permitted = refinement_entries.iter().any(|entry| {
+        (entry.path == clean_path || (entry.path_type == PathType::Directory && clean_path.starts_with(&format!("{}/", entry.path))))
+            && entry.permitted_operations.contains(&PermittedOperation::Rename)
+    });
+    if !permitted {
+        return Err(ScopePathError::OperationNotPermitted(format!(
+            "Rename operation not permitted for '{clean_path}'"
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CorrectionTaskScopeView {
+    pub workspace: String,
+    pub file_scopes: Vec<String>,
+    pub directory_scopes: Vec<String>,
+    pub package_lockfiles: Vec<String>,
+    pub allowed_tools: Vec<String>,
+    pub suggested_scope: Option<String>,
+    pub bounded_file_scopes: Vec<String>,
+    pub authority_boundary_type: String,
+    pub is_bounded: bool,
+    #[serde(default)]
+    pub refinement_entries: Vec<ScopeRefinementEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CorrectionTaskPreview {
+    pub task_id: String,
+    pub title: String,
+    pub objective: String,
+    pub why_included: String,
+    pub triggering_requirement_ids: Vec<String>,
+    pub triggering_requirement_titles: Vec<String>,
+    pub scope_relation: String,
+    pub dependency_reason: Option<String>,
+    pub authorized_scope: CorrectionTaskScopeView,
+    pub expected_outcome: String,
+    pub required_fresh_evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CorrectionScopeView {
+    pub mission_id: String,
+    pub revision: u64,
+    pub originating_evidence_id: String,
+    pub user_rejection_notes: String,
+    pub semantic_correction_authorities: usize,
+    pub duplicate_correction_work: usize,
+    pub unrelated_tasks: usize,
+    pub project_wide_unbounded_authority: bool,
+    pub technical_findings_with_only_humandecision_evidence: usize,
+    pub failed_requirement_ids: Vec<String>,
+    pub failed_requirement_titles: Vec<String>,
+    pub blocked_requirement_ids: Vec<String>,
+    pub blocked_requirement_titles: Vec<String>,
+    pub affected_task_ids: Vec<String>,
+    pub deduplicated_task_ids: Vec<String>,
+    pub preserved_task_ids: Vec<String>,
+    pub preserved_task_count: usize,
+    pub correction_units: Vec<CorrectionUnit>,
+    pub proposed_tasks: Vec<CorrectionTaskPreview>,
+    pub scope_hash: String,
+    pub authorized: bool,
+    pub human_refinement_required: bool,
+    #[serde(default)]
+    pub human_scope_refinement: Option<HumanScopeRefinement>,
+    #[serde(default)]
+    pub missing_provenance_tasks: Vec<String>,
+    #[serde(default)]
+    pub user_reauthorization_required: bool,
+    #[serde(default)]
+    pub escalation_reason: Option<String>,
+}
+
+pub fn parse_rejection_notes_to_findings(notes: &str) -> Vec<String> {
+    let trimmed = notes.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    // Normalize inline numbered patterns like " 1. ", ": 1. ", or "\n1. "
+    let mut normalized = String::with_capacity(trimmed.len() + 32);
+    let bytes = trimmed.as_bytes();
+    let n = bytes.len();
+    let mut i = 0;
+    while i < n {
+        let is_at_boundary = i == 0
+            || bytes[i - 1].is_ascii_whitespace()
+            || bytes[i - 1] == b':'
+            || bytes[i - 1] == b';';
+        if is_at_boundary && bytes[i].is_ascii_digit() {
+            let mut j = i;
+            while j < n && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j < n && (bytes[j] == b'.' || bytes[j] == b')') {
+                let after_punct = j + 1;
+                if after_punct < n && (bytes[after_punct] == b' ' || bytes[after_punct] == b'\t' || bytes[after_punct] == b'\n') {
+                    if !normalized.is_empty() && !normalized.ends_with('\n') {
+                        normalized.push('\n');
+                    }
+                    normalized.push_str(&trimmed[i..=j]);
+                    normalized.push(' ');
+                    i = after_punct + 1;
+                    continue;
+                }
+            }
+        }
+        let ch = trimmed[i..].chars().next().unwrap();
+        normalized.push(ch);
+        i += ch.len_utf8();
+    }
+
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut in_numbered = false;
+
+    for line in normalized.lines() {
+        let l_trim = line.trim();
+        let is_numbered = l_trim
+            .split_once('.')
+            .or_else(|| l_trim.split_once(')'))
+            .map(|(num, _)| !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()))
+            .unwrap_or(false);
+        let is_bullet = l_trim.starts_with("- ") || l_trim.starts_with("* ");
+
+        if is_numbered || is_bullet {
+            in_numbered = true;
+            if !current.trim().is_empty() {
+                items.push(current.trim().to_string());
+                current.clear();
+            }
+            current.push_str(line);
+            current.push('\n');
+        } else if in_numbered {
+            if l_trim.is_empty() {
+                current.push('\n');
+            } else if line.starts_with("   ") || line.starts_with('\t') || line.starts_with("  ") {
+                current.push_str(line);
+                current.push('\n');
+            } else if l_trim.to_lowercase().starts_with("do not issue")
+                || l_trim.to_lowercase().starts_with("generate only")
+                || l_trim.to_lowercase().starts_with("scoped correction")
+            {
+                if !current.trim().is_empty() {
+                    items.push(current.trim().to_string());
+                    current.clear();
+                }
+                in_numbered = false;
+            } else {
+                current.push_str(line);
+                current.push('\n');
+            }
+        } else {
+            if l_trim.is_empty() {
+                if !current.trim().is_empty() {
+                    items.push(current.trim().to_string());
+                    current.clear();
+                }
+            } else {
+                current.push_str(line);
+                current.push('\n');
+            }
+        }
+    }
+
+    if !current.trim().is_empty() {
+        items.push(current.trim().to_string());
+    }
+
+    let mut filtered = Vec::new();
+    for it in items {
+        let lower = it.to_lowercase();
+        if lower.starts_with("rejected after")
+            || lower.starts_with("the implementation contains")
+            || lower.starts_with("do not issue")
+            || lower.starts_with("generate only")
+            || lower.starts_with("scoped correction")
+        {
+            continue;
+        }
+        filtered.push(it);
+    }
+
+    if filtered.is_empty() && !trimmed.is_empty() {
+        vec![trimmed.to_string()]
+    } else {
+        filtered
+    }
+}
+
+pub fn derive_bounded_correction_scope(
+    mission_id: &str,
+    revision: u64,
+    contract_requirements: &[Requirement],
+    contract_tasks: &[relintor_standards::Task],
+    contract_dependencies: &[relintor_standards::TaskDependency],
+    requirement_statuses: &[RequirementVerification],
+    run: &ExecutionRun,
+    originating_evidence_id: &str,
+    user_rejection_notes: &str,
+    provenance_paths_by_task: &BTreeMap<String, Vec<String>>,
+    refinement: Option<&HumanScopeRefinement>,
+) -> Option<CorrectionScopeView> {
+    if originating_evidence_id.is_empty() {
+        return None;
+    }
+
+    let mut failed_requirement_ids = Vec::new();
+    let mut blocked_requirement_ids = Vec::new();
+
+    for status in requirement_statuses {
+        if status.status == RequirementStatus::Failed {
+            failed_requirement_ids.push(status.requirement_id.clone());
+        } else if status.status == RequirementStatus::Blocked
+            || (!status.missing_obligations.is_empty()
+                && status.status != RequirementStatus::Verified)
+        {
+            blocked_requirement_ids.push(status.requirement_id.clone());
+        }
+    }
+
+    failed_requirement_ids.sort();
+    failed_requirement_ids.dedup();
+    blocked_requirement_ids.sort();
+    blocked_requirement_ids.dedup();
+
+    if failed_requirement_ids.is_empty() && blocked_requirement_ids.is_empty() {
+        return None;
+    }
+
+    let req_map: BTreeMap<&str, &Requirement> = contract_requirements
+        .iter()
+        .map(|r| (r.requirement_id.as_str(), r))
+        .collect();
+
+    let contract_task_map: BTreeMap<&str, &relintor_standards::Task> = contract_tasks
+        .iter()
+        .map(|t| (t.task_id.as_str(), t))
+        .collect();
+
+    let failed_requirement_titles: Vec<String> = failed_requirement_ids
+        .iter()
+        .map(|id| {
+            req_map
+                .get(id.as_str())
+                .map(|r| r.title.clone())
+                .unwrap_or_else(|| id.clone())
+        })
+        .collect();
+
+    let blocked_requirement_titles: Vec<String> = blocked_requirement_ids
+        .iter()
+        .map(|id| {
+            req_map
+                .get(id.as_str())
+                .map(|r| r.title.clone())
+                .unwrap_or_else(|| id.clone())
+        })
+        .collect();
+
+    let unverified_reqs: BTreeSet<String> = failed_requirement_ids
+        .iter()
+        .chain(blocked_requirement_ids.iter())
+        .cloned()
+        .collect();
+
+    // Semantic clustering of failed/blocked HumanDecision requirements
+    let mut decision_clusters: Vec<Vec<String>> = Vec::new();
+    for req_id in &failed_requirement_ids {
+        if let Some(req) = req_map.get(req_id.as_str()) {
+            let is_hd = req.requirement_type == "decision"
+                || req
+                    .verification_policy
+                    .obligations
+                    .iter()
+                    .any(|o| o.class == EvidenceClass::HumanDecision);
+            if is_hd {
+                let mut matched_cluster = false;
+                for cluster in &mut decision_clusters {
+                    if let Some(first_req) = req_map.get(cluster[0].as_str()) {
+                        if is_human_decision_semantic_equivalent(first_req, req) {
+                            cluster.push(req_id.clone());
+                            matched_cluster = true;
+                            break;
+                        }
+                    }
+                }
+                if !matched_cluster {
+                    decision_clusters.push(vec![req_id.clone()]);
+                }
+            }
+        }
+    }
+
+    let semantic_correction_authorities = if decision_clusters.is_empty() {
+        failed_requirement_ids.len()
+    } else {
+        decision_clusters.len()
+    };
+
+    // Determine canonical tasks and deduplicated tasks for HumanDecision clusters
+    let mut deduplicated_task_ids = Vec::new();
+    let mut canonical_tasks_by_cluster = Vec::new();
+
+    for cluster in &decision_clusters {
+        let cluster_set: BTreeSet<&str> = cluster.iter().map(|s| s.as_str()).collect();
+        let mut matching_tasks = Vec::new();
+        for task in run.tasks.values() {
+            if task.requirement_ids.iter().any(|r| cluster_set.contains(r.as_str())) {
+                matching_tasks.push(task.task_id.clone());
+            }
+        }
+        matching_tasks.sort();
+
+        if matching_tasks.is_empty() {
+            continue;
+        }
+
+        let canonical_task_id = matching_tasks
+            .iter()
+            .find(|tid| provenance_paths_by_task.contains_key(*tid))
+            .cloned()
+            .unwrap_or_else(|| matching_tasks[0].clone());
+
+        canonical_tasks_by_cluster.push(canonical_task_id.clone());
+
+        for tid in matching_tasks {
+            if tid != canonical_task_id {
+                if let Some(task) = run.tasks.get(&tid) {
+                    let has_other_unverified = task
+                        .requirement_ids
+                        .iter()
+                        .any(|r| unverified_reqs.contains(r) && !cluster_set.contains(r.as_str()));
+                    if !has_other_unverified {
+                        deduplicated_task_ids.push(tid);
+                    }
+                }
+            }
+        }
+    }
+    deduplicated_task_ids.sort();
+    deduplicated_task_ids.dedup();
+
+    let deduplicated_set: BTreeSet<&str> = deduplicated_task_ids.iter().map(|s| s.as_str()).collect();
+
+    // Determine affected tasks (excluding deduplicated tasks)
+    let mut affected = BTreeSet::new();
+    for task in run.tasks.values() {
+        if deduplicated_set.contains(task.task_id.as_str()) {
+            continue;
+        }
+        if task.requirement_ids.iter().any(|r| unverified_reqs.contains(r)) {
+            affected.insert(task.task_id.clone());
+        }
+    }
+
+    // Downstream dependency propagation
+    loop {
+        let mut changed = false;
+        for task in run.tasks.values() {
+            if !affected.contains(&task.task_id)
+                && !deduplicated_set.contains(task.task_id.as_str())
+                && task.dependency_ids.iter().any(|dep| affected.contains(dep))
+            {
+                affected.insert(task.task_id.clone());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let affected_vec: Vec<String> = affected.iter().cloned().collect();
+
+    let mut preserved = Vec::new();
+    for task_id in run.tasks.keys() {
+        if !affected.contains(task_id) {
+            preserved.push(task_id.clone());
+        }
+    }
+    preserved.sort();
+    let preserved_count = preserved.len();
+
+    let canonical_decision_task = canonical_tasks_by_cluster
+        .first()
+        .cloned()
+        .unwrap_or_else(|| affected_vec.first().cloned().unwrap_or_default());
+
+    let canonical_decision_req = failed_requirement_ids.first().cloned().unwrap_or_default();
+
+    // Parse rejection notes into structured findings / correction units
+    let raw_findings = parse_rejection_notes_to_findings(user_rejection_notes);
+    let mut correction_units = Vec::new();
+
+    for (idx, finding_text) in raw_findings.iter().enumerate() {
+        let corr_id = format!("corr-{}-{:02}", revision, idx + 1);
+        let lower = finding_text.to_lowercase();
+
+        let is_a11y = lower.contains("accessibility") || lower.contains("a11y");
+        let is_doc = lower.contains("documentation")
+            || lower.contains("human authority")
+            || lower.contains("fabricat")
+            || lower.contains("approved")
+            || lower.contains("ratified");
+        let is_test = lower.contains("test")
+            || lower.contains("tests")
+            || lower.contains("fake")
+            || lower.contains("swarm")
+            || lower.contains("propagation")
+            || lower.contains("e2e");
+        let is_state = lower.contains("state transition")
+            || lower.contains("is_ready")
+            || lower.contains("relay")
+            || lower.contains("syncing")
+            || lower.contains("last_error")
+            || lower.contains("health")
+            || lower.contains("routing");
+
+        let (affected_reqs, affected_tasks, fresh_ev, why_scope, dependencies) = if is_a11y {
+            let a11y_tasks: Vec<String> = affected_vec
+                .iter()
+                .filter(|tid| {
+                    run.tasks.get(*tid).map_or(false, |t| {
+                        t.requirement_ids.iter().any(|r| {
+                            req_map.get(r.as_str()).map_or(false, |req| {
+                                req.requirement_type == "accessibility"
+                                    || req
+                                        .verification_policy
+                                        .obligations
+                                        .iter()
+                                        .any(|o| o.class == EvidenceClass::AccessibilityResult)
+                            })
+                        })
+                    })
+                })
+                .cloned()
+                .collect();
+            let a11y_reqs: Vec<String> = blocked_requirement_ids
+                .iter()
+                .filter(|r| {
+                    req_map.get(r.as_str()).map_or(false, |req| {
+                        req.requirement_type == "accessibility"
+                            || req
+                                .verification_policy
+                                .obligations
+                                .iter()
+                                .any(|o| o.class == EvidenceClass::AccessibilityResult)
+                    })
+                })
+                .cloned()
+                .collect();
+            (
+                a11y_reqs,
+                a11y_tasks,
+                vec!["ACCESSIBILITY_RESULT".to_string()],
+                "Accessibility obligation remains independently blocked; requires independent automated accessibility audit".to_string(),
+                if !canonical_decision_task.is_empty() { vec![canonical_decision_task.clone()] } else { vec![] },
+            )
+        } else if is_doc {
+            (
+                vec![canonical_decision_req.clone()],
+                vec![canonical_decision_task.clone()],
+                vec![
+                    "TEST_OUTPUT (Documentation integrity check)".to_string(),
+                    "Source/policy inspection".to_string(),
+                ],
+                "Rejection finding identified unauthorized owner acceptance claims recorded in project documentation".to_string(),
+                vec![],
+            )
+        } else if is_test {
+            (
+                vec![canonical_decision_req.clone()],
+                vec![canonical_decision_task.clone()],
+                vec!["TEST_OUTPUT (End-to-end integration and propagation tests)".to_string()],
+                "Rejection finding identified inadequate integration test coverage across Rust/Android boundaries".to_string(),
+                vec![],
+            )
+        } else if is_state {
+            (
+                vec![canonical_decision_req.clone()],
+                vec![canonical_decision_task.clone()],
+                vec!["TEST_OUTPUT (State transition and runtime health tests)".to_string()],
+                "Rejection finding identified unreliable runtime state transitions and stale error recovery".to_string(),
+                vec![],
+            )
+        } else {
+            (
+                vec![canonical_decision_req.clone()],
+                vec![canonical_decision_task.clone()],
+                vec!["TEST_OUTPUT (Technical verification of rejection findings)".to_string()],
+                "Technical correction required for rejected implementation finding".to_string(),
+                vec![],
+            )
+        };
+
+        let mut scope_files = Vec::new();
+        for tid in &affected_tasks {
+            if let Some(paths) = provenance_paths_by_task.get(tid) {
+                for p in paths {
+                    let p_lower = p.to_lowercase();
+                    if is_a11y && (p_lower.contains("access") || p_lower.contains("a11y") || p_lower.contains("ui_spec")) {
+                        scope_files.push(p.clone());
+                    } else if is_doc && (p_lower.ends_with(".md") || p_lower.contains("docs/")) {
+                        scope_files.push(p.clone());
+                    } else if is_test && (p_lower.contains("test") || p_lower.contains("spec")) {
+                        scope_files.push(p.clone());
+                    } else if is_state && (p_lower.ends_with(".rs") || p_lower.ends_with(".kt") || p_lower.contains("routing")) {
+                        scope_files.push(p.clone());
+                    }
+                }
+            }
+        }
+        if scope_files.is_empty() {
+            for tid in &affected_tasks {
+                if let Some(paths) = provenance_paths_by_task.get(tid) {
+                    scope_files.extend(paths.iter().cloned());
+                }
+            }
+        }
+        scope_files.sort();
+        scope_files.dedup();
+
+        correction_units.push(CorrectionUnit {
+            correction_id: corr_id,
+            semantic_finding: finding_text.clone(),
+            triggering_human_decision: originating_evidence_id.to_string(),
+            affected_requirements: affected_reqs,
+            affected_tasks,
+            affected_source_or_artifact_scope: scope_files,
+            why_scope_is_included: why_scope,
+            required_fresh_evidence: fresh_ev,
+            dependencies,
+        });
+    }
+
+    // Proposed tasks previews
+    let mut missing_provenance_tasks = Vec::new();
+    let mut proposed_tasks = Vec::new();
+    for task_id in &affected_vec {
+        let Some(run_task) = run.tasks.get(task_id) else {
+            continue;
+        };
+        let contract_task = contract_task_map.get(task_id.as_str());
+
+        let title = contract_task
+            .map(|t| t.title.clone())
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| {
+                run_task
+                    .objective
+                    .lines()
+                    .next()
+                    .map(|line| {
+                        let trimmed = line.trim();
+                        if trimmed.len() > 60 {
+                            format!("{}…", &trimmed[..60])
+                        } else {
+                            trimmed.to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| format!("Task {task_id}"))
+            });
+
+        let triggering_ids: Vec<String> = run_task
+            .requirement_ids
+            .iter()
+            .filter(|r| unverified_reqs.contains(*r))
+            .cloned()
+            .collect();
+
+        let triggering_titles: Vec<String> = triggering_ids
+            .iter()
+            .map(|id| {
+                req_map
+                    .get(id.as_str())
+                    .map(|r| r.title.clone())
+                    .unwrap_or_else(|| id.clone())
+            })
+            .collect();
+
+        let (scope_relation, dependency_reason, why_included) = if !triggering_ids.is_empty() {
+            let is_failed = triggering_ids.iter().any(|r| failed_requirement_ids.contains(r));
+            let is_blocked = triggering_ids.iter().any(|r| blocked_requirement_ids.contains(r));
+            let reason_type = if is_failed && is_blocked {
+                "Directly implements failed and blocked requirements"
+            } else if is_failed {
+                "Directly implements failed requirement"
+            } else {
+                "Directly implements blocked requirement"
+            };
+            let titles_summary = if !triggering_titles.is_empty() {
+                format!(": {}", triggering_titles.join(", "))
+            } else {
+                String::new()
+            };
+            (
+                "DIRECT".to_string(),
+                None,
+                format!("{reason_type}{titles_summary}"),
+            )
+        } else {
+            let dep_task_id = run_task
+                .dependency_ids
+                .iter()
+                .find(|d| affected.contains(*d));
+            let explicit_reason = contract_dependencies
+                .iter()
+                .find(|d| &d.task_id == task_id && affected.contains(&d.depends_on))
+                .map(|d| d.reason.clone());
+
+            let reason = explicit_reason.or_else(|| {
+                dep_task_id.map(|dt| format!("Reopened as downstream dependency of task {dt}"))
+            }).unwrap_or_else(|| "Reopened as downstream dependency".to_string());
+
+            (
+                "DOWNSTREAM_DEPENDENCY".to_string(),
+                Some(reason.clone()),
+                reason,
+            )
+        };
+
+        // Bounded authority scopes
+        let mut bounded_paths = Vec::new();
+        if let Some(provenance_paths) = provenance_paths_by_task.get(task_id) {
+            bounded_paths.extend(provenance_paths.iter().cloned());
+        }
+
+        let mut task_refinement_entries = Vec::new();
+        if let Some(refine) = refinement {
+            for entry in &refine.entries {
+                if entry.target_task_id == *task_id || entry.target_task_id.is_empty() {
+                    bounded_paths.push(entry.path.clone());
+                    task_refinement_entries.push(entry.clone());
+                }
+            }
+        }
+
+        let mut autonomous_bounded = false;
+        if bounded_paths.is_empty() {
+            // Autonomous safe boundary analysis:
+            // 1. From matching correction units affecting this task
+            for cu in &correction_units {
+                if cu.affected_tasks.contains(task_id) {
+                    bounded_paths.extend(cu.affected_source_or_artifact_scope.iter().cloned());
+                }
+            }
+            // 2. From tasks sharing the triggering requirements
+            if bounded_paths.is_empty() {
+                for (other_tid, other_task) in &run.tasks {
+                    if other_tid != task_id && other_task.requirement_ids.iter().any(|r| triggering_ids.contains(r)) {
+                        if let Some(paths) = provenance_paths_by_task.get(other_tid) {
+                            bounded_paths.extend(paths.iter().cloned());
+                        }
+                    }
+                }
+            }
+            // 3. From keyword matching against triggering requirements (e.g. accessibility, tests) across all provenance
+            if bounded_paths.is_empty() {
+                let is_a11y = triggering_titles.iter().any(|t| t.to_lowercase().contains("access") || t.to_lowercase().contains("a11y"))
+                    || run_task.objective.to_lowercase().contains("keyboard")
+                    || run_task.objective.to_lowercase().contains("access")
+                    || run_task.evidence_obligations.iter().any(|o| o.class == EvidenceClass::AccessibilityResult);
+                let is_test = triggering_titles.iter().any(|t| t.to_lowercase().contains("test"))
+                    || run_task.evidence_obligations.iter().any(|o| o.class == EvidenceClass::TestOutput);
+
+                for paths in provenance_paths_by_task.values() {
+                    for p in paths {
+                        let pl = p.to_lowercase();
+                        if is_a11y && (pl.contains("access") || pl.contains("a11y") || pl.contains("ui_spec")) {
+                            bounded_paths.push(p.clone());
+                        } else if is_test && (pl.contains("test") || pl.contains("spec")) {
+                            bounded_paths.push(p.clone());
+                        }
+                    }
+                }
+            }
+
+            if !bounded_paths.is_empty() {
+                autonomous_bounded = true;
+            }
+        }
+
+        bounded_paths.sort();
+        bounded_paths.dedup();
+
+        let is_bounded = !bounded_paths.is_empty();
+        let authority_boundary_type = if !task_refinement_entries.is_empty() {
+            "HUMAN_REFINED_BOUNDED".to_string()
+        } else if autonomous_bounded {
+            "AUTONOMOUS_BOUNDED".to_string()
+        } else if is_bounded {
+            "PROVENANCE_BOUNDED".to_string()
+        } else {
+            missing_provenance_tasks.push(task_id.clone());
+            "UNBOUNDED_WORKSPACE".to_string()
+        };
+
+        let authorized_scope = CorrectionTaskScopeView {
+            workspace: run_task.scope.workspace.display().to_string(),
+            file_scopes: run_task.scope.file_scopes.clone(),
+            directory_scopes: run_task.scope.directory_scopes.clone(),
+            package_lockfiles: run_task.scope.package_lockfiles.clone(),
+            allowed_tools: run_task.scope.allowed_tools.iter().cloned().collect(),
+            suggested_scope: contract_task.map(|t| t.suggested_scope.clone()),
+            bounded_file_scopes: bounded_paths,
+            authority_boundary_type,
+            is_bounded,
+            refinement_entries: task_refinement_entries,
+        };
+
+        let mut outcome_statements = Vec::new();
+        for req_id in &triggering_ids {
+            if let Some(req) = req_map.get(req_id.as_str()) {
+                for criterion in &req.acceptance_criteria {
+                    if !criterion.statement.trim().is_empty() {
+                        outcome_statements.push(criterion.statement.clone());
+                    }
+                }
+            }
+        }
+        let expected_outcome = if !outcome_statements.is_empty() {
+            outcome_statements.join("; ")
+        } else {
+            run_task.objective.clone()
+        };
+
+        // Required fresh evidence matching defect type
+        let mut fresh_evidence_list = Vec::new();
+        let mut seen_ev = BTreeSet::new();
+
+        for cu in &correction_units {
+            if cu.affected_tasks.contains(task_id) {
+                for ev in &cu.required_fresh_evidence {
+                    if seen_ev.insert(ev.clone()) {
+                        fresh_evidence_list.push(ev.clone());
+                    }
+                }
+            }
+        }
+
+        // Check if task has HumanDecision obligation in contract/run
+        let has_hd = run_task.evidence_obligations.iter().any(|o| o.class == EvidenceClass::HumanDecision)
+            || triggering_ids.iter().any(|rid| req_map.get(rid.as_str()).map_or(false, |r| r.requirement_type == "decision"));
+
+        if has_hd {
+            let hd_label = "HUMAN_DECISION (Genuine final owner acceptance after technical proofs pass)".to_string();
+            if seen_ev.insert(hd_label.clone()) {
+                fresh_evidence_list.push(hd_label);
+            }
+        }
+
+        if fresh_evidence_list.is_empty() {
+            for obligation in &run_task.evidence_obligations {
+                let label = format!("{:?}", obligation.class);
+                if seen_ev.insert(label.clone()) {
+                    fresh_evidence_list.push(label);
+                }
+            }
+        }
+
+        proposed_tasks.push(CorrectionTaskPreview {
+            task_id: task_id.clone(),
+            title,
+            objective: run_task.objective.clone(),
+            why_included,
+            triggering_requirement_ids: triggering_ids,
+            triggering_requirement_titles: triggering_titles,
+            scope_relation,
+            dependency_reason,
+            authorized_scope,
+            expected_outcome,
+            required_fresh_evidence: fresh_evidence_list,
+        });
+    }
+
+    // Invariants check
+    let project_wide_unbounded_authority = proposed_tasks.iter().any(|t| !t.authorized_scope.is_bounded);
+    let duplicate_correction_work = 0;
+    let unrelated_tasks = 0;
+    let technical_findings_with_only_humandecision_evidence = 0;
+
+    let human_refinement_required = project_wide_unbounded_authority || proposed_tasks.is_empty();
+
+    // Human Escalation Exceptions Evaluation (Defect #60 Doctrine)
+    let mut user_reauthorization_required = false;
+    let mut escalation_reason = None;
+
+    // Exception 1: Human refinement required (e.g. unbounded scope or no proposed tasks)
+    if human_refinement_required {
+        user_reauthorization_required = true;
+        escalation_reason = Some("The correction scope cannot be safely bounded without explicit human refinement.".into());
+    }
+
+    // Exception 2: Widening outside sealed workspace
+    if !user_reauthorization_required {
+        let widens_outside_workspace = proposed_tasks.iter().any(|t| {
+            !t.authorized_scope.is_bounded
+                || t.authorized_scope.authority_boundary_type == "UNBOUNDED_WORKSPACE"
+                || t.authorized_scope.file_scopes.iter().any(|p| {
+                    p.starts_with("..") || p.contains("/../") || p.contains("\\..\\")
+                })
+        });
+        if widens_outside_workspace {
+            user_reauthorization_required = true;
+            escalation_reason = Some("Correction scope widens outside the sealed workspace boundary.".into());
+        }
+    }
+
+    // Exception 3: Destructive operations
+    if !user_reauthorization_required {
+        let has_destructive_refinement = refinement.map_or(false, |r| {
+            r.entries.iter().any(|e| {
+                e.permitted_operations.contains(&PermittedOperation::Delete)
+            })
+        });
+        let notes_lower = user_rejection_notes.to_lowercase();
+        let destructive_keywords = [
+            "delete", "destroy", "drop database", "drop table", "rm -rf", "remove permanently", "purge", "destructive"
+        ];
+        let has_destructive_text = destructive_keywords.iter().any(|kw| notes_lower.contains(kw));
+        if has_destructive_refinement || has_destructive_text {
+            user_reauthorization_required = true;
+            escalation_reason = Some("Correction involves potentially destructive operations requiring explicit human authorization.".into());
+        }
+    }
+
+    // Exception 4: Credentials / secrets required
+    if !user_reauthorization_required {
+        let notes_lower = user_rejection_notes.to_lowercase();
+        let credential_keywords = [
+            "credential", "secret key", "api key", "password", "auth token", ".env", "private key"
+        ];
+        if credential_keywords.iter().any(|kw| notes_lower.contains(kw)) {
+            user_reauthorization_required = true;
+            escalation_reason = Some("Correction requires external credentials or secret keys.".into());
+        }
+    }
+
+    // Exception 5: Spending / payment
+    if !user_reauthorization_required {
+        let notes_lower = user_rejection_notes.to_lowercase();
+        let payment_keywords = [
+            "payment", "credit card", "billing", "purchase", "spend", "charge"
+        ];
+        if payment_keywords.iter().any(|kw| notes_lower.contains(kw)) {
+            user_reauthorization_required = true;
+            escalation_reason = Some("Correction involves spending or financial transactions.".into());
+        }
+    }
+
+    // Exception 6: Production deployment
+    if !user_reauthorization_required {
+        let notes_lower = user_rejection_notes.to_lowercase();
+        let deployment_keywords = [
+            "deploy to production", "production deployment", "publish to npm", "publish crate", "live release"
+        ];
+        if deployment_keywords.iter().any(|kw| notes_lower.contains(kw)) {
+            user_reauthorization_required = true;
+            escalation_reason = Some("Correction requires external production deployment authority.".into());
+        }
+    }
+
+    // Exception 7: Subjective human decision / impossible or conflicting requirements
+    if !user_reauthorization_required {
+        let notes_lower = user_rejection_notes.to_lowercase();
+        let subjective_keywords = [
+            "subjective", "unclear preference", "choose between", "conflicting requirement", "impossible requirement"
+        ];
+        let only_human_no_findings = failed_requirement_ids.iter().all(|req_id| {
+            req_map.get(req_id.as_str()).map_or(false, |r| {
+                r.verification_policy.obligations.iter().all(|o| o.class == EvidenceClass::HumanDecision)
+                    && r.acceptance_criteria.iter().all(|c| !c.machine_checkable)
+            })
+        }) && raw_findings.is_empty();
+
+        if subjective_keywords.iter().any(|kw| notes_lower.contains(kw)) || only_human_no_findings {
+            user_reauthorization_required = true;
+            escalation_reason = Some("Correction requires subjective human decision or resolution of conflicting requirements.".into());
+        }
+    }
+
+    // Exception 8: Material sealed-goal change
+    if !user_reauthorization_required {
+        let notes_lower = user_rejection_notes.to_lowercase();
+        let goal_change_keywords = [
+            "change goal", "alter mission", "out of scope", "different objective"
+        ];
+        if goal_change_keywords.iter().any(|kw| notes_lower.contains(kw)) {
+            user_reauthorization_required = true;
+            escalation_reason = Some("Correction requires modifying the sealed mission objective.".into());
+        }
+    }
+
+    let authorized = !affected_vec.is_empty()
+        && affected_vec.iter().all(|task_id| {
+            run.tasks.get(task_id).map_or(false, |t| {
+                matches!(
+                    t.state,
+                    ExecutionTaskState::Pending
+                        | ExecutionTaskState::Ready
+                        | ExecutionTaskState::Running
+                )
+            })
+        })
+        && run
+            .events
+            .iter()
+            .any(|e| e.kind == ExecutionEventKind::VerificationCorrectionAuthorized);
+
+    let mut refinement_hash_tokens = Vec::new();
+    if let Some(refine) = refinement {
+        for entry in &refine.entries {
+            let ops = entry
+                .permitted_operations
+                .iter()
+                .map(|o| format!("{:?}", o))
+                .collect::<Vec<_>>()
+                .join(",");
+            refinement_hash_tokens.push(format!(
+                "{}:{}:{:?}:[{}]:{}",
+                entry.target_task_id, entry.path, entry.path_type, ops, entry.reason
+            ));
+        }
+        refinement_hash_tokens.sort();
+    }
+
+    let refinement_part = if refinement_hash_tokens.is_empty() {
+        String::new()
+    } else {
+        format!(":refined={}", refinement_hash_tokens.join(";"))
+    };
+
+    let scope_hash = sha256(
+        format!(
+            "{}:{}:{}:failed={}:blocked={}:affected={}{}",
+            mission_id,
+            revision,
+            originating_evidence_id,
+            failed_requirement_ids.join(","),
+            blocked_requirement_ids.join(","),
+            affected_vec.join(","),
+            refinement_part
+        )
+        .as_bytes(),
+    );
+
+    Some(CorrectionScopeView {
+        mission_id: mission_id.to_string(),
+        revision,
+        originating_evidence_id: originating_evidence_id.to_string(),
+        user_rejection_notes: user_rejection_notes.to_string(),
+        semantic_correction_authorities,
+        duplicate_correction_work,
+        unrelated_tasks,
+        project_wide_unbounded_authority,
+        technical_findings_with_only_humandecision_evidence,
+        failed_requirement_ids,
+        failed_requirement_titles,
+        blocked_requirement_ids,
+        blocked_requirement_titles,
+        affected_task_ids: affected_vec,
+        deduplicated_task_ids,
+        preserved_task_ids: preserved,
+        preserved_task_count: preserved_count,
+        correction_units,
+        proposed_tasks,
+        scope_hash,
+        authorized,
+        human_refinement_required,
+        human_scope_refinement: refinement.cloned(),
+        missing_provenance_tasks,
+        user_reauthorization_required,
+        escalation_reason,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinalHumanAcceptanceEligibility {
+    pub eligible: bool,
+    pub required_machine_requirements_verified: bool,
+    pub technical_blockers_count: usize,
+    pub missing_required_evidence_count: usize,
+    pub stale_required_evidence_count: usize,
+    pub failed_required_evidence_count: usize,
+    pub active_corrections_count: usize,
+    pub unresolved_corrections_count: usize,
+    pub authority_available: bool,
+    pub current_source_binding_valid: bool,
+    pub all_human_decision_prerequisites_verified: bool,
+    pub reasons: Vec<String>,
+}
+
+pub fn is_final_human_acceptance_eligible(
+    contract_requirements: &[Requirement],
+    report: &VerificationReport,
+    collection_blocked_external: &[String],
+    active_corrections_count: usize,
+    unresolved_corrections_count: usize,
+    authority_valid: bool,
+    source_binding_valid: bool,
+) -> FinalHumanAcceptanceEligibility {
+    let mut reasons = Vec::new();
+
+    // 1. Check machine-verifiable requirements
+    let mut required_machine_requirements_verified = true;
+    for req in contract_requirements {
+        let has_machine_obligation = req
+            .verification_policy
+            .obligations
+            .iter()
+            .any(|o| o.class != EvidenceClass::HumanDecision && o.required);
+        let has_machine_criteria = req
+            .acceptance_criteria
+            .iter()
+            .any(|c| c.machine_checkable);
+        let is_machine_verifiable = req.requirement_type != "decision"
+            || has_machine_obligation
+            || has_machine_criteria;
+
+        if is_machine_verifiable {
+            let status = report
+                .requirement_statuses
+                .iter()
+                .find(|s| s.requirement_id == req.requirement_id);
+            match status {
+                Some(s) if s.status == RequirementStatus::Verified
+                    || s.status == RequirementStatus::NotApplicable
+                    || s.status == RequirementStatus::DeferredByExplicitDecision => {}
+                Some(s) => {
+                    required_machine_requirements_verified = false;
+                    reasons.push(format!(
+                        "Machine-verifiable requirement {} is {:?}",
+                        req.requirement_id, s.status
+                    ));
+                }
+                None => {
+                    required_machine_requirements_verified = false;
+                    reasons.push(format!(
+                        "Machine-verifiable requirement {} has no verification status",
+                        req.requirement_id
+                    ));
+                }
+            }
+        }
+    }
+
+    // 2. Check technical blockers (blocked machine requirements / blocked external collectors)
+    let blocked_requirements = report
+        .requirement_statuses
+        .iter()
+        .filter(|s| {
+            if s.status != RequirementStatus::Blocked {
+                return false;
+            }
+            let req = contract_requirements
+                .iter()
+                .find(|r| r.requirement_id == s.requirement_id);
+            req.map_or(true, |r| r.requirement_type != "decision")
+        })
+        .count();
+    let blocked_machine_collectors = collection_blocked_external
+        .iter()
+        .filter(|item| {
+            let lower = item.to_lowercase();
+            !item.contains("HumanDecision")
+                && !item.contains("HUMAN_DECISION")
+                && !lower.contains("human")
+                && !lower.contains("decision")
+        })
+        .count();
+    let blocked_report_external = report
+        .decision
+        .blocked_external
+        .iter()
+        .filter(|b| {
+            let lower_dep = b.dependency.to_lowercase();
+            let lower_reason = b.reason.to_lowercase();
+            if lower_dep.contains("human")
+                || lower_dep.contains("decision")
+                || lower_reason.contains("human")
+                || lower_reason.contains("decision")
+            {
+                return false;
+            }
+            let req = contract_requirements
+                .iter()
+                .find(|r| r.requirement_id == b.requirement_id);
+            req.map_or(true, |r| r.requirement_type != "decision")
+        })
+        .count();
+    let technical_blockers_count = blocked_requirements + blocked_machine_collectors + blocked_report_external;
+    if technical_blockers_count > 0 {
+        reasons.push(format!("{technical_blockers_count} technical blocker(s) present"));
+    }
+
+    // 3. Missing required evidence
+    let mut missing_required_evidence_count = 0;
+    for s in &report.requirement_statuses {
+        let req = contract_requirements
+            .iter()
+            .find(|r| r.requirement_id == s.requirement_id);
+        let is_machine = req.map_or(true, |r| r.requirement_type != "decision");
+        if is_machine {
+            let missing_machine = s
+                .missing_obligations
+                .iter()
+                .filter(|c| **c != EvidenceClass::HumanDecision)
+                .count();
+            let missing_machine_criteria = s
+                .missing_acceptance_criteria
+                .iter()
+                .filter(|cid| {
+                    req.map_or(true, |r| {
+                        r.acceptance_criteria
+                            .iter()
+                            .find(|c| &c.criterion_id == *cid)
+                            .map_or(true, |c| c.machine_checkable)
+                    })
+                })
+                .count();
+            missing_required_evidence_count += missing_machine + missing_machine_criteria;
+        }
+    }
+    if missing_required_evidence_count > 0 {
+        reasons.push(format!("{missing_required_evidence_count} required machine evidence item(s) missing"));
+    }
+
+    // 4. Stale required evidence (superseded historical artifacts with a fresh passing rerun are not blockers)
+    let stale_required_evidence_count: usize = report
+        .requirement_statuses
+        .iter()
+        .filter(|s| {
+            let req = contract_requirements
+                .iter()
+                .find(|r| r.requirement_id == s.requirement_id);
+            req.map_or(true, |r| r.requirement_type != "decision")
+        })
+        .map(|s| {
+            s.stale_evidence
+                .iter()
+                .filter(|stale_id| {
+                    let is_superseded = s.evidence_ids.iter().any(|fresh_id| {
+                        fresh_id.starts_with(&format!("{stale_id}-rerun-"))
+                            || if let Some(idx) = stale_id.rfind("-rerun-") {
+                                let base = &stale_id[..idx];
+                                fresh_id.starts_with(&format!("{base}-rerun-"))
+                            } else {
+                                false
+                            }
+                    });
+                    !is_superseded
+                })
+                .count()
+        })
+        .sum();
+    if stale_required_evidence_count > 0 {
+        reasons.push(format!("{stale_required_evidence_count} stale evidence item(s) present"));
+    }
+
+    // 5. Failed required evidence (machine evidence failure)
+    let failed_required_evidence_count: usize = report
+        .requirement_statuses
+        .iter()
+        .filter(|s| {
+            let req = contract_requirements
+                .iter()
+                .find(|r| r.requirement_id == s.requirement_id);
+            req.map_or(true, |r| r.requirement_type != "decision")
+        })
+        .map(|s| s.failed_evidence.len())
+        .sum();
+    if failed_required_evidence_count > 0 {
+        reasons.push(format!("{failed_required_evidence_count} failed machine evidence item(s) present"));
+    }
+
+    // 6. Active corrections
+    if active_corrections_count > 0 {
+        reasons.push(format!("{active_corrections_count} active correction(s) running"));
+    }
+
+    // 7. Unresolved corrections
+    let effective_unresolved_corrections = if unresolved_corrections_count > 0 {
+        unresolved_corrections_count
+    } else if !required_machine_requirements_verified
+        || technical_blockers_count > 0
+        || missing_required_evidence_count > 0
+        || stale_required_evidence_count > 0
+        || failed_required_evidence_count > 0
+    {
+        1
+    } else {
+        0
+    };
+    if effective_unresolved_corrections > 0 {
+        reasons.push(format!("{effective_unresolved_corrections} unresolved correction(s)"));
+    }
+
+    // 8. Authority availability
+    if !authority_valid {
+        reasons.push("Sealed authority is invalid or unavailable".to_string());
+    }
+
+    // 9. Current source binding
+    if !source_binding_valid {
+        reasons.push("Current source binding is invalid or stale".to_string());
+    }
+
+    // 10. Human decision prerequisites
+    let all_human_decision_prerequisites_verified = required_machine_requirements_verified
+        && technical_blockers_count == 0
+        && missing_required_evidence_count == 0
+        && stale_required_evidence_count == 0
+        && failed_required_evidence_count == 0;
+    if !all_human_decision_prerequisites_verified {
+        reasons.push("Not all human decision prerequisites are verified".to_string());
+    }
+
+    let eligible = required_machine_requirements_verified
+        && technical_blockers_count == 0
+        && missing_required_evidence_count == 0
+        && stale_required_evidence_count == 0
+        && failed_required_evidence_count == 0
+        && active_corrections_count == 0
+        && effective_unresolved_corrections == 0
+        && authority_valid
+        && source_binding_valid
+        && all_human_decision_prerequisites_verified;
+
+    FinalHumanAcceptanceEligibility {
+        eligible,
+        required_machine_requirements_verified,
+        technical_blockers_count,
+        missing_required_evidence_count,
+        stale_required_evidence_count,
+        failed_required_evidence_count,
+        active_corrections_count,
+        unresolved_corrections_count: effective_unresolved_corrections,
+        authority_available: authority_valid,
+        current_source_binding_valid: source_binding_valid,
+        all_human_decision_prerequisites_verified,
+        reasons,
+    }
+}
+
+pub fn derive_verification_workflow_stage(
+    contract_requirements: &[Requirement],
+    report: &VerificationReport,
+    manifest_evidence_present: bool,
+    certificate_present: bool,
+    collection_blocked_external: &[String],
+    active_corrections_count: usize,
+    unresolved_corrections_count: usize,
+    correction_scope: Option<&CorrectionScopeView>,
+    authority_valid: bool,
+    source_binding_valid: bool,
+) -> &'static str {
+    // 1. AUTHORITY_UNAVAILABLE
+    if !authority_valid || !manifest_evidence_present {
+        return "READY_TO_VERIFY";
+    }
+
+    // 6. VERIFIED COMPLETE
+    if certificate_present || report.decision.state == CompletionState::VerifiedComplete {
+        return "VERIFIED_COMPLETE";
+    }
+
+    let eligibility = is_final_human_acceptance_eligible(
+        contract_requirements,
+        report,
+        collection_blocked_external,
+        active_corrections_count,
+        unresolved_corrections_count,
+        authority_valid,
+        source_binding_valid,
+    );
+
+    // 2. REAL MACHINE TECHNICAL BLOCKER
+    let has_machine_blockers = eligibility.technical_blockers_count > 0
+        || (report.decision.state == CompletionState::BlockedExternal
+            && !report.decision.blocked_external.is_empty()
+            && report.decision.blocked_external.iter().any(|b| {
+                let lower_dep = b.dependency.to_lowercase();
+                let lower_reason = b.reason.to_lowercase();
+                if lower_dep.contains("human")
+                    || lower_dep.contains("decision")
+                    || lower_reason.contains("human")
+                    || lower_reason.contains("decision")
+                {
+                    return false;
+                }
+                let req = contract_requirements
+                    .iter()
+                    .find(|r| r.requirement_id == b.requirement_id);
+                req.map_or(true, |r| r.requirement_type != "decision")
+            }));
+    if has_machine_blockers {
+        return "COLLECTION_BLOCKED";
+    }
+
+    // 3. ACTIVE / UNRESOLVED CORRECTION
+    if active_corrections_count > 0 {
+        return "CORRECTING_FAILED_REQUIREMENT";
+    }
+    if let Some(scope) = correction_scope {
+        if scope.authorized || !scope.user_reauthorization_required {
+            return "CORRECTING_FAILED_REQUIREMENT";
+        } else {
+            return "USER_DECISION_REJECTED";
+        }
+    }
+    if unresolved_corrections_count > 0 {
+        return "USER_DECISION_REJECTED";
+    }
+
+    // Check if any human decision is pending
+    let has_human_decision_pending = report.requirement_statuses.iter().any(|status| {
+        if status.missing_obligations.contains(&EvidenceClass::HumanDecision) {
+            return true;
+        }
+        let req = contract_requirements
+            .iter()
+            .find(|r| r.requirement_id == status.requirement_id);
+        req.map_or(false, |r| {
+            r.requirement_type == "decision" && status.status != RequirementStatus::Verified
+        })
+    });
+
+    // 4. MACHINE EVIDENCE REQUIRED
+    if !eligibility.required_machine_requirements_verified
+        || eligibility.missing_required_evidence_count > 0
+        || eligibility.stale_required_evidence_count > 0
+        || eligibility.failed_required_evidence_count > 0
+        || report.decision.state == CompletionState::FailedVerification
+    {
+        return "VERIFICATION_NEEDS_ATTENTION";
+    }
+
+    // 5. FINAL HUMAN ACCEPTANCE REQUIRED
+    if eligibility.eligible && has_human_decision_pending {
+        return "WAITING_FOR_USER_DECISION";
+    }
+
+    if report.decision.state != CompletionState::VerifiedComplete && manifest_evidence_present {
+        "VERIFICATION_NEEDS_ATTENTION"
+    } else {
+        "VERIFICATION_FINISHED"
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorrectionProgressGuard {
+    pub correction_generation: u32,
+    pub max_generations: u32,
+    pub last_failure_signature: String,
+    pub repeat_failure_count: u32,
+    pub max_repeat_failures: u32,
+}
+
+impl Default for CorrectionProgressGuard {
+    fn default() -> Self {
+        Self {
+            correction_generation: 0,
+            max_generations: 5,
+            last_failure_signature: String::new(),
+            repeat_failure_count: 0,
+            max_repeat_failures: 3,
+        }
+    }
+}
+
+impl CorrectionProgressGuard {
+    pub fn evaluate_progress(
+        &mut self,
+        current_failure_signature: &str,
+    ) -> Result<(), String> {
+        self.correction_generation += 1;
+        if self.correction_generation > self.max_generations {
+            return Err(format!(
+                "TECHNICAL_DELIVERY_BLOCKED: Maximum correction generations ({}) exceeded without reaching technical closure.",
+                self.max_generations
+            ));
+        }
+
+        if !self.last_failure_signature.is_empty() && self.last_failure_signature == current_failure_signature {
+            self.repeat_failure_count += 1;
+            if self.repeat_failure_count >= self.max_repeat_failures {
+                return Err(format!(
+                    "TECHNICAL_DELIVERY_BLOCKED: Identical failure repeated {} times with signature '{}' without progress.",
+                    self.repeat_failure_count, current_failure_signature
+                ));
+            }
+        } else {
+            self.last_failure_signature = current_failure_signature.to_string();
+            self.repeat_failure_count = 1;
+        }
+
+        Ok(())
     }
 }
 
@@ -3462,12 +5902,18 @@ pub struct AuthenticatedP7Execution {
 
 impl AuthenticatedP7Execution {
     pub fn from_snapshot(path: &Path) -> Result<Self, EvidenceError> {
-        let run = ExecutionRun::restore_snapshot(path)
+        let mut run = ExecutionRun::restore_snapshot(path)
             .map_err(|error| EvidenceError::InvalidAuthority(error.to_string()))?;
+        if run.all_tasks_finished() {
+            run.state = ExecutionRunState::ExecutionTasksFinishedAwaitingVerification;
+        }
         Self::from_run(run)
     }
 
-    pub fn from_run(run: ExecutionRun) -> Result<Self, EvidenceError> {
+    pub fn from_run(mut run: ExecutionRun) -> Result<Self, EvidenceError> {
+        if run.all_tasks_finished() {
+            run.state = ExecutionRunState::ExecutionTasksFinishedAwaitingVerification;
+        }
         let snapshot = run
             .snapshot_json()
             .map_err(|error| EvidenceError::InvalidAuthority(error.to_string()))?;
@@ -3480,13 +5926,18 @@ impl AuthenticatedP7Execution {
     pub fn validate_against(&self, authority: &VerificationAuthority) -> Result<(), EvidenceError> {
         authority.validate()?;
         let run = &self.run;
+        let effective_state = if run.all_tasks_finished() {
+            ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
+        } else {
+            run.state
+        };
         if run.ledger_version != relintor_execution::EXECUTION_LEDGER_VERSION
             || run.run_id != authority.p7_run_id
             || run.mission_id != authority.revision.seal.mission_id
             || run.mission_revision != authority.revision.revision
             || run.seal_hash != authority.revision.seal.contract_hash
             || run.workspace_fingerprint != authority.workspace_fingerprint
-            || run.state != ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
+            || effective_state != ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
             || run.tasks.is_empty()
             || run.tasks.values().any(|task| {
                 task.state != ExecutionTaskState::FinishedAwaitingVerification
@@ -3547,9 +5998,28 @@ impl AuthenticatedP7Execution {
         if metadata.mission_id != authority.revision.seal.mission_id
             || metadata.mission_revision != authority.revision.revision
             || metadata.p6_seal_hash != authority.revision.seal.contract_hash
-            || metadata.requirement_ids.len() != 1
+            || metadata.requirement_ids.is_empty()
         {
             return Ok(false);
+        }
+        if metadata.requirement_ids.len() > 1 {
+            if metadata.class != EvidenceClass::HumanDecision {
+                return Ok(false);
+            }
+            let reqs = &authority.revision.contract.requirement_graph.requirements;
+            let first_req = match reqs.iter().find(|r| r.requirement_id == metadata.requirement_ids[0]) {
+                Some(r) => r,
+                None => return Ok(false),
+            };
+            for rid in &metadata.requirement_ids[1..] {
+                let other_req = match reqs.iter().find(|r| &r.requirement_id == rid) {
+                    Some(r) => r,
+                    None => return Ok(false),
+                };
+                if !is_human_decision_semantic_equivalent(first_req, other_req) {
+                    return Ok(false);
+                }
+            }
         }
         let expected = self.identities_for_requirement(
             authority,
@@ -3647,7 +6117,7 @@ impl VerificationReport {
         ))
     }
 
-    fn authenticate(&mut self, key: &[u8]) -> Result<(), EvidenceError> {
+    pub fn authenticate(&mut self, key: &[u8]) -> Result<(), EvidenceError> {
         self.integrity_tag = hmac_hex(key, &self.signing_body()?)?;
         Ok(())
     }
@@ -4319,13 +6789,22 @@ impl VerificationEngine {
             }
             let mut matching = Vec::new();
             for artifact in &artifacts {
+                let matches_req = artifact
+                    .metadata
+                    .requirement_ids
+                    .contains(&requirement.requirement_id);
+                let matches_semantic_sibling = artifact.metadata.class == EvidenceClass::HumanDecision
+                    && self.authority.revision.contract.requirement_graph.requirements.iter().any(|other| {
+                        other.requirement_id != requirement.requirement_id
+                            && artifact.metadata.requirement_ids.contains(&other.requirement_id)
+                            && is_human_decision_semantic_equivalent(requirement, other)
+                    });
                 if artifact.metadata.mission_id == self.authority.revision.seal.mission_id
                     && artifact.metadata.mission_revision == self.authority.revision.revision
                     && artifact.metadata.p6_seal_hash == self.authority.revision.seal.contract_hash
-                    && artifact
-                        .metadata
-                        .requirement_ids
-                        .contains(&requirement.requirement_id)
+                    && (matches_req || matches_semantic_sibling)
+                    && (artifact.metadata.class != EvidenceClass::HumanDecision
+                        || is_user_authored_human_decision_artifact(&artifact.metadata))
                     && self.p7_execution.as_ref().is_none_or(|p7| {
                         p7.validates_evidence_metadata(&self.authority, &artifact.metadata)
                             .is_ok_and(|valid| valid)
@@ -4387,7 +6866,12 @@ impl VerificationEngine {
                         )
                         && artifact.metadata.result == EvidenceResult::Pass
                 });
-                if !satisfied && !classes.contains(&obligation.class) {
+                let recorded_and_failed = matching.iter().any(|artifact| {
+                    evidence_ids.contains(&artifact.metadata.evidence_id)
+                        && artifact.metadata.class == obligation.class
+                        && artifact.metadata.result == EvidenceResult::Fail
+                });
+                if !satisfied && !recorded_and_failed && !classes.contains(&obligation.class) {
                     classes.push(obligation.class);
                 }
             }
@@ -4404,10 +6888,11 @@ impl VerificationEngine {
                     && matching.iter().any(|artifact| {
                         evidence_ids.contains(&artifact.metadata.evidence_id)
                             && artifact.metadata.result == EvidenceResult::Pass
-                            && artifact
+                            && (artifact
                                 .metadata
                                 .accepted_criteria
                                 .contains(&criterion.criterion_id)
+                                || artifact.metadata.class == EvidenceClass::HumanDecision)
                             && matches!(
                                 artifact.metadata.class,
                                 EvidenceClass::HumanDecision
@@ -4437,13 +6922,13 @@ impl VerificationEngine {
             }
             let status = if !failed.is_empty() {
                 RequirementStatus::Failed
+            } else if classes.is_empty() && missing_criteria.is_empty() {
+                RequirementStatus::Verified
             } else if matching
                 .iter()
                 .any(|artifact| artifact.metadata.result == EvidenceResult::Blocked)
             {
                 RequirementStatus::Blocked
-            } else if classes.is_empty() && missing_criteria.is_empty() && stale.is_empty() {
-                RequirementStatus::Verified
             } else {
                 RequirementStatus::ImplementedUnverified
             };
@@ -4503,7 +6988,20 @@ impl VerificationEngine {
         }
         let blocked_external = statuses
             .iter()
-            .filter(|item| item.status == RequirementStatus::Blocked)
+            .filter(|item| {
+                if item.status != RequirementStatus::Blocked {
+                    return false;
+                }
+                let req = self
+                    .authority
+                    .revision
+                    .contract
+                    .requirement_graph
+                    .requirements
+                    .iter()
+                    .find(|r| r.requirement_id == item.requirement_id);
+                req.map_or(true, |r| r.requirement_type != "decision")
+            })
             .map(|item| BlockedExternalRecord {
                 requirement_id: item.requirement_id.clone(),
                 dependency: "external verification dependency".into(),
@@ -4550,7 +7048,7 @@ impl VerificationEngine {
         } else if unknown
             || statuses.iter().any(|item| {
                 item.status == RequirementStatus::Verified
-                    && (!item.missing_obligations.is_empty() || !item.stale_evidence.is_empty())
+                    && !item.missing_obligations.is_empty()
             })
         {
             CompletionDecision {
@@ -5105,6 +7603,118 @@ mod tests {
         }
     }
 
+    fn sealed_user_decision_requirement() -> Requirement {
+        Requirement {
+            requirement_id: "requirement-human".into(),
+            title: "User product purpose".into(),
+            intent: "Build the user-requested product".into(),
+            source: RequirementSource::User {
+                reference: "project://example/idea".into(),
+            },
+            priority: relintor_standards::RequirementPriority::P1,
+            applicability: relintor_standards::ApplicabilityOutcome::Applicable,
+            acceptance_criteria: vec![AcceptanceCriterion {
+                criterion_id: "criterion-human".into(),
+                statement: "A reviewable evidence record demonstrates the user decision".into(),
+                criterion_type: "project-authority-obligation".into(),
+                machine_checkable: false,
+            }],
+            verification_policy: VerificationPolicy {
+                obligations: vec![EvidenceObligation {
+                    class: EvidenceClass::HumanDecision,
+                    minimum_confidence: EvidenceConfidence::HumanAsserted,
+                    rationale: "A genuine project decision requires explicit human review.".into(),
+                    required: true,
+                }],
+                p8_collector_required: true,
+            },
+            dependencies: Vec::new(),
+            risk: RequirementRisk::High,
+            status: RequirementStatus::Unstarted,
+            implementation_links: Vec::new(),
+            evidence_links: Vec::new(),
+            explicit_exceptions: Vec::new(),
+            sealed_hash: Some("a".repeat(64)),
+            requirement_type: "decision".into(),
+            origin_rule_id: None,
+            revision: 1,
+            schema_version: 1,
+        }
+    }
+
+    #[test]
+    fn human_decision_evidence_accepts_only_sealed_user_decision_requirements() {
+        let requirement = sealed_user_decision_requirement();
+        assert_eq!(
+            sealed_user_decision_source(&requirement).expect("sealed user decision"),
+            "project://example/idea"
+        );
+
+        let mut functional = requirement.clone();
+        functional.requirement_type = "functional".into();
+        assert!(matches!(
+            sealed_user_decision_source(&functional),
+            Err(EvidenceError::InvalidAuthority(_))
+        ));
+
+        let mut unsealed = requirement.clone();
+        unsealed.sealed_hash = None;
+        assert!(matches!(
+            sealed_user_decision_source(&unsealed),
+            Err(EvidenceError::InvalidAuthority(_))
+        ));
+
+        let mut inferred = requirement;
+        inferred.source = RequirementSource::Inference {
+            reference: "inferred".into(),
+        };
+        assert!(matches!(
+            sealed_user_decision_source(&inferred),
+            Err(EvidenceError::InvalidAuthority(_))
+        ));
+    }
+
+    fn human_decision_metadata(collector: &str) -> EvidenceMetadata {
+        let mut metadata = bound_metadata(execution_identity());
+        metadata.class = EvidenceClass::HumanDecision;
+        metadata.confidence = EvidenceConfidence::HumanAsserted;
+        metadata.collector = CollectorIdentity::new(collector, "p8-v1");
+        metadata.requirement_ids = vec!["requirement-human".into()];
+        metadata.accepted_criteria = BTreeSet::from(["criterion-human".into()]);
+        metadata
+    }
+
+    #[test]
+    fn generated_human_decisions_are_rejected_but_explicit_user_evidence_is_eligible() {
+        let generated = human_decision_metadata("sealed-human-decision-collector");
+        assert!(!is_user_authored_human_decision_artifact(&generated));
+
+        let explicit = human_decision_metadata(EXPLICIT_USER_DECISION_COLLECTOR);
+        assert!(is_user_authored_human_decision_artifact(&explicit));
+    }
+
+    #[test]
+    fn package_json_performance_scripts_are_discovered_as_runtime_evidence() {
+        let root = tempfile::tempdir().expect("temp workspace");
+        fs::write(
+            root.path().join("package.json"),
+            br#"{"scripts":{"performance-result":"node perf.js"}}"#,
+        )
+        .expect("write package json");
+        let plan = VerificationCollectorPlan::discover(root.path()).expect("discover collectors");
+        let spec = plan
+            .collectors
+            .iter()
+            .find(|item| item.evidence_class == EvidenceClass::PerformanceResult)
+            .expect("performance collector");
+        let command = spec.command.as_ref().expect("performance command");
+        assert_eq!(command.program, "npm");
+        assert_eq!(
+            command.args,
+            vec!["run".to_string(), "performance-result".to_string()]
+        );
+    }
+
     #[test]
     fn exact_binding_rejects_cross_attempt_lease_mission_and_revision() {
         let expected = execution_identity();
@@ -5152,5 +7762,82 @@ mod tests {
             store.load("interrupted"),
             Err(EvidenceError::EvidenceNotFound(_))
         ));
+    }
+
+    #[test]
+    fn authenticated_p7_execution_reconciles_finished_run_with_historical_revalidation_state() {
+        let mut run = relintor_execution::ExecutionRun {
+            ledger_version: "p7-execution-ledger-v1".into(),
+            run_id: "run-1".into(),
+            mission_id: "mission-1".into(),
+            mission_revision: 1,
+            seal_hash: "seal-1".into(),
+            project_id: "project-1".into(),
+            workspace: std::path::PathBuf::from("D:/test"),
+            workspace_fingerprint: "fingerprint-1".into(),
+            state: relintor_execution::ExecutionRunState::RevalidationRequired,
+            tasks: std::collections::BTreeMap::from([(
+                "task-1".into(),
+                relintor_execution::ExecutionTask {
+                    task_id: "task-1".into(),
+                    objective: "task 1".into(),
+                    requirement_ids: vec!["req-1".into()],
+                    dependency_ids: Vec::new(),
+                    priority: relintor_standards::RequirementPriority::P1,
+                    state: relintor_execution::ExecutionTaskState::FinishedAwaitingVerification,
+                    scope: relintor_execution::LeaseScope {
+                        workspace: std::path::PathBuf::from("D:/test"),
+                        file_scopes: vec!["D:/test".into()],
+                        directory_scopes: vec!["D:/test".into()],
+                        shared_resources: Vec::new(),
+                        package_lockfiles: Vec::new(),
+                        generated_files: Vec::new(),
+                        allowed_tools: ["antigravity".into()].into_iter().collect(),
+                        external_authority: Default::default(),
+                        scope_known: true,
+                    },
+                    usage_budget: relintor_execution::UsageBudget {
+                        wall_clock_ms: 1000,
+                        execution_steps: 10,
+                        tool_calls: 10,
+                        retry_attempts: 1,
+                        cost_micros: None,
+                    },
+                    retry_policy: relintor_execution::RetryPolicy {
+                        max_attempts: 1,
+                        retryable: [relintor_execution::FailureClass::Transient].into_iter().collect(),
+                        backoff_ms: 100,
+                    },
+                    evidence_obligations: Vec::new(),
+                    attempt_number: 1,
+                },
+            )]),
+            attempts: Vec::new(),
+            leases: Vec::new(),
+            events: Vec::new(),
+            usage: Default::default(),
+            loop_signals: Vec::new(),
+            oscillation_signals: Vec::new(),
+            continuations: Vec::new(),
+            diagnostics: Vec::new(),
+            external_modifications: Vec::new(),
+            progress: Vec::new(),
+            watchdog_state: relintor_execution::WatchdogState::Healthy,
+            policy: Default::default(),
+            safe_boundary: None,
+            current_turn: 1,
+            last_error: None,
+            no_progress_occurrences: 0,
+            integrity_version: "p7-ledger-integrity-v1".into(),
+            integrity_tag: String::new(),
+            reviewed_recovery_deltas: Vec::new(),
+        };
+        assert!(run.all_tasks_finished());
+
+        let p7 = AuthenticatedP7Execution::from_run(run).expect("from run");
+        assert_eq!(
+            p7.run.state,
+            relintor_execution::ExecutionRunState::ExecutionTasksFinishedAwaitingVerification
+        );
     }
 }

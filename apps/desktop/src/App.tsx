@@ -34,10 +34,11 @@ import {
   continueExecution,
   verificationStatus,
   verificationStart,
+  submitHumanDecision,
   rerunVerification,
   verificationEvidence,
-  completionCertificate,
   exportVerificationManifest,
+  authorizeCorrection,
   takeoverScan,
   chooseWorkspace,
   setProjectWorkspace,
@@ -49,8 +50,16 @@ import {
   type ProjectSummary,
   type VerificationStatus,
   type VerificationEvidence,
+  type HumanDecisionEvidenceItem,
+  type CorrectionScope,
+  type CorrectionTaskPreview,
   type AntigravityHealth,
   type AntigravitySetupView,
+  type HumanScopeRefinement,
+  type ScopeRefinementEntry,
+  type PathType,
+  type PermittedOperation,
+  verificationSaveCorrectionRefinement,
 } from "./backend";
 import { createReadinessGate } from "./readiness";
 import {
@@ -130,8 +139,8 @@ export function App() {
     if (value.handoff) navigate("activity");
   };
 
-  const authorityText = useMemo(() => {
-    if (!health) return "Authority checking";
+  const systemHealthText = useMemo(() => {
+    if (!health) return "System health checking";
     if (health.application.status === "unavailable") return "Browser preview";
 
     const coreReady =
@@ -139,7 +148,7 @@ export function App() {
       isHealthy(health.database.status) &&
       isHealthy(health.specification.status);
 
-    return coreReady ? "Authority baseline healthy" : "Authority needs attention";
+    return coreReady ? "System healthy" : "System needs attention";
   }, [health]);
 
   return (
@@ -155,11 +164,11 @@ export function App() {
           </a>
           <span className="beta-badge">Beta</span>
         </div>
-        <div className="guardian-status" aria-label={`System status: ${authorityText}`}>
+        <div className="guardian-status" aria-label={`System health: ${systemHealthText}`}>
           <span className="status-mark" aria-hidden="true">
             ●
           </span>
-          {authorityText}
+          {systemHealthText}
         </div>
       </header>
 
@@ -210,6 +219,29 @@ export function App() {
 }
 
 function Home({ onNewProject, onTakeover, showOnboarding, onDismissOnboarding }: { onNewProject: () => void; onTakeover: () => void; showOnboarding: boolean; onDismissOnboarding: () => void }) {
+  const [recentProjects, setRecentProjects] = useState<ProjectSummary[] | null>(null);
+  const [recentProjectsError, setRecentProjectsError] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void listProjects()
+      .then((projects) => {
+        if (!cancelled) {
+          setRecentProjects(projects.slice(0, 3));
+          setRecentProjectsError(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRecentProjects([]);
+          setRecentProjectsError(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <section className="view" aria-labelledby="home-title">
       <div className="eyebrow">EXECUTION AUTHORITY FOR AI-BUILT SOFTWARE</div>
@@ -257,16 +289,41 @@ function Home({ onNewProject, onTakeover, showOnboarding, onDismissOnboarding }:
 
       <section className="recent-section" aria-labelledby="recent-title">
         <div className="section-heading">
-          <h2 id="recent-title">Recent missions</h2>
+          <h2 id="recent-title">Recent projects</h2>
           <span className="mono-label">LOCAL ONLY</span>
         </div>
-        <div className="empty-state">
-          <span className="empty-mark" aria-hidden="true">
-            □
-          </span>
-          <p>No missions yet.</p>
-          <small>Your local project evidence will appear here once a mission is created.</small>
-        </div>
+        {recentProjects === null && (
+          <div className="empty-state" role="status">
+            <span className="empty-mark" aria-hidden="true">□</span>
+            <p>Reading saved projects…</p>
+          </div>
+        )}
+        {recentProjects !== null && recentProjectsError && (
+          <div className="empty-state" role="status">
+            <span className="empty-mark" aria-hidden="true">□</span>
+            <p>Saved projects are temporarily unavailable.</p>
+            <small>Relintor will not guess whether local missions exist when the backend authority read fails.</small>
+          </div>
+        )}
+        {recentProjects !== null && !recentProjectsError && recentProjects.length === 0 && (
+          <div className="empty-state">
+            <span className="empty-mark" aria-hidden="true">□</span>
+            <p>No saved projects yet.</p>
+            <small>Your local project evidence will appear here once a project is created.</small>
+          </div>
+        )}
+        {recentProjects !== null && !recentProjectsError && recentProjects.length > 0 && (
+          <div className="project-list">
+            {recentProjects.map((project) => (
+              <div className="project-list-row" key={project.project_id}>
+                <div>
+                  <strong>{project.name}</strong>
+                  <small>{project.root_path ? displayWindowsPath(project.root_path) : "Workspace required"} · {project.sealed_revision ? "Mission sealed" : humanStatus(project.state, "Saved")}</small>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       <div className="principles" aria-label="Relintor workflow">
@@ -328,6 +385,22 @@ function userFacingAuthorityError(reason: unknown, fallback: string): string {
     return fallback;
   }
   return /authority|execution state|ledger|sqlite|database|query/i.test(message) ? fallback : message;
+}
+
+export function verificationActionError(reason: unknown): string {
+  return userFacingAuthorityError(
+    reason,
+    "Relintor couldn't verify this work. The execution record is preserved; review the verification details before retrying.",
+  );
+}
+
+export function verificationActionMessage(status: VerificationStatus): string {
+  const completionVerified = status.completion_state.replace(/[^a-z0-9]/gi, "").toUpperCase() === "VERIFIEDCOMPLETE";
+  const certificateVerified = status.certificate?.final_state.replace(/[^a-z0-9]/gi, "").toUpperCase() === "VERIFIEDCOMPLETE";
+  if (status.workflow_stage === "VERIFIED_COMPLETE" && completionVerified && certificateVerified) {
+    return "Verification finished successfully. The completion certificate is valid and saved.";
+  }
+  return status.summary;
 }
 
 function friendlyExecutionLabel(value: string | null | undefined, fallback: string): string {
@@ -429,6 +502,7 @@ function Projects({
   const [authority, setAuthority] = useState<AuthorityPreview | null>(null);
   const [authorityBusy, setAuthorityBusy] = useState(false);
   const [authorityError, setAuthorityError] = useState<string | null>(null);
+  const projectOpenInFlight = useRef(false);
 
   useEffect(() => setMode(initialMode), [initialMode]);
 
@@ -531,6 +605,8 @@ function Projects({
   };
 
   const openSavedProject = async (project: ProjectSummary) => {
+    if (projectOpenInFlight.current) return;
+    projectOpenInFlight.current = true;
     setProjectsError(null);
     try {
       const opened = await openProject(project.project_id);
@@ -544,6 +620,8 @@ function Projects({
       }
     } catch (reason) {
       setProjectsError(String(reason));
+    } finally {
+      projectOpenInFlight.current = false;
     }
   };
 
@@ -596,7 +674,7 @@ function ProjectChooser({ projects, busy, error, onRefresh, onOpen, onNew, onTak
     <p className="muted-copy">Open a saved project, or start with a new idea or an existing codebase.</p>
     {busy && <p className="loading-state" role="status">Reading saved projects…</p>}
     {!busy && !projects.length && <div className="empty-inline"><strong>No saved projects yet</strong><span>Start a new project or scan an existing codebase.</span></div>}
-    {projects.length > 0 && <div className="project-list">{projects.map((project) => <div className="project-list-row" key={project.project_id}><div><strong>{project.name}</strong><small>{project.root_path ? displayWindowsPath(project.root_path) : "Workspace required"} · {humanStatus(project.state, "Saved")}</small></div><button className="secondary-button" type="button" onClick={() => onOpen(project)}>Open</button></div>)}</div>}
+    {projects.length > 0 && <div className="project-list">{projects.map((project) => <div className="project-list-row" key={project.project_id}><div><strong>{project.name}</strong><small>{project.root_path ? displayWindowsPath(project.root_path) : "Workspace required"} · {project.sealed_revision ? "Mission sealed" : humanStatus(project.state, "Saved")}</small></div><button className="secondary-button" type="button" onClick={() => onOpen(project)}>Open</button></div>)}</div>}
     {error && <p className="error-text" role="alert">{error}</p>}
     <div className="result-actions"><div className="button-row"><button className="primary-button" type="button" onClick={onNew}>New project</button><button className="secondary-button" type="button" onClick={onTakeover}>Take over a project</button></div><button className="tertiary-button" type="button" onClick={onRefresh} disabled={busy}>Refresh projects</button></div>
   </section>;
@@ -637,6 +715,16 @@ function WorkspaceSelector({ projectId, onUpdated }: { projectId: string; onUpda
     <button className="primary-button" type="button" onClick={() => void choose()} disabled={busy}>{busy ? "Choosing workspace…" : "Choose workspace"}</button>
     {error && <p className="error-text" role="alert">{error}</p>}
   </section>;
+}
+
+export function mergeVerificationRefresh(
+  _previous: VerificationStatus | null,
+  next: VerificationStatus,
+): VerificationStatus {
+  // Phase 3: the Rust workflow stage is authoritative. The renderer must not
+  // preserve or synthesize an older authority state when a refresh returns a
+  // newer snapshot.
+  return next;
 }
 
 function VerificationSection({ projectId }: { projectId: string }) {
@@ -688,19 +776,6 @@ function VerificationSection({ projectId }: { projectId: string }) {
     }
   };
 
-  const issueCertificate = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const certificate = await completionCertificate(projectId);
-      setStatus((current) => current ? { ...current, certificate } : current);
-    } catch (reason) {
-      setError(userFacingAuthorityError(reason, "The completion certificate is unavailable until verification has a real P7 execution ledger."));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const exportManifest = async () => {
     try {
       const manifest = await exportVerificationManifest(projectId);
@@ -717,10 +792,9 @@ function VerificationSection({ projectId }: { projectId: string }) {
   };
 
   const verificationView = verificationPresentation(status);
-  const canStart = Boolean(status && status.execution_run_id !== "browser-preview" && status.evidence_count > 0);
+  const canStart = Boolean(status && status.execution_run_id !== "browser-preview");
   const attentionItems = [
     ...(status?.failed_checks || []),
-    ...(status?.stale_evidence || []),
     ...(status?.blocked_external || []),
     ...(status?.missing_evidence || []),
   ];
@@ -735,11 +809,23 @@ function VerificationSection({ projectId }: { projectId: string }) {
         <div><span className="panel-kicker">CURRENT RESULT</span><strong>{verificationView.label}</strong><p>{verificationView.supporting}</p></div>
         <div className="verification-stages" aria-label="Completion stages"><span><small>Execution</small><strong>{status.execution_run_id !== "browser-preview" ? "Recorded" : "Waiting"}</strong></span><span><small>Evidence</small><strong>{status.evidence_count > 0 ? "Captured" : "Waiting"}</strong></span><span><small>Verification</small><strong>{verificationView.verifiedComplete ? "Passed" : attentionItems.length ? "Needs attention" : "Waiting"}</strong></span></div>
       </div>}
-      {attentionItems.length > 0 && <section className="attention-list" aria-labelledby="verification-attention-title"><h3 id="verification-attention-title">What needs attention</h3><ul>{attentionItems.slice(0, 5).map((item) => <li key={item}>{item}</li>)}</ul>{attentionItems.length > 5 && <p>{attentionItems.length - 5} more items are available in verification details.</p>}</section>}
+      {!verificationView.verifiedComplete && attentionItems.length > 0 && (
+        <section className="attention-list" aria-labelledby="verification-attention-title">
+          <h3 id="verification-attention-title">What needs attention</h3>
+          <p>{status?.summary || "Relintor needs more evidence before this mission can be complete."}</p>
+          {status?.evidence_items && status.evidence_items.length > 0 ? (
+            <TechnicalEvidenceReview items={status.evidence_items} />
+          ) : (
+            <details className="technical-details">
+              <summary>Technical evidence details</summary>
+              <ul>{attentionItems.map((item) => <li key={item}>{item}</li>)}</ul>
+            </details>
+          )}
+        </section>
+      )}
       {!canStart && !verificationView.verifiedComplete && <p className="info-callout">Waiting for execution evidence.</p>}
       <div className="result-actions">
-        {!verificationView.verifiedComplete && <button className="primary-button" type="button" disabled={busy || !canStart} onClick={() => void runVerification()}>{busy ? "Verifying…" : "Verify work"}</button>}
-        {verificationView.verifiedComplete && !status?.certificate && <button className="primary-button" type="button" disabled={busy} onClick={() => void issueCertificate()}>{busy ? "Issuing certificate…" : "Issue completion certificate"}</button>}
+        {busy && <span className="busy-text">Verifying…</span>}
         {verificationView.verifiedComplete && status?.certificate && <span className="success-text">Completion certificate issued.</span>}
         <details className="advanced-controls"><summary>Verification details</summary><div className="verification-details"><ResultPanel title="Missing evidence" items={status?.missing_evidence || []} empty="No missing evidence reported." /><ResultPanel title="Failed checks" items={status?.failed_checks || []} empty="No failed checks reported." /><ResultPanel title="Skipped checks" items={status?.skipped_checks || []} empty="No skipped checks reported." /><ResultPanel title="Stale evidence" items={status?.stale_evidence || []} empty="No stale evidence reported." /><ResultPanel title="External blockers" items={status?.blocked_external || []} empty="No external blocker reported." /><ResultPanel title="Accepted risks" items={status?.accepted_risks || []} empty="No accepted risks recorded." />{evidence.length ? <div className="drilldown-list">{evidence.map((item) => <details key={item.evidence_id}><summary>{item.evidence_id} · {humanStatus(item.result)}</summary><dl><div><dt>Class</dt><dd>{item.class}</dd></div><div><dt>Confidence</dt><dd>{item.confidence}</dd></div><div><dt>Digest</dt><dd>{item.digest}</dd></div></dl></details>)}</div> : <p className="muted-copy">No persisted evidence artifacts are available.</p>}<div className="advanced-control-row"><button className="secondary-button" type="button" disabled={busy || !canStart} onClick={() => void rerun()}>Run verification again</button><button className="secondary-button" type="button" disabled={busy} onClick={() => void refresh()}>Refresh status</button><button className="secondary-button" type="button" disabled={busy} onClick={() => void exportManifest()}>Export evidence manifest</button></div>{status?.detail && <p className="form-hint">{status.detail}</p>}{status?.certificate && <dl className="technical-list"><div><dt>Certificate</dt><dd>{status.certificate.certificate_id}</dd></div><div><dt>Digest</dt><dd>{status.certificate.digest}</dd></div></dl>}</div></details>
       </div>
@@ -963,9 +1049,81 @@ function ResultPanel({ title, items, empty }: { title: string; items: string[]; 
   return <section className="panel result-panel"><span className="panel-kicker">{title}</span>{items.length ? <ul>{items.map((item) => <li key={item}>{item}</li>)}</ul> : <p className="muted-copy">{empty}</p>}</section>;
 }
 
+function areStatusesEquivalent(a: ExecutionStatus, b: ExecutionStatus): boolean {
+  if (a === b) return true;
+  return (
+    a.state === b.state &&
+    a.current_turn === b.current_turn &&
+    a.active_task === b.active_task &&
+    a.finished_tasks === b.finished_tasks &&
+    a.total_tasks === b.total_tasks &&
+    a.tool_calls === b.tool_calls &&
+    a.execution_steps === b.execution_steps &&
+    a.watchdog_state === b.watchdog_state &&
+    a.dispatch_active === b.dispatch_active &&
+    a.execution_phase === b.execution_phase &&
+    a.recovery_state === b.recovery_state &&
+    a.recovery_detected === b.recovery_detected &&
+    a.recovery_action === b.recovery_action &&
+    a.resume_disposition === b.resume_disposition &&
+    a.resume_blocker === b.resume_blocker &&
+    a.safe_boundary_reached === b.safe_boundary_reached &&
+    a.last_event === b.last_event &&
+    a.events.length === b.events.length &&
+    a.external_changes.length === b.external_changes.length
+  );
+}
+
+function FullTimeline({ events }: { events: ExecutionStatus["events"] }) {
+  const [open, setOpen] = useState(false);
+  const [limit, setLimit] = useState(50);
+  if (events.length <= 5) return null;
+  return (
+    <details
+      className="technical-details"
+      onToggle={(e) => setOpen(e.currentTarget.open)}
+    >
+      <summary>View full authority timeline ({events.length} events)</summary>
+      {open && (
+        <>
+          <ol className="event-timeline full-timeline">
+            {events.slice(-limit).reverse().map((event) => {
+              const copy = eventPresentation(event.kind, event.detail);
+              return (
+                <li key={`full-${event.sequence}-${event.kind}`}>
+                  <div>
+                    <strong>{copy.title}</strong>
+                    <span>Sequence {event.sequence}</span>
+                  </div>
+                  <p>{copy.detail}</p>
+                  <small>
+                    {event.kind}
+                    {event.task_id ? ` · ${event.task_id}` : ""}
+                  </small>
+                </li>
+              );
+            })}
+          </ol>
+          {limit < events.length && (
+            <button
+              type="button"
+              className="secondary-button"
+              style={{ margin: "8px 0" }}
+              onClick={() => setLimit((l) => l + 100)}
+            >
+              Load more events ({events.length - limit} remaining)
+            </button>
+          )}
+        </>
+      )}
+    </details>
+  );
+}
+
 export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
   const [status, setStatus] = useState<ExecutionStatus | null>(null);
   const [verification, setVerification] = useState<VerificationStatus | null>(null);
+  const [verificationNotice, setVerificationNotice] = useState<string | null>(null);
   const [antigravity, setAntigravity] = useState<AntigravityHealth | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(Boolean(handoff));
@@ -975,6 +1133,8 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
   const [authorityReadStatus, setAuthorityReadStatus] = useState<string | null>(null);
   const [revalidating, setRevalidating] = useState(false);
   const pollInFlight = useRef(false);
+  const verificationRefreshGeneration = useRef(0);
+  const decisionSubmissionInFlight = useRef(false);
   const readinessGate = useRef(createReadinessGate<AntigravityHealth | null>(3_000)).current;
   const projectId = handoff?.mission_id.replace(/^mission-/, "") || null;
 
@@ -991,6 +1151,8 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
 
   const load = async () => {
     if (!projectId) return;
+    const generation = verificationRefreshGeneration.current + 1;
+    verificationRefreshGeneration.current = generation;
     const attempt = authorityReadAttempt + 1;
     setAuthorityReadAttempt(attempt);
     setLoading(true);
@@ -1002,9 +1164,13 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
       setStatus(executionState);
       setAuthorityReadStatus(`Authority read attempt ${attempt} succeeded.`);
       try {
-        setVerification(await verificationStatus(projectId));
+        const value = await verificationStatus(projectId);
+        if (verificationRefreshGeneration.current === generation) {
+          setVerification((previous) => mergeVerificationRefresh(previous, value));
+        }
       } catch {
-        setVerification(null);
+        // A transient authority read failure must not erase a pending explicit
+        // user decision or the user's unsaved notes.
       }
     } catch (reason) {
       setAuthorityReadFailure(true);
@@ -1046,16 +1212,20 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
       try {
         const current = await readExecutionStatus(projectId);
         if (active) {
-          setStatus(current);
+          setStatus((previous) => (previous && areStatusesEquivalent(previous, current) ? previous : current));
           // Verification becomes meaningful only after the authenticated P7
           // run reaches its terminal evidence boundary. Poll it from the same
           // single-flight loop so the user never has to refresh by hand.
           if (current.state === "ExecutionTasksFinishedAwaitingVerification") {
+            const generation = verificationRefreshGeneration.current;
             try {
               const value = await verificationStatus(projectId);
-              if (active) setVerification(value);
+              if (active && verificationRefreshGeneration.current === generation) {
+                setVerification((previous) => mergeVerificationRefresh(previous, value));
+              }
             } catch {
-              if (active) setVerification(null);
+              // Preserve the last authenticated verification projection until
+              // a newer successful authority read replaces it.
             }
           }
         }
@@ -1082,6 +1252,8 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
   const runCommand = async (command: (id: string) => Promise<ExecutionStatus>) => {
     if (!projectId) return;
     const isRevalidation = command === revalidateExecution;
+    const generation = verificationRefreshGeneration.current + 1;
+    verificationRefreshGeneration.current = generation;
     if (isRevalidation) setRevalidating(true);
     setBusy(true);
     setError(null);
@@ -1089,9 +1261,13 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
     try {
       setStatus(await command(projectId));
       try {
-        setVerification(await verificationStatus(projectId));
+        const value = await verificationStatus(projectId);
+        if (verificationRefreshGeneration.current === generation) {
+          setVerification((previous) => mergeVerificationRefresh(previous, value));
+        }
       } catch {
-        setVerification(null);
+        // Preserve the last authenticated verification projection on a
+        // transient refresh failure.
       }
     } catch (reason) {
       setError(userFacingAuthorityError(reason, "Relintor couldn't apply that action. No completion state was changed; refresh the status and try again."));
@@ -1103,12 +1279,85 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
 
   const runVerificationCommand = async () => {
     if (!projectId) return;
+    const generation = verificationRefreshGeneration.current + 1;
+    verificationRefreshGeneration.current = generation;
+    setBusy(true);
+    setError(null);
+    setVerificationNotice(null);
+    try {
+      const next = await verificationStart(projectId);
+      if (verificationRefreshGeneration.current === generation) {
+        setVerification(next);
+        setVerificationNotice(verificationActionMessage(next));
+      }
+    } catch (reason) {
+      setError(verificationActionError(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const recordHumanDecision = async (requirementId: string, approved: boolean, notes: string) => {
+    if (!projectId || decisionSubmissionInFlight.current) return;
+    decisionSubmissionInFlight.current = true;
+    const generation = verificationRefreshGeneration.current + 1;
+    verificationRefreshGeneration.current = generation;
+    setBusy(true);
+    setError(null);
+    setVerificationNotice(approved ? "Recording your approval and resuming verification…" : "Recording your rejection…");
+    try {
+      const next = await submitHumanDecision(projectId, requirementId, approved, notes);
+      if (verificationRefreshGeneration.current === generation) {
+        setVerification(next);
+        setVerificationNotice(verificationActionMessage(next));
+      }
+    } catch (reason) {
+      setError(verificationActionError(reason));
+    } finally {
+      setBusy(false);
+      decisionSubmissionInFlight.current = false;
+    }
+  };
+
+  const recordCorrectionAuthorization = async (scopeHash: string) => {
+    if (!status || !verification?.correction_scope) return;
     setBusy(true);
     setError(null);
     try {
-      setVerification(await verificationStart(projectId));
+      const updated = await authorizeCorrection(
+        status.project_id,
+        verification.correction_scope.mission_id,
+        verification.correction_scope.revision,
+        scopeHash,
+      );
+      setStatus(updated);
+      setVerification((prev) =>
+        prev
+          ? {
+              ...prev,
+              correction_scope: prev.correction_scope
+                ? { ...prev.correction_scope, authorized: true }
+                : null,
+            }
+          : null,
+      );
     } catch (reason) {
-      setError(userFacingAuthorityError(reason, "Relintor couldn't verify this work. The execution record is preserved; review the verification details before retrying."));
+      setError(verificationActionError(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const recordScopeRefinement = async (refinement: HumanScopeRefinement) => {
+    if (!status || !projectId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await verificationSaveCorrectionRefinement(status.project_id, refinement);
+      setVerification(updated);
+      setVerificationNotice(verificationActionMessage(updated));
+    } catch (reason) {
+      setError(verificationActionError(reason));
     } finally {
       setBusy(false);
     }
@@ -1121,7 +1370,7 @@ export function Activity({ handoff }: { handoff: ExecutionHandoff | null }) {
     {handoff && <AntigravitySetupCard health={antigravity} onRefresh={refreshAntigravity} />}
     {!handoff && <div className="panel empty-panel" data-testid="activity-empty"><span className="panel-kicker">NO SEALED MISSION</span><h2>Nothing is ready to execute.</h2><p>Review a blueprint and let the Rust authority seal a mission first. There is no frontend-only activity to display.</p></div>}
     {handoff && loading && <div className="panel loading-panel" role="status" aria-live="polite"><span className="panel-kicker">MISSION STATE</span><h2>Reading persisted state…</h2><p>Waiting for the Rust execution and verification authorities.</p></div>}
-    {handoff && !loading && status && <MissionCockpit status={status} verification={verification} antigravity={antigravity} busy={busy} revalidating={revalidating} onCommand={runCommand} onVerify={() => void runVerificationCommand()} onRefresh={() => void load()} />}
+    {handoff && !loading && status && <MissionCockpit status={status} verification={verification} antigravity={antigravity} busy={busy} revalidating={revalidating} verificationNotice={verificationNotice} onCommand={runCommand} onVerify={() => void runVerificationCommand()} onDecision={(requirementId, approved, notes) => void recordHumanDecision(requirementId, approved, notes)} onRefresh={() => void load()} onAuthorizeCorrection={recordCorrectionAuthorization} onSaveRefinement={recordScopeRefinement} />}
     {handoff && !loading && !status && !error && <div className="panel empty-panel"><span className="panel-kicker">STATE UNAVAILABLE</span><h2>No mission state returned.</h2><p>The authority did not provide an execution record, so the UI will not infer one.</p></div>}
     {error && <div className="panel error-panel" role="alert"><span className="panel-kicker">ACTION REQUIRED</span><h2>{/Antigravity is not ready/i.test(error) ? "Antigravity setup required" : authorityReadFailure ? "Mission state unavailable" : "Relintor needs your attention"}</h2><p>{error}</p>{authorityReadFailure && <button className="secondary-button" type="button" onClick={() => void load()}>Retry authority read</button>}{authorityReadFailure && authorityReadStatus && <p className="form-hint" role="status">{authorityReadStatus}</p>}</div>}
   </section>;
@@ -1308,7 +1557,124 @@ function AntigravitySetupCard({ health, onRefresh }: { health: AntigravityHealth
   </section>;
 }
 
-function MissionCockpit({ status, verification, antigravity, busy, revalidating, onCommand, onVerify, onRefresh }: { status: ExecutionStatus; verification: VerificationStatus | null; antigravity: AntigravityHealth | null; busy: boolean; revalidating: boolean; onCommand: (command: (id: string) => Promise<ExecutionStatus>) => Promise<void>; onVerify: () => void; onRefresh: () => void }) {
+export function TechnicalEvidenceReview({
+  items,
+  fallback,
+}: {
+  items?: HumanDecisionEvidenceItem[];
+  fallback?: { requirement_id: string; criterion_ids: string[] };
+}) {
+  const count = items?.length ?? 0;
+  return (
+    <details className="technical-details" open>
+      <summary>Technical Evidence Review ({count} {count === 1 ? "requirement" : "requirements"})</summary>
+      {items && items.length > 0 ? (
+        <div className="evidence-digest-list">
+          {items.map((item) => (
+            <div key={`${item.requirement_id}-${item.evidence_id || "no-evidence"}`} className="evidence-item-card">
+              <div className="evidence-item-header">
+                <span className={`status-badge tone-${item.status === "PASS" ? "success" : item.status === "PENDING_DECISION" ? "warning" : item.status === "FAIL" ? "danger" : "neutral"}`}>
+                  {item.status}
+                </span>
+                <strong className="evidence-item-title">{item.requirement_title}</strong>
+              </div>
+              <p className="evidence-item-intent">{item.intent}</p>
+              {item.evidence_id ? (
+                <div className="evidence-item-support">
+                  <div className="evidence-meta-row">
+                    <span>Type: <code>{item.evidence_class}</code></span>
+                    <span>Command: <code>{item.command}</code></span>
+                    {item.exit_code !== null && <span>Exit: <code>{item.exit_code}</code></span>}
+                    <span>Result: <code>{item.result}</code></span>
+                  </div>
+                  {item.relevant_files.length > 0 && (
+                    <p className="evidence-files-summary">
+                      Files: <code>{item.relevant_files.slice(0, 4).join(", ")}{item.relevant_files.length > 4 ? ` +${item.relevant_files.length - 4} more` : ""}</code>
+                    </p>
+                  )}
+                  <details className="evidence-provenance-details">
+                    <summary>Provenance &amp; Artifact Details</summary>
+                    <dl className="technical-list">
+                      <div><dt>Evidence ID</dt><dd><code>{item.evidence_id}</code></dd></div>
+                      <div><dt>Artifact</dt><dd><code>{item.artifact_path}</code></dd></div>
+                      <div><dt>Mission / Rev</dt><dd><code>{item.mission_id} (rev {item.revision})</code></dd></div>
+                      <div><dt>Source Fingerprint</dt><dd><code>{item.source_fingerprint}</code></dd></div>
+                      <div><dt>Environment</dt><dd><code>{item.environment_fingerprint}</code></dd></div>
+                      <div><dt>Timestamp</dt><dd>{item.timestamp_ms ? new Date(item.timestamp_ms).toISOString() : "N/A"}</dd></div>
+                      {item.detail_snippet && <div><dt>Collector Output</dt><dd><span>{item.detail_snippet}</span></dd></div>}
+                    </dl>
+                  </details>
+                </div>
+              ) : (
+                <div className="evidence-item-support">
+                  <div className="evidence-meta-row">
+                    {item.evidence_class && <span>Type: <code>{item.evidence_class}</code></span>}
+                    <span>Result: <code>{item.result || "Missing"}</code></span>
+                  </div>
+                  <p className="evidence-pending-note">
+                    {item.detail_snippet || (item.status === "PENDING_DECISION" ? "Awaiting your explicit Human Decision (Approve / Reject above)." : "No automated evidence collector is bound to this requirement.")}
+                  </p>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : fallback ? (
+        <dl>
+          <div><dt>Requirement</dt><dd><code>{fallback.requirement_id}</code></dd></div>
+          <div><dt>Criteria</dt><dd><code>{fallback.criterion_ids.join(", ")}</code></dd></div>
+        </dl>
+      ) : (
+        <p className="form-hint">No technical evidence items recorded.</p>
+      )}
+    </details>
+  );
+}
+
+export function MissionCockpit({
+  status,
+  verification,
+  antigravity,
+  busy,
+  revalidating,
+  verificationNotice,
+  onCommand,
+  onVerify,
+  onDecision,
+  onRefresh,
+  onAuthorizeCorrection,
+  onSaveRefinement,
+}: {
+  status: ExecutionStatus;
+  verification: VerificationStatus | null;
+  antigravity: AntigravityHealth | null;
+  busy: boolean;
+  revalidating: boolean;
+  verificationNotice: string | null;
+  onCommand: (command: (id: string) => Promise<ExecutionStatus>) => Promise<void>;
+  onVerify: () => void;
+  onDecision: (requirementId: string, approved: boolean, notes: string) => void;
+  onRefresh: () => void;
+  onAuthorizeCorrection?: (scopeHash: string) => void;
+  onSaveRefinement?: (refinement: HumanScopeRefinement) => Promise<void>;
+}) {
+  const [decisionNotes, setDecisionNotes] = useState("");
+  const [refineMode, setRefineMode] = useState(false);
+  const [newEntryPath, setNewEntryPath] = useState("");
+  const [newEntryType, setNewEntryType] = useState<PathType>("File");
+  const [newEntryTask, setNewEntryTask] = useState("");
+  const [newEntryReason, setNewEntryReason] = useState("");
+  const [newEntryOps, setNewEntryOps] = useState<PermittedOperation[]>(["Read", "Modify"]);
+  const [refineError, setRefineError] = useState<string | null>(null);
+
+  const existingEntries = verification?.correction_scope?.human_scope_refinement?.entries || [];
+  const [entries, setEntries] = useState<ScopeRefinementEntry[]>(existingEntries);
+
+  useEffect(() => {
+    if (verification?.correction_scope?.human_scope_refinement?.entries) {
+      setEntries(verification.correction_scope.human_scope_refinement.entries);
+    }
+  }, [verification?.correction_scope?.human_scope_refinement]);
   const executorReady = antigravity?.adapter_ready === true;
   const presentation = missionPresentation(status, verification, executorReady);
   const verificationView = verificationPresentation(verification);
@@ -1317,7 +1683,9 @@ function MissionCockpit({ status, verification, antigravity, busy, revalidating,
   const currentTaskId = status.active_task || status.recovery_task_id || status.runnable_tasks[0] || null;
   const currentTask = status.active_task
     ? status.current_task_objective || "Current authorized task"
-    : status.recovery_task_objective || status.current_task_objective || (currentTaskId ? "Next authorized task" : "No runnable task is available");
+    : verification?.workflow_stage === "USER_DECISION_REJECTED"
+      ? "Correction review required before next task"
+      : status.recovery_task_objective || status.current_task_objective || (currentTaskId ? "Next authorized task" : "No runnable task is available");
   const taskNumber = Math.min(status.total_tasks, status.finished_tasks + 1);
   const remainingTasks = Math.max(0, status.total_tasks - status.finished_tasks - (running ? 1 : 0));
   const recoveryMessage = revalidating
@@ -1329,7 +1697,27 @@ function MissionCockpit({ status, verification, antigravity, busy, revalidating,
         : status.last_safe_checkpoint
           ? "A trusted checkpoint is available for review."
           : "Relintor has not authorized another attempt yet.";
-  const verificationBlocked = verification?.blocked_external || [];
+  const verificationAttention = [
+    ...(verification?.blocked_external || []),
+    ...(verification?.missing_evidence || []),
+    ...(verification?.failed_checks || []),
+  ];
+  const pendingDecision =
+    verification?.workflow_stage === "WAITING_FOR_USER_DECISION" &&
+    verification.final_human_acceptance_eligible === true &&
+    verificationView.label === "Ready for your final decision"
+      ? verification.human_decisions[0] || null
+      : null;
+  const decisionIdentity = pendingDecision
+    ? `${status.mission_id}:${status.revision}:${verification?.execution_run_id}:${pendingDecision.requirement_id}`
+    : null;
+  const lastDecisionIdentity = useRef<string | null>(null);
+  useEffect(() => {
+    if (decisionIdentity && lastDecisionIdentity.current !== decisionIdentity) {
+      setDecisionNotes("");
+      lastDecisionIdentity.current = decisionIdentity;
+    }
+  }, [decisionIdentity]);
   const recentEvents = status.events.slice(-5).reverse();
   const verifying = busy && status.state === "ExecutionTasksFinishedAwaitingVerification";
   const completedTaskMessage =
@@ -1338,13 +1726,14 @@ function MissionCockpit({ status, verification, antigravity, busy, revalidating,
       : null;
 
   const primaryControl = (() => {
+    if (presentation.primaryAction === "review_correction") return <button className="primary-button" type="button" onClick={() => document.getElementById("correction-scope-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}>Review correction scope</button>;
     if (presentation.primaryAction === "run") return <button className="primary-button" type="button" disabled={busy} onClick={() => void onCommand(stepExecution)}>Run next task</button>;
     if (presentation.primaryAction === "continue") return <button className="primary-button" type="button" disabled={busy} onClick={() => void onCommand(continueExecution)}>Continue mission</button>;
     if (presentation.primaryAction === "recover") {
       const manualRetry = status.recovery_action === "MANUAL_REVIEW_RETRY";
       return <button className="primary-button" type="button" disabled={busy || dispatching} onClick={() => void onCommand(manualRetry ? retryRecoveredTask : revalidateExecution)}>{manualRetry ? (busy ? "Authorizing reviewed retry…" : "Review changes and retry this task") : (revalidating ? "Checking recovery safety…" : "Check recovery safety")}</button>;
     }
-    if (presentation.primaryAction === "verify") return <button className="primary-button" type="button" disabled={busy} onClick={onVerify}>{verifying ? "Capturing evidence and checking requirements…" : "Verify work"}</button>;
+    if (presentation.primaryAction === "verify") return <button className="primary-button" type="button" disabled={busy || Boolean(pendingDecision)} onClick={onVerify}>{verifying ? "Capturing evidence and checking requirements…" : "Verify work"}</button>;
     if (presentation.primaryAction === "view_verification") return <button className="primary-button" type="button" onClick={() => document.getElementById("mission-verification-details")?.scrollIntoView({ behavior: "smooth", block: "start" })}>View verification</button>;
     return null;
   })();
@@ -1357,7 +1746,7 @@ function MissionCockpit({ status, verification, antigravity, busy, revalidating,
 
     <section className="panel current-task-panel" aria-labelledby="current-task-title">
       <div className="task-heading"><div><span className="panel-kicker">{running ? "CURRENT TASK" : "NEXT TASK"}</span><h3 id="current-task-title">{currentTask}</h3></div>{status.total_tasks > 0 && <span className="task-position">Task {taskNumber} of {status.total_tasks}</span>}</div>
-      <p>{status.finished_tasks} completed · {running ? "1 running · " : ""}{remainingTasks} remaining</p>
+      <p>{status.finished_tasks} completed · {running ? "1 running · " : ""}{verification?.workflow_stage === "USER_DECISION_REJECTED" ? "0 ready (correction review required)" : `${remainingTasks} remaining`}</p>
       {completedTaskMessage && <p className="success-text">{completedTaskMessage}</p>}
       {(running || currentTaskId) && <p className="form-hint">Relintor continues while the executor shows healthy progress and ownership. Watchdog, no-progress, lease, and adapter safety boundaries still stop an unsafe or stalled attempt.</p>}
       <div className="primary-action-row">{primaryControl}{presentation.primaryAction === "setup" && <span className="action-guidance">Use Set up Antigravity above. Relintor will enable execution after readiness is verified.</span>}{running && <button className="danger-button" type="button" disabled={busy} onClick={() => void onCommand(stopExecution)}>Stop safely</button>}</div>
@@ -1365,10 +1754,520 @@ function MissionCockpit({ status, verification, antigravity, busy, revalidating,
 
     {presentation.recoveryRequired && <section className="panel attention-panel" aria-labelledby="recovery-title"><span className="panel-kicker">RECOVERY</span><h3 id="recovery-title">Review the interrupted task before continuing</h3><p>{recoveryMessage}</p>{status.external_changes.length > 0 && <ul>{status.external_changes.map((path) => <li key={path}>Workspace change to review: {displayWindowsPath(path)}</li>)}</ul>}<p className="form-hint">Relintor will not retry automatically or claim the workspace is unchanged. A reviewed retry creates a new exact attempt and preserves this history.</p></section>}
 
-    {(verificationBlocked.length > 0 || (verification && verificationView.tone === "warning")) && <section className="panel attention-panel" aria-labelledby="verification-blocker-title"><span className="panel-kicker">VERIFICATION</span><h3 id="verification-blocker-title">Verification needs attention</h3><p>{verificationView.supporting}</p>{verificationBlocked.length > 0 && <ul>{verificationBlocked.slice(0, 4).map((item) => <li key={item}>{item}</li>)}</ul>}</section>}
+    {verificationNotice && <p className="form-hint" role="status" aria-live="polite">{verificationNotice}</p>}
+    {pendingDecision && (
+      <section className="panel attention-panel decision-panel" aria-labelledby="human-decision-title">
+        <span className="panel-kicker">YOUR DECISION</span>
+        <h3 id="human-decision-title">Relintor needs your decision</h3>
+        <p><strong>{pendingDecision.question}</strong></p>
+        <p>{pendingDecision.summary}</p>
+        <label className="field-label" htmlFor="decision-notes">Optional notes</label>
+        <textarea
+          id="decision-notes"
+          value={decisionNotes}
+          maxLength={4000}
+          disabled={busy}
+          onChange={(event) => setDecisionNotes(event.target.value)}
+          placeholder="Add context for the audit record (optional)"
+        />
+        <div className="primary-action-row">
+          <button
+            className="primary-button"
+            type="button"
+            disabled={busy}
+            onClick={() => onDecision(pendingDecision.requirement_id, true, decisionNotes)}
+          >
+            {busy ? "Recording decision…" : "Approve"}
+          </button>
+          <button
+            className="danger-button"
+            type="button"
+            disabled={busy}
+            onClick={() => onDecision(pendingDecision.requirement_id, false, decisionNotes)}
+          >
+            {busy ? "Recording decision…" : "Reject"}
+          </button>
+        </div>
+        <p className="form-hint">Only your action can satisfy this decision. Relintor and Antigravity cannot approve it for you.</p>
+        <TechnicalEvidenceReview
+          items={pendingDecision.evidence_items || verification?.evidence_items}
+          fallback={{ requirement_id: pendingDecision.requirement_id, criterion_ids: pendingDecision.criterion_ids }}
+        />
+      </section>
+    )}
+    {(verification?.workflow_stage === "USER_DECISION_REJECTED" || (verification?.workflow_stage === "CORRECTING_FAILED_REQUIREMENT" && Boolean(verification?.correction_scope))) && (
+      <section className="panel attention-panel correction-panel" id="correction-scope-panel" aria-labelledby="correction-scope-title">
+        <span className="panel-kicker">CORRECTION SCOPE</span>
+        <h3 id="correction-scope-title">
+          {verification.correction_scope?.authorized || !verification.correction_scope?.user_reauthorization_required
+            ? "Human Rejection Recorded — Bounded Correction Under Sealed Authority"
+            : "Human Rejection Recorded — Review Correction Scope"}
+        </h3>
+        <p>
+          {verification.correction_scope?.authorized || !verification.correction_scope?.user_reauthorization_required
+            ? "You rejected the completed result. Relintor derived a bounded correction and continues work under the authority of the original seal."
+            : "You rejected the completed result. Relintor halted automatic execution to preserve human authority and requires user authorization before proceeding."}
+        </p>
+        <div className="correction-facts">
+          <div><span>Execution state</span><strong>{status.finished_tasks} of {status.total_tasks} tasks completed · Preserved</strong></div>
+          <div><span>Recovery state</span><strong>{status.recovery_state}</strong></div>
+          <div>
+            <span>Next step</span>
+            <strong>
+              {verification.correction_scope?.authorized
+                ? "Execute authorized correction"
+                : !verification.correction_scope?.user_reauthorization_required
+                ? "Autonomous technical correction"
+                : "Authorize bounded correction"}
+            </strong>
+          </div>
+          {verification.correction_scope && (
+            <div><span>Revision policy</span><strong>Same revision ({status.revision}) · Sealed scope</strong></div>
+          )}
+        </div>
+
+        {verification.correction_scope ? (
+          <div className="correction-scope-details">
+            <div className="correction-scope-reasons">
+              <h4>Why correction is required</h4>
+              <ul>
+                {verification.correction_scope.user_rejection_notes && (
+                  <li><strong>Your rejection finding:</strong> {verification.correction_scope.user_rejection_notes}</li>
+                )}
+                <li>
+                  <strong>Failed requirements ({verification.correction_scope.failed_requirement_ids.length}):</strong>
+                  <ul className="sub-req-list">
+                    {verification.correction_scope.failed_requirement_ids.map((id, i) => {
+                      const title = verification.correction_scope?.failed_requirement_titles?.[i];
+                      return (
+                        <li key={id}>
+                          {title && <span><strong>{title}</strong> — </span>}
+                          <code>{id}</code>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </li>
+                {verification.correction_scope.blocked_requirement_ids.length > 0 && (
+                  <li>
+                    <strong>Blocked requirements ({verification.correction_scope.blocked_requirement_ids.length}):</strong>
+                    <ul className="sub-req-list">
+                      {verification.correction_scope.blocked_requirement_ids.map((id, i) => {
+                        const title = verification.correction_scope?.blocked_requirement_titles?.[i];
+                        return (
+                          <li key={id}>
+                            {title && <span><strong>{title}</strong> — </span>}
+                            <code>{id}</code>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </li>
+                )}
+              </ul>
+
+              {verification.correction_scope.correction_units && verification.correction_scope.correction_units.length > 0 && (
+                <div className="correction-units-section" data-testid="correction-units-section">
+                  <h4>Structured Rejection Findings ({verification.correction_scope.correction_units.length})</h4>
+                  <ul className="correction-units-list">
+                    {verification.correction_scope.correction_units.map((unit) => (
+                      <li key={unit.correction_id} className="correction-unit-item">
+                        <div className="unit-header">
+                          <span className="unit-id"><code>{unit.correction_id}</code></span>
+                          <strong>{unit.semantic_finding}</strong>
+                        </div>
+                        <div className="unit-details">
+                          <span className="unit-label">Why included:</span> <em>{unit.why_scope_is_included}</em>
+                        </div>
+                        <div className="unit-details">
+                          <span className="unit-label">Required evidence:</span> <code>{unit.required_fresh_evidence.join(", ")}</code>
+                        </div>
+                        {unit.affected_source_or_artifact_scope.length > 0 && (
+                          <div className="unit-details">
+                            <span className="unit-label">Bounded file scope:</span> <code>{unit.affected_source_or_artifact_scope.join(", ")}</code>
+                          </div>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+
+            {verification.correction_scope.deduplicated_task_ids && verification.correction_scope.deduplicated_task_ids.length > 0 && (
+              <div className="correction-deduplication-notice" data-testid="correction-deduplication-notice">
+                <strong>Semantic Deduplication Applied:</strong> {verification.correction_scope.deduplicated_task_ids.length} semantically duplicate {verification.correction_scope.deduplicated_task_ids.length === 1 ? "task" : "tasks"} (<code>{verification.correction_scope.deduplicated_task_ids.join(", ")}</code>) excluded from execution to prevent duplicate work. Duplicate correction work: 0.
+              </div>
+            )}
+
+            {verification.correction_scope.human_refinement_required && (
+              <div className="panel attention-panel" role="alert" data-testid="human-refinement-required-alert">
+                <span className="panel-kicker">HUMAN REFINEMENT REQUIRED</span>
+                <h4>HUMAN_SCOPE_REFINEMENT_REQUIRED</h4>
+                <p>The proposed correction boundaries could not be safely derived from execution provenance alone. Refine task boundaries before authorization can proceed.</p>
+              </div>
+            )}
+
+            <div className="correction-scope-actions-summary">
+              <h4>Proposed correction boundary</h4>
+              <p>
+                Authorizing this correction will reopen only <strong>{verification.correction_scope.affected_task_ids.length} {verification.correction_scope.affected_task_ids.length === 1 ? "task" : "tasks"}</strong> with fresh bounded execution allowances under the same sealed revision.
+              </p>
+              <p className="form-hint">
+                The executor will only be allowed to modify files and artifacts within the bounded scope of the reopened tasks. Once complete, fresh evidence must be verified before a certificate can be issued.
+              </p>
+            </div>
+
+            <div className="correction-tasks-container">
+              <h4>Proposed Correction Tasks ({verification.correction_scope.proposed_tasks?.length || verification.correction_scope.affected_task_ids.length})</h4>
+              {verification.correction_scope.proposed_tasks && verification.correction_scope.proposed_tasks.length > 0 ? (
+                <div className="correction-task-cards">
+                  {verification.correction_scope.proposed_tasks.map((task, idx) => (
+                    <div key={task.task_id} className="correction-task-card" data-testid={`correction-task-card-${task.task_id}`}>
+                      <div className="correction-task-card-header">
+                        <span className="correction-task-card-index">Task {idx + 1} of {verification.correction_scope?.proposed_tasks?.length}</span>
+                        <span className={`correction-task-badge ${task.scope_relation === "DIRECT" ? "badge-direct" : "badge-downstream"}`}>
+                          {task.scope_relation === "DIRECT" ? "Direct Target" : "Downstream Dependency"}
+                        </span>
+                      </div>
+                      <h5 className="correction-task-title">{task.title}</h5>
+                      <div className="correction-task-id-badge">
+                        <code>{task.task_id}</code>
+                      </div>
+
+                      <div className="correction-task-section">
+                        <span className="section-label">Why included:</span>
+                        <p className="section-content">{task.why_included}</p>
+                        {task.dependency_reason && (
+                          <p className="dependency-reason"><em>Dependency reason:</em> {task.dependency_reason}</p>
+                        )}
+                        {task.triggering_requirement_titles && task.triggering_requirement_titles.length > 0 && (
+                          <div className="triggering-reqs-list">
+                            <span className="sub-label">Triggering requirements:</span>
+                            <ul>
+                              {task.triggering_requirement_titles.map((title, tIdx) => (
+                                <li key={tIdx}>
+                                  <strong>{title}</strong> {task.triggering_requirement_ids[tIdx] && <code>({task.triggering_requirement_ids[tIdx]})</code>}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="correction-task-section">
+                        <span className="section-label">Correction objective:</span>
+                        <p className="task-objective-text">{task.objective}</p>
+                      </div>
+
+                      <div className="correction-task-section">
+                        <span className="section-label">Authorized scope boundary:</span>
+                        <div className="task-scope-box">
+                          <div><span className="scope-field-name">Boundary type:</span> <code className={task.authorized_scope.is_bounded ? "badge-bounded" : "badge-unbounded"}>{task.authorized_scope.authority_boundary_type || (task.authorized_scope.is_bounded ? "PROVENANCE_BOUNDED" : "UNBOUNDED_WORKSPACE")}</code></div>
+                          {task.authorized_scope.bounded_file_scopes && task.authorized_scope.bounded_file_scopes.length > 0 && (
+                            <div><span className="scope-field-name">Bounded files:</span> <code>{task.authorized_scope.bounded_file_scopes.join(", ")}</code></div>
+                          )}
+                          <div><span className="scope-field-name">Workspace:</span> <code>{task.authorized_scope.workspace}</code></div>
+                          {task.authorized_scope.file_scopes && task.authorized_scope.file_scopes.length > 0 && (
+                            <div><span className="scope-field-name">File scope:</span> <code>{task.authorized_scope.file_scopes.join(", ")}</code></div>
+                          )}
+                          {task.authorized_scope.package_lockfiles && task.authorized_scope.package_lockfiles.length > 0 && (
+                            <div><span className="scope-field-name">Package lockfiles:</span> <code>{task.authorized_scope.package_lockfiles.join(", ")}</code></div>
+                          )}
+                          {task.authorized_scope.allowed_tools && task.authorized_scope.allowed_tools.length > 0 && (
+                            <div><span className="scope-field-name">Allowed tools:</span> <code>{task.authorized_scope.allowed_tools.join(", ")}</code></div>
+                          )}
+                          {task.authorized_scope.suggested_scope && (
+                            <div><span className="scope-field-name">Domain:</span> <code>{task.authorized_scope.suggested_scope}</code></div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="correction-task-section">
+                        <span className="section-label">Expected implementation outcome:</span>
+                        <p className="section-content">{task.expected_outcome}</p>
+                      </div>
+
+                      {task.required_fresh_evidence && task.required_fresh_evidence.length > 0 && (
+                        <div className="correction-task-section">
+                          <span className="section-label">Required fresh evidence after correction:</span>
+                          <ul className="fresh-evidence-list">
+                            {task.required_fresh_evidence.map((ev, eIdx) => (
+                              <li key={eIdx}><code>{ev}</code></li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      <div className="correction-task-status-row">
+                        <span className="status-label">Status:</span>{" "}
+                        <em>
+                          {verification.correction_scope?.authorized || !verification.correction_scope?.user_reauthorization_required
+                            ? "Runnable under sealed authority"
+                            : "Will become runnable only after explicit user authorization"}
+                        </em>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p>Reopening tasks: <code>{verification.correction_scope.affected_task_ids.join(", ")}</code></p>
+              )}
+            </div>
+
+            <div className="correction-preserved-notice">
+              <strong>{verification.correction_scope.preserved_task_ids.length} historical tasks preserved:</strong> These tasks will NOT rerun and their completed records remain permanently preserved in the ledger.
+            </div>
+
+            {verification.correction_scope.human_refinement_required && (
+              <div className="scope-refinement-alert" role="alert" data-testid="scope-refinement-required-notice">
+                <strong>Scope Refinement Required</strong>
+                <p>
+                  Automatic boundary derivation could not safely prove bounded file scopes for all affected tasks.
+                  {verification.correction_scope.missing_provenance_tasks && verification.correction_scope.missing_provenance_tasks.length > 0 && (
+                    <span> Unbounded tasks: <code>{verification.correction_scope.missing_provenance_tasks.join(", ")}</code>.</span>
+                  )}
+                  {" "}Add bounded paths with explicit operations and justifications before authorizing this correction.
+                </p>
+              </div>
+            )}
+
+            {(() => {
+              const controls = (
+                <div className="scope-refinement-controls">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => setRefineMode(!refineMode)}
+                  >
+                    {refineMode ? "Hide scope refinement" : "Refine correction scope"}
+                  </button>
+
+              {refineMode && (
+                <div className="scope-refinement-panel">
+                  <h4>Refine Permitted Work Boundaries</h4>
+                  <p className="form-hint">
+                    Specify files or directories permitted for corrective work. Every path is validated against sealed workspace containment.
+                  </p>
+
+                  {entries.length > 0 && (
+                    <div className="refinement-entries-list">
+                      <h5>Configured refinement entries ({entries.length})</h5>
+                      <table className="refinement-table">
+                        <thead>
+                          <tr>
+                            <th>Path</th>
+                            <th>Type</th>
+                            <th>Target Task</th>
+                            <th>Operations</th>
+                            <th>Reason</th>
+                            <th>Action</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {entries.map((entry, idx) => (
+                            <tr key={idx}>
+                              <td><code>{entry.path}</code></td>
+                              <td>{entry.path_type}</td>
+                              <td>{entry.target_task_id ? <code>{entry.target_task_id}</code> : <em>All affected</em>}</td>
+                              <td>{entry.permitted_operations.join(", ")}</td>
+                              <td>{entry.reason}</td>
+                              <td>
+                                <button
+                                  type="button"
+                                  className="danger-button small"
+                                  onClick={() => {
+                                    setEntries(entries.filter((_, i) => i !== idx));
+                                  }}
+                                >
+                                  Remove
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  <form
+                    className="add-refinement-entry-form"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      setRefineError(null);
+                      const trimmedPath = newEntryPath.trim();
+                      const trimmedReason = newEntryReason.trim();
+                      if (!trimmedPath) {
+                        setRefineError("Path is required.");
+                        return;
+                      }
+                      if (!trimmedReason) {
+                        setRefineError("Justification reason is required.");
+                        return;
+                      }
+                      if (newEntryOps.length === 0) {
+                        setRefineError("At least one permitted operation is required.");
+                        return;
+                      }
+                      const newEntry: ScopeRefinementEntry = {
+                        path: trimmedPath,
+                        path_type: newEntryType,
+                        reason: trimmedReason,
+                        target_task_id: newEntryTask,
+                        permitted_operations: newEntryOps,
+                      };
+                      setEntries([...entries, newEntry]);
+                      setNewEntryPath("");
+                      setNewEntryReason("");
+                    }}
+                  >
+                    <h5>Add bounded path</h5>
+                    <div className="form-grid">
+                      <div>
+                        <label className="field-label" htmlFor="refine-path">Path (relative to workspace)</label>
+                        <input
+                          id="refine-path"
+                          type="text"
+                          value={newEntryPath}
+                          onChange={(e) => setNewEntryPath(e.target.value)}
+                          placeholder="e.g. src/routing/health.rs"
+                        />
+                      </div>
+                      <div>
+                        <label className="field-label" htmlFor="refine-type">Type</label>
+                        <select
+                          id="refine-type"
+                          value={newEntryType}
+                          onChange={(e) => setNewEntryType(e.target.value as PathType)}
+                        >
+                          <option value="File">File</option>
+                          <option value="Directory">Directory</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="field-label" htmlFor="refine-task">Target Task</label>
+                        <select
+                          id="refine-task"
+                          value={newEntryTask}
+                          onChange={(e) => setNewEntryTask(e.target.value)}
+                        >
+                          <option value="">All affected tasks</option>
+                          {verification.correction_scope.affected_task_ids.map((tid) => (
+                            <option key={tid} value={tid}>{tid}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="operations-checkboxes">
+                      <span className="field-label">Permitted operations:</span>
+                      {(["Read", "Modify", "CreateWithin", "Delete", "Rename"] as PermittedOperation[]).map((op) => (
+                        <label key={op} className="checkbox-label">
+                          <input
+                            type="checkbox"
+                            checked={newEntryOps.includes(op)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setNewEntryOps([...newEntryOps, op]);
+                              } else {
+                                setNewEntryOps(newEntryOps.filter((o) => o !== op));
+                              }
+                            }}
+                          />
+                          <span>{op}</span>
+                        </label>
+                      ))}
+                    </div>
+
+                    <div>
+                      <label className="field-label" htmlFor="refine-reason">Justification reason</label>
+                      <input
+                        id="refine-reason"
+                        type="text"
+                        value={newEntryReason}
+                        onChange={(e) => setNewEntryReason(e.target.value)}
+                        placeholder="Why is this path needed for the correction?"
+                      />
+                    </div>
+
+                    <button type="submit" className="secondary-button">
+                      Add to refinement
+                    </button>
+                  </form>
+
+                  {refineError && <p className="error-text" role="alert">{refineError}</p>}
+
+                  <div className="save-refinement-row">
+                    <button
+                      type="button"
+                      className="primary-button"
+                      disabled={busy}
+                      onClick={async () => {
+                        if (!verification?.correction_scope) return;
+                        setRefineError(null);
+                        try {
+                          await onSaveRefinement?.({
+                            mission_id: verification.correction_scope.mission_id,
+                            revision: verification.correction_scope.revision,
+                            originating_evidence_id: verification.correction_scope.originating_evidence_id,
+                            entries,
+                            last_modified_ms: Date.now(),
+                          });
+                        } catch (err) {
+                          setRefineError(String(err));
+                        }
+                      }}
+                    >
+                      {busy ? "Saving refinement…" : "Save refinement"}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+              return verification.correction_scope.human_refinement_required ? (
+                controls
+              ) : (
+                <details className="advanced-controls scope-refinement-advanced">
+                  <summary>Advanced scope refinement</summary>
+                  {controls}
+                </details>
+              );
+            })()}
+
+            <div className="correction-authorize-control">
+              {verification.correction_scope.authorized ? (
+                <p className="success-text">Scoped correction authorized. Work continues under sealed authority.</p>
+              ) : verification.correction_scope.user_reauthorization_required ? (
+                <button
+                  className="primary-button"
+                  type="button"
+                  disabled={busy || Boolean(verification.correction_scope.human_refinement_required)}
+                  onClick={() => {
+                    if (verification?.correction_scope) {
+                      onAuthorizeCorrection?.(verification.correction_scope.scope_hash);
+                    }
+                  }}
+                >
+                  {busy ? "Authorizing correction…" : verification.correction_scope.human_refinement_required ? "Human scope refinement required" : "Authorize scoped correction"}
+                </button>
+              ) : (
+                <p className="form-hint">Autonomous technical correction authorized under sealed mission authority.</p>
+              )}
+            </div>
+          </div>
+        ) : (
+          <p className="form-hint">
+            All {status.finished_tasks} historical task attempts remain completed and recorded in the tamper-evident ledger. Relintor will not restart execution or retry tasks without explicit human review and governance.
+          </p>
+        )}
+        <TechnicalEvidenceReview items={verification.evidence_items || []} />
+      </section>
+    )}
+    {!presentation.verifiedComplete && !pendingDecision && verification?.workflow_stage !== "USER_DECISION_REJECTED" && (verificationAttention.length > 0 || (verification && verificationView.tone === "warning")) && <section className="panel attention-panel" aria-labelledby="verification-blocker-title"><span className="panel-kicker">VERIFICATION</span><h3 id="verification-blocker-title">Verification needs attention</h3><p>{verification?.summary || verificationView.supporting}</p>{verification?.collection_failures.length ? <ul>{verification.collection_failures.map((item) => <li key={item}>{item}</li>)}</ul> : null}{verificationAttention.length > 0 && <details className="technical-details"><summary>Technical evidence details</summary><ul>{verificationAttention.map((item) => <li key={item}>{item}</li>)}</ul></details>}</section>}
 
     <div className="mission-summary-grid" aria-label="Mission summary">
-      <section><span>Progress</span><strong>{status.finished_tasks} of {status.total_tasks} complete</strong><small>{status.runnable_tasks.length} ready to run</small></section>
+      <section><span>Progress</span><strong>{status.finished_tasks} of {status.total_tasks} complete</strong><small>{verification?.workflow_stage === "USER_DECISION_REJECTED" ? "Correction required" : `${status.runnable_tasks.length} ready to run`}</small></section>
       <section><span>Executor</span><strong>{executorReady ? "Antigravity ready" : "Setup required"}</strong><small>{running ? "Working now" : humanStatus(status.watchdog_state, "Waiting")}</small></section>
       <section><span>Verification</span><strong>{verificationView.label}</strong><small>{verificationView.supporting}</small></section>
     </div>
@@ -1376,7 +2275,7 @@ function MissionCockpit({ status, verification, antigravity, busy, revalidating,
     <section className="panel activity-log" aria-labelledby="activity-log-title">
       <div className="section-heading"><div><span className="panel-kicker">RECENT ACTIVITY</span><h2 id="activity-log-title">What happened</h2></div><span className="auto-updated">Updates automatically</span></div>
       {recentEvents.length ? <ol className="event-timeline">{recentEvents.map((event) => { const copy = eventPresentation(event.kind, event.detail); return <li key={`${event.sequence}-${event.kind}`}><div><strong>{copy.title}</strong><span>{new Date(event.occurred_at_ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span></div><p>{copy.detail}</p></li>; })}</ol> : <div className="empty-inline"><strong>No activity yet</strong><span>Run the first task when you are ready.</span></div>}
-      {status.events.length > 5 && <details className="technical-details"><summary>View full authority timeline</summary><ol className="event-timeline full-timeline">{status.events.slice().reverse().map((event) => { const copy = eventPresentation(event.kind, event.detail); return <li key={`full-${event.sequence}-${event.kind}`}><div><strong>{copy.title}</strong><span>Sequence {event.sequence}</span></div><p>{copy.detail}</p><small>{event.kind}{event.task_id ? ` · ${event.task_id}` : ""}</small></li>; })}</ol></details>}
+      <FullTimeline events={status.events} />
     </section>
 
     <details id="mission-verification-details" className="panel technical-details mission-details"><summary>Mission details</summary><div className="mission-detail-grid"><div><span>Revision</span><strong>{status.revision}</strong></div><div><span>Execution state</span><strong>{humanStatus(status.state)}</strong></div><div><span>Safe boundary</span><strong>{status.safe_boundary_reached ? "Reached" : "Not reached"}</strong></div><div><span>Verification</span><strong>{verificationView.label}</strong></div></div><dl className="technical-list"><div><dt>Mission ID</dt><dd><code>{status.mission_id}</code></dd></div>{currentTaskId && <div><dt>Task ID</dt><dd><code>{currentTaskId}</code></dd></div>}<div><dt>Project ID</dt><dd><code>{status.project_id}</code></dd></div><div><dt>Ledger path</dt><dd><code>{displayWindowsPath(status.ledger_path)}</code></dd></div><div><dt>Recovery state</dt><dd>{status.recovery_state}</dd></div><div><dt>Turn / steps / tool calls</dt><dd>{status.current_turn} / {status.execution_steps} / {status.tool_calls}</dd></div></dl></details>

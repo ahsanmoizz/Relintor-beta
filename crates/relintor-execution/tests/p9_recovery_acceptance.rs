@@ -22,6 +22,13 @@ fn root(name: &str) -> PathBuf {
     let base = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("target"));
+    let base = if base.is_absolute() {
+        base
+    } else {
+        std::env::current_dir()
+            .expect("resolve P9 recovery working directory")
+            .join(base)
+    };
     let path = base.join(format!("p9-acceptance-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&path);
     fs::create_dir_all(&path).expect("create P9 fixture root");
@@ -107,6 +114,7 @@ fn empty_run(root: &Path) -> ExecutionRun {
         current_turn: 1,
         last_error: None,
         no_progress_occurrences: 0,
+        reviewed_recovery_deltas: Vec::new(),
         integrity_version: "p7-ledger-integrity-v1".into(),
         integrity_tag: String::new(),
     }
@@ -164,6 +172,290 @@ fn checkpoint_chain_appends_and_binds_parent() {
     assert_eq!(second.parent_digest, Some(first.content_digest));
     assert_eq!(store.load_latest().expect("load").unwrap().sequence, 2);
 }
+
+#[test]
+fn superseded_checkpoint_payloads_compact_to_authenticated_chain_stubs() {
+    let path = root("phase2-chain-compaction");
+    let recovery_store = store(&path);
+    let first = recovery_store
+        .write_checkpoint(content(&path, "first"))
+        .expect("first checkpoint");
+    let second = recovery_store
+        .write_checkpoint(content(&path, "second"))
+        .expect("second checkpoint");
+    let third = recovery_store
+        .write_checkpoint(content(&path, "third"))
+        .expect("third checkpoint");
+
+    let recovery = path.join(".relintor-recovery");
+    let artifact_for = |sequence: u64| {
+        fs::read_dir(&recovery)
+            .expect("list recovery")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|artifact| {
+                artifact.file_name().is_some_and(|name| {
+                    name.to_string_lossy()
+                        .contains(&format!("{sequence:020}"))
+                })
+            })
+            .expect("checkpoint artifact")
+    };
+    let first_path = artifact_for(1);
+    let second_path = artifact_for(2);
+    let third_path = artifact_for(3);
+
+    let first_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&first_path).expect("read first")).expect("parse first");
+    let second_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&second_path).expect("read second")).expect("parse second");
+    let third_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&third_path).expect("read third")).expect("parse third");
+
+    assert!(
+        first_json.get("content").is_none(),
+        "payload older than the previous rollback boundary should be compacted"
+    );
+    assert_eq!(
+        first_json.get("record_version").and_then(|value| value.as_str()),
+        Some("p9-checkpoint-chain-stub-v1")
+    );
+    assert_eq!(
+        first_json.get("content_digest").and_then(|value| value.as_str()),
+        Some(first.content_digest.as_str())
+    );
+    assert!(
+        second_json.get("content").is_some(),
+        "immediately previous checkpoint must remain fully recoverable"
+    );
+    assert!(
+        third_json.get("content").is_some(),
+        "latest checkpoint must remain fully recoverable"
+    );
+    assert_eq!(second.sequence, 2);
+    assert_eq!(third.sequence, 3);
+    assert!(
+        fs::metadata(&first_path).expect("first metadata").len()
+            < fs::metadata(&third_path).expect("third metadata").len()
+    );
+
+    let reopened = store(&path).load_latest().expect("reload").expect("latest");
+    assert_eq!(reopened.sequence, third.sequence);
+    assert_eq!(reopened.checkpoint_id, third.checkpoint_id);
+}
+
+
+#[test]
+fn checkpoint_run_records_workspace_identity_without_copying_workspace_bytes() {
+    let path = root("phase2-checkpoint-metadata-only");
+    fs::write(path.join("notes.txt"), vec![b'x'; 256 * 1024]).expect("seed workspace file");
+    let run = empty_run(&path);
+    let workspace = WorkspaceSnapshot::capture(&path, 1).expect("workspace");
+    let authority = RecoveryAuthority::new(
+        "project-p9",
+        "mission-p9",
+        1,
+        "p6-seal-p9",
+        "registry-p9",
+        run.run_id.clone(),
+        workspace.fingerprint.clone(),
+        "source-p9",
+        None,
+        "P8_PENDING",
+        1,
+    );
+    let store = store(&path);
+    RecoveryCoordinator::new(store.clone())
+        .checkpoint_run(
+            &run,
+            authority,
+            CheckpointKind::AfterTaskPersistence,
+            &path,
+            Vec::new(),
+            Vec::new(),
+            "metadata-only checkpoint",
+            1,
+        )
+        .expect("checkpoint");
+
+    let latest = store.load_latest().expect("load").expect("latest");
+    assert_eq!(latest.content.workspace.fingerprint, workspace.fingerprint);
+    assert_eq!(latest.content.untracked.total_bytes, 0);
+    assert!(latest
+        .content
+        .untracked
+        .files
+        .iter()
+        .all(|file| file.content.is_none()));
+    assert!(latest
+        .content
+        .untracked
+        .files
+        .iter()
+        .any(|file| file.relative_path == "notes.txt"));
+}
+
+#[test]
+fn compact_chain_stub_tampering_fails_closed() {
+    let path = root("phase2-stub-tamper");
+    let recovery_store = store(&path);
+    recovery_store
+        .write_checkpoint(content(&path, "first"))
+        .expect("first checkpoint");
+    recovery_store
+        .write_checkpoint(content(&path, "second"))
+        .expect("second checkpoint");
+    recovery_store
+        .write_checkpoint(content(&path, "third"))
+        .expect("third checkpoint");
+
+    let recovery = path.join(".relintor-recovery");
+    let first_path = fs::read_dir(&recovery)
+        .expect("list recovery")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|artifact| {
+            artifact
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().contains("00000000000000000001"))
+        })
+        .expect("first artifact");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&first_path).expect("read stub")).expect("parse stub");
+    assert!(
+        value.get("content").is_none(),
+        "sequence 1 must be compacted once sequence 3 is durable"
+    );
+    value["reason"] = serde_json::Value::String("tampered".into());
+    fs::write(
+        &first_path,
+        serde_json::to_vec(&value).expect("serialize tampered stub"),
+    )
+    .expect("write tampered stub");
+
+    let reopened = store(&path);
+    assert!(
+        reopened.load_latest().is_err(),
+        "tampered compact history must fail closed"
+    );
+}
+
+
+#[test]
+fn interrupted_compaction_mixed_full_and_stub_history_still_loads_latest() {
+    let path = root("phase2-interrupted-compaction");
+    let recovery_store = store(&path);
+    recovery_store
+        .write_checkpoint(content(&path, "first"))
+        .expect("first checkpoint");
+    recovery_store
+        .write_checkpoint(content(&path, "second"))
+        .expect("second checkpoint");
+    recovery_store
+        .write_checkpoint(content(&path, "third"))
+        .expect("third checkpoint");
+
+    let recovery = path.join(".relintor-recovery");
+    let second_path = fs::read_dir(&recovery)
+        .expect("list recovery")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|artifact| {
+            artifact
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().contains("00000000000000000002"))
+        })
+        .expect("second artifact");
+    let second_full_bytes = fs::read(&second_path).expect("save second full payload");
+
+    recovery_store
+        .write_checkpoint(content(&path, "fourth"))
+        .expect("fourth checkpoint");
+
+    // Sequence 2 is now eligible for compaction. Restoring its already-authenticated full
+    // payload models cleanup being interrupted before that replacement became durable.
+    // The chain must accept this mixed full/stub history and still resolve the newest authority.
+    fs::write(&second_path, second_full_bytes).expect("restore second full payload");
+
+    let reopened = store(&path)
+        .load_latest()
+        .expect("load mixed chain")
+        .expect("latest");
+    assert_eq!(reopened.sequence, 4);
+    assert_eq!(reopened.content.reason, "fourth");
+}
+
+
+#[test]
+fn repeated_checkpoint_generation_keeps_previous_and_latest_full_recovery_payloads() {
+    let path = root("phase2-bounded-history");
+    let recovery_store = store(&path);
+    for sequence in 1..=100_u64 {
+        recovery_store
+            .write_checkpoint(content(&path, &format!("checkpoint-{sequence}")))
+            .expect("write bounded checkpoint chain");
+    }
+
+    let recovery = path.join(".relintor-recovery");
+    let mut full_payloads = 0_usize;
+    let mut chain_stubs = 0_usize;
+    let mut checkpoint_bytes = 0_u64;
+    let mut full_sequences = Vec::new();
+    for path in fs::read_dir(&recovery)
+        .expect("list recovery")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy();
+                name.starts_with("checkpoint-") && name.ends_with(".json")
+            })
+        })
+    {
+        checkpoint_bytes += fs::metadata(&path).expect("checkpoint metadata").len();
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("read checkpoint"))
+                .expect("parse checkpoint");
+        if value.get("content").is_some() {
+            full_payloads += 1;
+            let sequence = value
+                .get("sequence")
+                .and_then(|value| value.as_u64())
+                .expect("full checkpoint sequence");
+            full_sequences.push(sequence);
+        } else if value
+            .get("record_version")
+            .and_then(|value| value.as_str())
+            == Some("p9-checkpoint-chain-stub-v1")
+        {
+            chain_stubs += 1;
+        }
+    }
+
+    full_sequences.sort_unstable();
+    assert_eq!(
+        full_payloads, 2,
+        "previous and latest recovery payloads must remain full"
+    );
+    assert_eq!(
+        full_sequences,
+        vec![99, 100],
+        "only the immediate rollback boundary and latest authority stay full"
+    );
+    assert_eq!(
+        chain_stubs, 98,
+        "older superseded generations become authenticated stubs"
+    );
+    assert!(
+        checkpoint_bytes < 10 * 1024 * 1024,
+        "synthetic 100-generation history must remain bounded"
+    );
+
+    let reopened = store(&path).load_latest().expect("reload").expect("latest");
+    assert_eq!(reopened.sequence, 100);
+    assert_eq!(reopened.content.reason, "checkpoint-100");
+}
+
 
 #[test]
 fn checkpoint_metadata_tampering_fails_closed() {
@@ -1318,3 +1610,465 @@ fn process_restart_harness_detects_interrupted_mid_edit() {
         .iter()
         .any(|path| path == "mid-edit.txt"));
 }
+
+#[test]
+fn manual_recovery_retry_authorizes_fresh_attempt_and_passes_action_authorization() {
+    let path = root("manual-recovery-retry-allowance");
+    let mut run = empty_run(&path);
+    run.tasks.insert(
+        "task-recovery-test".into(),
+        ExecutionTask {
+            task_id: "task-recovery-test".into(),
+            objective: "test objective".into(),
+            requirement_ids: vec!["req-1".into()],
+            dependency_ids: Vec::new(),
+            priority: RequirementPriority::P1,
+            state: ExecutionTaskState::Pending,
+            scope: LeaseScope {
+                workspace: path.clone(),
+                file_scopes: vec![path.display().to_string()],
+                directory_scopes: vec![path.display().to_string()],
+                shared_resources: Vec::new(),
+                package_lockfiles: Vec::new(),
+                generated_files: Vec::new(),
+                allowed_tools: ["antigravity".into()].into_iter().collect(),
+                external_authority: Default::default(),
+                scope_known: true,
+            },
+            usage_budget: UsageBudget {
+                wall_clock_ms: 1_500_000,
+                execution_steps: 100,
+                tool_calls: 50,
+                retry_attempts: 2,
+                cost_micros: None,
+            },
+            retry_policy: RetryPolicy {
+                max_attempts: 2,
+                retryable: [
+                    relintor_execution::FailureClass::Transient,
+                    relintor_execution::FailureClass::ExternalUnavailable,
+                    relintor_execution::FailureClass::ProcessFailure,
+                ]
+                .into_iter()
+                .collect(),
+                backoff_ms: 250,
+            },
+            evidence_obligations: Vec::new(),
+            attempt_number: 0,
+        },
+    );
+
+    // Attempt 1: start and mark stopped
+    let packet1 = run.start_task("task-recovery-test", 10).expect("start 1");
+    if let Some(attempt) = run.attempts.last_mut() {
+        attempt.execution_boundary =
+            relintor_execution::AttemptExecutionBoundary::ExternalProcessStarted;
+        attempt.state = TaskAttemptState::SafeBoundaryStopped;
+        attempt.ended_at_ms = Some(20);
+        attempt.failure_class = Some(relintor_execution::FailureClass::ProcessFailure);
+    }
+    for lease in &mut run.leases {
+        if lease.lease_id == packet1.lease_id {
+            lease.status = LeaseStatus::Consumed;
+        }
+    }
+    run.tasks.get_mut("task-recovery-test").unwrap().state = ExecutionTaskState::WaitingRetry;
+    run.state = ExecutionRunState::Ready;
+
+    // Attempt 2: start and mark stopped with external process started
+    let packet2 = run.start_task("task-recovery-test", 30).expect("start 2");
+    let lease2 = packet2.lease_id.clone();
+    let attempt2_id = run.attempts.last().unwrap().attempt_id.clone();
+    if let Some(attempt) = run.attempts.last_mut() {
+        attempt.execution_boundary =
+            relintor_execution::AttemptExecutionBoundary::ExternalProcessStarted;
+        attempt.state = TaskAttemptState::SafeBoundaryStopped;
+        attempt.ended_at_ms = Some(40);
+        attempt.failure_class = Some(relintor_execution::FailureClass::ProcessFailure);
+    }
+    for lease in &mut run.leases {
+        if lease.lease_id == packet2.lease_id {
+            lease.status = LeaseStatus::Consumed;
+        }
+    }
+
+    // Now set run state to RevalidationRequired
+    run.state = ExecutionRunState::RevalidationRequired;
+    assert_eq!(run.tasks["task-recovery-test"].attempt_number, 2);
+
+    let target = run
+        .current_recovery_attempt()
+        .expect("recovery attempt target");
+    assert_eq!(target.attempt_id, attempt2_id);
+    assert_eq!(target.lease_id, lease2);
+
+    run.authorize_manual_recovery_retry(&target, 50)
+        .expect("authorize manual recovery retry");
+
+    assert_eq!(run.state, ExecutionRunState::Ready);
+    assert_eq!(
+        run.tasks["task-recovery-test"].state,
+        ExecutionTaskState::WaitingRetry
+    );
+    assert!(run.tasks["task-recovery-test"].usage_budget.retry_attempts >= 3);
+    assert!(run.tasks["task-recovery-test"].retry_policy.max_attempts >= 3);
+
+    // Attempt 3: fresh attempt must start and authorize action without BudgetExhausted
+    let packet3 = run.start_task("task-recovery-test", 60).expect("start 3");
+    let action = relintor_execution::ActionRequest {
+        tool: "antigravity".into(),
+        operation: "execute_task".into(),
+        arguments: vec!["task-recovery-test".into()],
+        working_scope: path.display().to_string(),
+        environment_identity: "test".into(),
+        mutable: true,
+        paths: vec![path.display().to_string()],
+        external_authority: None,
+    };
+
+    run.authorize_action(
+        "task-recovery-test",
+        &packet3.lease_id,
+        &packet3,
+        &action,
+        65,
+    )
+    .expect("authorize action for attempt 3");
+}
+
+#[test]
+fn finished_mission_with_historical_recovery_attempts_reconciles_cleanly_and_disables_recovery() {
+    let path = root("finished-mission-recovery-resolution");
+    let mut run = empty_run(&path);
+    run.tasks.insert(
+        "task-1".into(),
+        ExecutionTask {
+            task_id: "task-1".into(),
+            objective: "task 1".into(),
+            requirement_ids: vec!["req-1".into()],
+            dependency_ids: Vec::new(),
+            priority: RequirementPriority::P1,
+            state: ExecutionTaskState::Pending,
+            scope: LeaseScope {
+                workspace: path.clone(),
+                file_scopes: vec![path.display().to_string()],
+                directory_scopes: vec![path.display().to_string()],
+                shared_resources: Vec::new(),
+                package_lockfiles: Vec::new(),
+                generated_files: Vec::new(),
+                allowed_tools: ["antigravity".into()].into_iter().collect(),
+                external_authority: Default::default(),
+                scope_known: true,
+            },
+            usage_budget: UsageBudget {
+                wall_clock_ms: 1_500_000,
+                execution_steps: 100,
+                tool_calls: 50,
+                retry_attempts: 2,
+                cost_micros: None,
+            },
+            retry_policy: RetryPolicy {
+                max_attempts: 2,
+                retryable: [relintor_execution::FailureClass::Transient].into_iter().collect(),
+                backoff_ms: 250,
+            },
+            evidence_obligations: Vec::new(),
+            attempt_number: 0,
+        },
+    );
+
+    // Attempt 1: start and mark stopped
+    let packet1 = run.start_task("task-1", 10).expect("start 1");
+    if let Some(attempt) = run.attempts.last_mut() {
+        attempt.execution_boundary =
+            relintor_execution::AttemptExecutionBoundary::ExternalProcessStarted;
+        attempt.state = TaskAttemptState::SafeBoundaryStopped;
+        attempt.ended_at_ms = Some(20);
+        attempt.failure_class = Some(relintor_execution::FailureClass::ProcessFailure);
+    }
+    for lease in &mut run.leases {
+        if lease.lease_id == packet1.lease_id {
+            lease.status = LeaseStatus::Consumed;
+        }
+    }
+    run.tasks.get_mut("task-1").unwrap().state = ExecutionTaskState::WaitingRetry;
+    run.state = ExecutionRunState::Ready;
+
+    // Attempt 2: start and mark stopped
+    let packet2 = run.start_task("task-1", 30).expect("start 2");
+    if let Some(attempt) = run.attempts.last_mut() {
+        attempt.execution_boundary =
+            relintor_execution::AttemptExecutionBoundary::ExternalProcessStarted;
+        attempt.state = TaskAttemptState::SafeBoundaryStopped;
+        attempt.ended_at_ms = Some(40);
+        attempt.failure_class = Some(relintor_execution::FailureClass::ProcessFailure);
+    }
+    for lease in &mut run.leases {
+        if lease.lease_id == packet2.lease_id {
+            lease.status = LeaseStatus::Consumed;
+        }
+    }
+    run.tasks.get_mut("task-1").unwrap().state = ExecutionTaskState::WaitingRetry;
+    run.tasks.get_mut("task-1").unwrap().usage_budget.retry_attempts = 3;
+    run.tasks.get_mut("task-1").unwrap().retry_policy.max_attempts = 3;
+    run.state = ExecutionRunState::Ready;
+
+    // Attempt 3: start and mark succeeded
+    let packet3 = run.start_task("task-1", 50).expect("start 3");
+    if let Some(attempt) = run.attempts.last_mut() {
+        attempt.execution_boundary =
+            relintor_execution::AttemptExecutionBoundary::ExternalProcessStarted;
+        attempt.state = TaskAttemptState::Succeeded;
+        attempt.ended_at_ms = Some(60);
+    }
+    for lease in &mut run.leases {
+        if lease.lease_id == packet3.lease_id {
+            lease.status = LeaseStatus::Consumed;
+        }
+    }
+    run.tasks.get_mut("task-1").unwrap().state = ExecutionTaskState::FinishedAwaitingVerification;
+    assert!(run.all_tasks_finished());
+    assert_eq!(run.current_recovery_attempt(), None);
+    assert!(!run.recovery_status_requires_attention());
+
+    let initial_event_count = run.events.len();
+    for i in 0..10 {
+        run.record_recovery_decision(None, "RevalidationRequired", 70 + i)
+            .expect("record recovery decision on finished run");
+    }
+    assert_eq!(run.events.len(), initial_event_count);
+}
+
+#[test]
+fn test_recovery_store_shared_cache_hits_across_instances() {
+    let path = root("shared-cache");
+    let store1 = store(&path);
+    let _first = store1
+        .write_checkpoint(content(&path, "first"))
+        .expect("write first");
+    let second = store1
+        .write_checkpoint(content(&path, "second"))
+        .expect("write second");
+
+    // Create another store instance pointing to the same path (simulating Tauri's recovery_store(app, revision))
+    let store2 = store(&path);
+    let loaded = store2
+        .load_latest()
+        .expect("load checkpoint")
+        .expect("latest checkpoint");
+    assert_eq!(loaded.checkpoint_id, second.checkpoint_id);
+    assert_eq!(loaded.sequence, 2);
+    assert_eq!(loaded.content.reason, "second");
+
+    // Creating a third store instance also hits the shared cache
+    let store3 = store(&path);
+    let loaded3 = store3
+        .load_latest()
+        .expect("load checkpoint")
+        .expect("latest checkpoint");
+    assert_eq!(loaded3.checkpoint_id, second.checkpoint_id);
+    assert_eq!(loaded3.sequence, 2);
+
+    let _ = fs::remove_dir_all(&path);
+}
+
+#[test]
+fn test_defect_a_recovery_review_and_retry_flow() {
+    let path = root("defect-a-flow-ws");
+    let recovery_dir = root("defect-a-flow-rec");
+    let store1 = RecoveryStore::new(&recovery_dir, vec![7; 32]).expect("open recovery store");
+    let mut run = empty_run(&path);
+    run.tasks.insert(
+        "task-11".into(),
+        ExecutionTask {
+            task_id: "task-11".into(),
+            objective: "Phase 5 Task 11".into(),
+            requirement_ids: vec!["requirement-p9".into()],
+            dependency_ids: Vec::new(),
+            priority: RequirementPriority::P2,
+            state: ExecutionTaskState::Ready,
+            scope: LeaseScope {
+                workspace: path.clone(),
+                file_scopes: Vec::new(),
+                directory_scopes: Vec::new(),
+                shared_resources: Vec::new(),
+                package_lockfiles: Vec::new(),
+                generated_files: Vec::new(),
+                allowed_tools: Default::default(),
+                external_authority: Default::default(),
+                scope_known: true,
+            },
+            usage_budget: UsageBudget::default(),
+            retry_policy: RetryPolicy::default(),
+            evidence_obligations: Vec::new(),
+            attempt_number: 0,
+        },
+    );
+    run.state = ExecutionRunState::Ready;
+
+    let packet = run.start_task("task-11", 200).expect("start task 11");
+    if let Some(attempt) = run.attempts.last_mut() {
+        attempt.execution_boundary = relintor_execution::AttemptExecutionBoundary::ExternalProcessStarted;
+        attempt.state = TaskAttemptState::Failed;
+        attempt.termination_reason = Some("execution ledger: recovery storage: recovery artifact exceeds size limit".into());
+        attempt.ended_at_ms = Some(250);
+    }
+    for lease in &mut run.leases {
+        if lease.lease_id == packet.lease_id {
+            lease.status = LeaseStatus::Consumed;
+            lease.lease_digest = lease.compute_digest().unwrap();
+        }
+    }
+    run.tasks.get_mut("task-11").unwrap().state = ExecutionTaskState::BlockedExternal;
+    run.state = ExecutionRunState::BlockedExternal;
+    run.last_error = Some("execution ledger: recovery storage: recovery artifact exceeds size limit".into());
+
+    let ws = WorkspaceSnapshot::capture(&path, 100).expect("capture ws");
+    let mut auth = authority(&ws);
+    auth.p7_run_id = run.run_id.clone();
+    let coord = RecoveryCoordinator::new(store1.clone());
+
+    let mut proc = owned_process();
+    proc.run_id = run.run_id.clone();
+    proc.task_id = Some("task-11".into());
+    proc.attempt_id = run.attempts.last().map(|a| a.attempt_id.clone());
+    proc.lease_id = Some(packet.lease_id.clone());
+
+    // Write initial checkpoint 1
+    let cp1 = coord.checkpoint_run(
+        &run,
+        auth.clone(),
+        CheckpointKind::AfterTaskPersistence,
+        &path,
+        vec![proc],
+        vec![],
+        "initial checkpoint",
+        300,
+    ).expect("checkpoint 1");
+    assert_eq!(cp1.sequence, 1);
+
+    // 1. Resume integrity check: ExternalProcessStarted attempt, process is gone
+    let integrity = coord.resume_integrity_for_run(
+        &run,
+        &auth,
+        &path,
+        &ConservativeProcessInspector,
+        400,
+    ).expect("evaluate resume integrity");
+    assert_eq!(integrity.disposition, RecoveryDisposition::RevalidationRequired);
+
+    // 2. Begin revalidation (writes checkpoint-revalidation.json)
+    let reval = coord.begin_revalidation(&auth, &integrity, 401).expect("begin revalidation");
+    assert_eq!(reval.disposition, RecoveryDisposition::RevalidationRequired);
+
+    // 3. User authorizes manual retry
+    let retry_reval = coord.authorize_manual_retry(&auth, &integrity, 500).expect("authorize retry");
+    assert_eq!(retry_reval.decision, "MANUAL_RETRY_AUTHORIZED");
+
+    // 4. Update run with reviewed delta
+    let target = run.current_recovery_attempt().expect("target exists");
+    let delta = relintor_execution::ReviewedRecoveryDelta {
+        mission_id: run.mission_id.clone(),
+        mission_revision: run.mission_revision,
+        seal_hash: run.seal_hash.clone(),
+        task_id: target.task_id.clone(),
+        attempt_id: target.attempt_id.clone(),
+        checkpoint_id: Some(cp1.checkpoint_id.clone()),
+        affected_paths: retry_reval.affected_paths.clone(),
+        baseline_fingerprint: run.workspace_fingerprint.clone(),
+        authorized_starting_fingerprint: String::new(),
+        authorized_at_ms: 500,
+    };
+    run.authorize_manual_recovery_retry_with_delta(&target, Some(&delta), 500).expect("authorize retry with delta");
+
+    // 5. Checkpoint the retry (Checkpoint 2) - verifies compact JSON writing and size check
+    let cp2 = coord.checkpoint_run(
+        &run,
+        auth.clone(),
+        CheckpointKind::AfterTaskPersistence,
+        &path,
+        vec![],
+        vec![],
+        "explicit recovery review authorized a fresh attempt for the interrupted task",
+        510,
+    ).expect("write recovery retry checkpoint");
+    assert_eq!(cp2.sequence, 2);
+
+    let _ = fs::remove_dir_all(&path);
+    let _ = fs::remove_dir_all(&recovery_dir);
+}
+
+#[test]
+fn test_intermediate_duplicate_checkpoint_with_forked_lineage_resolves_to_authoritative_branch() {
+    let path = root("forked-intermediate-dup");
+    let recovery_dir = path.join(".relintor-recovery");
+    let recovery_store = store(&path);
+
+    // 1. Write checkpoint 1
+    let _cp1 = recovery_store
+        .write_checkpoint(content(&path, "sequence 1 checkpoint"))
+        .expect("write cp1");
+    let index_after_cp1 = fs::read(recovery_dir.join("checkpoint-index.json")).expect("read index cp1");
+
+    // 2. Write checkpoint 2 branch A
+    let mut c_a = content(&path, "sequence 2 branch A");
+    c_a.created_at_ms = 2000;
+    let cp2_a = recovery_store
+        .write_checkpoint(c_a)
+        .expect("write cp2_a");
+    let cp2_a_path = recovery_dir.join(format!(
+        "checkpoint-00000000000000000002-{}.json",
+        cp2_a.checkpoint_id
+    ));
+    let cp2_a_bytes = fs::read(&cp2_a_path).expect("read cp2_a");
+
+    // Revert index to cp1 and remove cp2_a
+    fs::write(recovery_dir.join("checkpoint-index.json"), index_after_cp1).expect("revert index");
+    fs::remove_file(&cp2_a_path).expect("remove cp2_a temporarily");
+
+    // Re-create store to clear any memory cache
+    let recovery_store = store(&path);
+
+    // 3. Write checkpoint 2 branch B
+    let mut c_b = content(&path, "sequence 2 branch B (canonical)");
+    c_b.created_at_ms = 2500;
+    let cp2_b = recovery_store
+        .write_checkpoint(c_b)
+        .expect("write cp2_b");
+    assert_ne!(cp2_a.checkpoint_id, cp2_b.checkpoint_id, "checkpoint IDs must differ");
+
+    // 4. Write checkpoint 3 on top of branch B
+    let cp3 = recovery_store
+        .write_checkpoint(content(&path, "sequence 3 checkpoint"))
+        .expect("write cp3");
+    assert_eq!(cp3.parent_digest, Some(cp2_b.content_digest.clone()));
+
+    // 5. Place branch A artifact back into the directory so sequence 2 now has 2 valid duplicate artifacts
+    fs::write(&cp2_a_path, cp2_a_bytes).expect("restore cp2_a file");
+
+    let seq2_files = fs::read_dir(&recovery_dir)
+        .expect("read dir")
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with("checkpoint-00000000000000000002-"))
+        .collect::<Vec<_>>();
+    assert_eq!(seq2_files.len(), 2, "must have 2 duplicate sequence 2 files");
+
+    // 6. Fresh store loads latest: must resolve sequence 2 to branch B and sequence 3 to cp3
+    let fresh_store = store(&path);
+    let loaded = fresh_store.load_latest().expect("load_latest must resolve lineage");
+    assert!(loaded.is_some());
+    let latest = loaded.unwrap();
+    assert_eq!(latest.sequence, 3);
+    assert_eq!(latest.checkpoint_id, cp3.checkpoint_id);
+
+    // Verify branch B exists and is authoritative
+    let cp2_resolved_path = recovery_dir.join(format!(
+        "checkpoint-00000000000000000002-{}.json",
+        cp2_b.checkpoint_id
+    ));
+    assert!(cp2_resolved_path.exists());
+
+    let _ = fs::remove_dir_all(&path);
+}
+
+

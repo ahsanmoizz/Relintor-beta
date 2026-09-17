@@ -1,7 +1,7 @@
 import type { ExecutionStatus, VerificationStatus } from "./backend";
 
 export type SemanticTone = "neutral" | "info" | "success" | "warning" | "danger";
-export type MissionPrimaryAction = "none" | "setup" | "run" | "continue" | "recover" | "verify" | "view_verification";
+export type MissionPrimaryAction = "none" | "setup" | "run" | "continue" | "recover" | "verify" | "view_verification" | "review_correction";
 
 export type MissionPresentation = {
   headline: string;
@@ -86,30 +86,127 @@ export function verificationPresentation(status: VerificationStatus | null): {
     };
   }
 
-  const hasMaterialGap =
+  const stage = token(status.workflow_stage);
+  const completion = token(status.completion_state);
+  const certificateVerified =
+    Boolean(status.certificate) &&
+    token(status.certificate?.final_state) === "VERIFIEDCOMPLETE";
+  const machineBlockers =
     status.missing_evidence.length > 0 ||
     status.failed_checks.length > 0 ||
-    status.stale_evidence.length > 0 ||
     status.blocked_external.length > 0 ||
-    status.requirements_total === 0 ||
-    status.requirements_verified !== status.requirements_total;
-  const authoritySaysVerified = token(status.completion_state) === "VERIFIEDCOMPLETE";
-  if (authoritySaysVerified && !hasMaterialGap && status.evidence_count > 0) {
-    return {
-      label: "Verified Complete",
-      supporting: `${status.requirements_verified} of ${status.requirements_total} requirements passed with ${status.evidence_count} evidence ${status.evidence_count === 1 ? "artifact" : "artifacts"}.`,
-      tone: "success",
-      verifiedComplete: true,
-    };
-  }
-  if (status.failed_checks.length || status.stale_evidence.length || status.blocked_external.length || authoritySaysVerified) {
+    status.collection_failures.length > 0;
+  const coverageComplete =
+    status.requirements_total > 0 &&
+    status.requirements_verified === status.requirements_total;
+  const verifiedSnapshotCoherent =
+    stage === "VERIFIEDCOMPLETE" &&
+    completion === "VERIFIEDCOMPLETE" &&
+    certificateVerified &&
+    status.evidence_count > 0 &&
+    coverageComplete &&
+    !machineBlockers;
+
+  if (stage === "VERIFIEDCOMPLETE") {
+    if (verifiedSnapshotCoherent) {
+      return {
+        label: "Verified Complete",
+        supporting: `${status.requirements_verified} of ${status.requirements_total} requirements passed with ${status.evidence_count} evidence ${status.evidence_count === 1 ? "artifact" : "artifacts"}.`,
+        tone: "success",
+        verifiedComplete: true,
+      };
+    }
     return {
       label: "Verification needs attention",
-      supporting: "Relintor found evidence or dependency issues that must be resolved before completion can be claimed.",
+      supporting: "Relintor received an inconsistent completion snapshot and will not present the mission as complete until backend authority is coherent.",
       tone: "warning",
       verifiedComplete: false,
     };
   }
+
+  if (stage === "WAITINGFORUSERDECISION") {
+    const hasDecision = (status.human_decisions?.length || 0) > 0;
+    if (status.final_human_acceptance_eligible === true && hasDecision && !machineBlockers) {
+      return {
+        label: "Ready for your final decision",
+        supporting: "Relintor independently verified all machine-checkable requirements. Your final acceptance is now required.",
+        tone: "info",
+        verifiedComplete: false,
+      };
+    }
+    return {
+      label: "Verification needs attention",
+      supporting: "Relintor will not request final approval until every machine-verifiable obligation is clear and backend authority explicitly requests a human decision.",
+      tone: "warning",
+      verifiedComplete: false,
+    };
+  }
+
+  if (stage === "CORRECTINGFAILEDREQUIREMENT") {
+    return {
+      label: "Correction in progress",
+      supporting: status.summary,
+      tone: "info",
+      verifiedComplete: false,
+    };
+  }
+
+  if (stage === "USERDECISIONREJECTED") {
+    return {
+      label: "Correction required",
+      supporting: status.summary,
+      tone: "warning",
+      verifiedComplete: false,
+    };
+  }
+
+  if (
+    stage === "TECHNICALDELIVERYBLOCKED" ||
+    stage === "COLLECTIONBLOCKED" ||
+    stage === "VERIFICATIONNEEDSATTENTION"
+  ) {
+    return {
+      label: "Verification needs attention",
+      supporting: status.summary || "Relintor found missing evidence or dependency issues that must be resolved before completion can be claimed.",
+      tone: "warning",
+      verifiedComplete: false,
+    };
+  }
+
+  if (stage === "READYTOVERIFY") {
+    if (machineBlockers) {
+      return {
+        label: "Verification needs attention",
+        supporting: "Relintor found missing evidence or dependency issues that must be resolved before verification can continue.",
+        tone: "warning",
+        verifiedComplete: false,
+      };
+    }
+    if (status.evidence_count === 0) {
+      return {
+        label: "Waiting for evidence",
+        supporting: "Relintor will verify the work after execution evidence is captured.",
+        tone: "info",
+        verifiedComplete: false,
+      };
+    }
+    return {
+      label: "Ready to verify",
+      supporting: `${status.evidence_count} evidence ${status.evidence_count === 1 ? "artifact is" : "artifacts are"} ready for review.`,
+      tone: "info",
+      verifiedComplete: false,
+    };
+  }
+
+  if (machineBlockers || completion === "FAILEDVERIFICATION" || completion === "BLOCKEDEXTERNAL") {
+    return {
+      label: "Verification needs attention",
+      supporting: status.summary || "Relintor found missing evidence or dependency issues that must be resolved before completion can be claimed.",
+      tone: "warning",
+      verifiedComplete: false,
+    };
+  }
+
   if (status.evidence_count === 0) {
     return {
       label: "Waiting for evidence",
@@ -118,9 +215,10 @@ export function verificationPresentation(status: VerificationStatus | null): {
       verifiedComplete: false,
     };
   }
+
   return {
     label: "Ready to verify",
-    supporting: `${status.evidence_count} evidence ${status.evidence_count === 1 ? "artifact is" : "artifacts are"} ready for review.`,
+    supporting: status.summary || `${status.evidence_count} evidence ${status.evidence_count === 1 ? "artifact is" : "artifacts are"} ready for review.`,
     tone: "info",
     verifiedComplete: false,
   };
@@ -136,9 +234,14 @@ export function missionPresentation(
   const recovery = token(status.recovery_state);
   const running = phase === "RUNNING";
   const dispatching = status.dispatch_active && !running;
+  const executionFinished = state === "EXECUTIONTASKSFINISHEDAWAITINGVERIFICATION";
   const recoveryRequired =
     !running &&
     !dispatching &&
+    !executionFinished &&
+    status.recovery_state !== "NO_RECOVERY_REQUIRED" &&
+    status.recovery_state !== "PreExecutionRetryAuthorized" &&
+    (status.recovery_detected || status.recovery_action === "MANUAL_REVIEW_RETRY" || status.recovery_action === "CHECK_SAFETY") &&
     (["BLOCKEDEXTERNAL", "REVALIDATIONREQUIRED", "STOPPEDINCOMPLETE"].includes(state) ||
       ["P9RECOVERYUNAVAILABLE", "REVALIDATIONREQUIRED", "RECOVERYNOTALLOWED", "BLOCKEDEXTERNAL"].includes(recovery));
   const verificationView = verificationPresentation(verification);
@@ -166,9 +269,12 @@ export function missionPresentation(
     };
   }
   if (recoveryRequired) {
+    const manualRetry = status.recovery_action === "MANUAL_REVIEW_RETRY";
     return {
-      headline: "Recovery review required",
-      supporting: "Relintor must confirm the previous attempt's safety before another task can run.",
+      headline: manualRetry ? "Recovery reviewed — ready to retry" : "Recovery review required",
+      supporting: manualRetry
+        ? "Relintor confirmed the previous attempt. Review changes and retry to continue."
+        : "Relintor must confirm the previous attempt's safety before another task can run.",
       badge: "Needs attention",
       tone: "warning",
       primaryAction: "recover",
@@ -199,12 +305,61 @@ export function missionPresentation(
         verifiedComplete: false,
       };
     }
+    if (verification.workflow_stage === "TECHNICAL_DELIVERY_BLOCKED") {
+      return {
+        headline: "Technical delivery blocked",
+        supporting: verification.summary || "Relintor cannot currently complete the sealed mission because technical correction stalled.",
+        badge: "Blocked",
+        tone: "warning",
+        primaryAction: "view_verification",
+        recoveryRequired: false,
+        verifiedComplete: false,
+      };
+    }
+    const isWaitingForDecision =
+      verification.workflow_stage === "WAITING_FOR_USER_DECISION" &&
+      verification.final_human_acceptance_eligible === true &&
+      verification.human_decisions.length > 0 &&
+      verificationView.label === "Ready for your final decision";
+    if (isWaitingForDecision) {
+      return {
+        headline: "Ready for your final decision",
+        supporting: verification.summary || "Relintor independently verified all machine-checkable requirements. Your final acceptance is now required.",
+        badge: "Decision needed",
+        tone: "info",
+        primaryAction: "none",
+        recoveryRequired: false,
+        verifiedComplete: false,
+      };
+    }
+    if (verification.workflow_stage === "CORRECTING_FAILED_REQUIREMENT") {
+      return {
+        headline: "Antigravity is correcting failed work",
+        supporting: verification.summary,
+        badge: "Correcting",
+        tone: "info",
+        primaryAction: "none",
+        recoveryRequired: false,
+        verifiedComplete: false,
+      };
+    }
+    if (verification.workflow_stage === "USER_DECISION_REJECTED") {
+      return {
+        headline: "Correction required",
+        supporting: verification.summary,
+        badge: "Needs attention",
+        tone: "warning",
+        primaryAction: "review_correction",
+        recoveryRequired: false,
+        verifiedComplete: false,
+      };
+    }
     return {
-      headline: verificationView.label === "Verification needs attention" ? verificationView.label : "Work finished — verify the evidence",
+      headline: verificationView.label === "Verification needs attention" ? verificationView.label : "Work finished — technical review required",
       supporting: verificationView.supporting,
       badge: verificationView.label === "Verification needs attention" ? "Needs attention" : "Evidence ready",
       tone: verificationView.tone,
-      primaryAction: "verify",
+      primaryAction: "view_verification",
       recoveryRequired: false,
       verifiedComplete: false,
     };
@@ -227,6 +382,17 @@ export function missionPresentation(
       badge: "Ready",
       tone: "neutral",
       primaryAction: "continue",
+      recoveryRequired: false,
+      verifiedComplete: false,
+    };
+  }
+  if (status.finished_tasks > 0 && status.finished_tasks < status.total_tasks) {
+    return {
+      headline: "Starting Antigravity",
+      supporting: "Relintor is continuing work under sealed authority.",
+      badge: "Continuing",
+      tone: "info",
+      primaryAction: "none",
       recoveryRequired: false,
       verifiedComplete: false,
     };

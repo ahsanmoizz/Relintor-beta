@@ -252,6 +252,26 @@ export type ExecutionStatus = {
   events: Array<{ sequence: number; occurred_at_ms: number; task_id: string | null; kind: string; detail: string }>;
 };
 
+export type HumanDecisionEvidenceItem = {
+  requirement_id: string;
+  requirement_title: string;
+  intent: string;
+  status: string;
+  evidence_id: string;
+  evidence_class: string;
+  command: string;
+  exit_code: number | null;
+  result: string;
+  relevant_files: string[];
+  artifact_path: string;
+  mission_id: string;
+  revision: number;
+  source_fingerprint: string;
+  environment_fingerprint: string;
+  timestamp_ms: number;
+  detail_snippet: string;
+};
+
 export type VerificationStatus = {
   project_id: string;
   mission_id: string;
@@ -269,7 +289,114 @@ export type VerificationStatus = {
   accepted_risks: string[];
   evidence_count: number;
   certificate: { certificate_id: string; final_state: string; digest: string } | null;
+  workflow_stage: string;
+  summary: string;
+  human_decisions: Array<{
+    requirement_id: string;
+    requirement_ids?: string[];
+    title: string;
+    question: string;
+    summary: string;
+    criterion_ids: string[];
+    evidence_items?: HumanDecisionEvidenceItem[];
+  }>;
+  final_human_acceptance_eligible?: boolean;
+  final_human_acceptance_reasons?: string[];
+  evidence_items?: HumanDecisionEvidenceItem[];
+  correction_scope?: CorrectionScope | null;
+  collector_activity: string[];
+  collection_failures: string[];
   detail: string;
+};
+
+export type CorrectionUnit = {
+  correction_id: string;
+  semantic_finding: string;
+  triggering_human_decision: string;
+  affected_requirements: string[];
+  affected_tasks: string[];
+  affected_source_or_artifact_scope: string[];
+  why_scope_is_included: string;
+  required_fresh_evidence: string[];
+  dependencies: string[];
+};
+
+export type PathType = "File" | "Directory";
+
+export type PermittedOperation = "Read" | "Modify" | "CreateWithin" | "Delete" | "Rename";
+
+export type ScopeRefinementEntry = {
+  path: string;
+  path_type: PathType;
+  reason: string;
+  target_task_id: string;
+  correction_unit_ids?: string[];
+  requirement_ids?: string[];
+  permitted_operations: PermittedOperation[];
+};
+
+export type HumanScopeRefinement = {
+  mission_id: string;
+  revision: number;
+  originating_evidence_id: string;
+  entries: ScopeRefinementEntry[];
+  last_modified_ms: number;
+};
+
+export type CorrectionTaskScope = {
+  workspace: string;
+  file_scopes: string[];
+  directory_scopes: string[];
+  package_lockfiles: string[];
+  allowed_tools: string[];
+  suggested_scope?: string | null;
+  bounded_file_scopes?: string[];
+  authority_boundary_type?: string;
+  is_bounded?: boolean;
+  refinement_entries?: ScopeRefinementEntry[];
+};
+
+export type CorrectionTaskPreview = {
+  task_id: string;
+  title: string;
+  objective: string;
+  why_included: string;
+  triggering_requirement_ids: string[];
+  triggering_requirement_titles: string[];
+  scope_relation: string;
+  dependency_reason?: string | null;
+  authorized_scope: CorrectionTaskScope;
+  expected_outcome: string;
+  required_fresh_evidence: string[];
+};
+
+export type CorrectionScope = {
+  mission_id: string;
+  revision: number;
+  originating_evidence_id: string;
+  user_rejection_notes: string;
+  failed_requirement_ids: string[];
+  failed_requirement_titles?: string[];
+  blocked_requirement_ids: string[];
+  blocked_requirement_titles?: string[];
+  affected_task_ids: string[];
+  deduplicated_task_ids?: string[];
+  preserved_task_ids: string[];
+  preserved_task_count?: number;
+  correction_units?: CorrectionUnit[];
+  proposed_tasks?: CorrectionTaskPreview[];
+  scope_hash: string;
+  authorized: boolean;
+  human_refinement_required?: boolean;
+  human_scope_refinement?: HumanScopeRefinement | null;
+  missing_provenance_tasks?: string[];
+  user_reauthorization_required?: boolean;
+  escalation_reason?: string | null;
+  semantic_correction_authorities?: number;
+  duplicate_correction_work?: number;
+  unrelated_tasks?: number;
+  project_wide_unbounded_authority?: boolean;
+  technical_findings_with_only_humandecision_evidence?: number;
 };
 
 export type VerificationEvidence = {
@@ -678,6 +805,11 @@ function browserPreviewVerification(projectId: string): VerificationStatus {
     accepted_risks: [],
     evidence_count: 0,
     certificate: null,
+    workflow_stage: "DESKTOP_AUTHORITY_REQUIRED",
+    summary: "Verification is available only in the installed Relintor desktop application.",
+    human_decisions: [],
+    collector_activity: [],
+    collection_failures: [],
     detail: "Browser preview never fabricates evidence, verification state, or certificates.",
   };
 }
@@ -695,6 +827,64 @@ export async function verificationStart(projectId: string): Promise<Verification
 export async function rerunVerification(projectId: string): Promise<VerificationStatus> {
   if (!isTauriRuntime()) return browserPreviewVerification(projectId);
   return invoke<VerificationStatus>("verification_rerun", { projectId });
+}
+
+export async function submitHumanDecision(
+  projectId: string,
+  requirementId: string,
+  approved: boolean,
+  notes: string,
+): Promise<VerificationStatus> {
+  if (!isTauriRuntime()) {
+    throw new Error("The installed Relintor desktop authority is required to record a decision.");
+  }
+  return invoke<VerificationStatus>("verification_submit_human_decision", {
+    projectId,
+    requirementId,
+    approved,
+    notes,
+  });
+}
+
+export async function authorizeCorrection(
+  projectId: string,
+  missionId: string,
+  revision: number,
+  scopeHash: string,
+): Promise<ExecutionStatus> {
+  if (!isTauriRuntime()) {
+    throw new Error("The installed Relintor desktop authority is required to authorize scoped correction.");
+  }
+  return invoke<ExecutionStatus>("verification_authorize_correction", {
+    projectId,
+    missionId,
+    revision,
+    scopeHash,
+  });
+}
+
+export async function verificationGetCorrectionRefinement(
+  projectId: string,
+): Promise<HumanScopeRefinement | null> {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+  return invoke<HumanScopeRefinement | null>("verification_get_correction_refinement", {
+    projectId,
+  });
+}
+
+export async function verificationSaveCorrectionRefinement(
+  projectId: string,
+  refinement: HumanScopeRefinement,
+): Promise<VerificationStatus> {
+  if (!isTauriRuntime()) {
+    throw new Error("The installed Relintor desktop authority is required to save scope refinement.");
+  }
+  return invoke<VerificationStatus>("verification_save_correction_refinement", {
+    projectId,
+    refinement,
+  });
 }
 
 export async function verificationEvidence(projectId: string): Promise<VerificationEvidence[]> {

@@ -17,16 +17,38 @@ its claims are reconciled with the repository and executable evidence.
 
 ## Current lifecycle stage
 
-Relintor is in Windows x64 closed-Beta release hardening after P12. The current
-source contains an inert, non-null updater configuration that prevents the old
-startup deserialization panic, but startup closure and website distribution
-closure are not yet fully evidenced. Do not start another product milestone.
+Phase 1 remains `REAL MANUALLY VERIFIED`. Phase 2, Phase 3 and Phase 4 now have
+`CI VERIFIED` evidence at commit
+`9bd9fdce59ce20ce5014e885defeb23084f6ab9a`:
+
+- Quality run `32657628058`: Windows, macOS and Ubuntu PASS.
+- Windows Closure run `32657628151`: PASS.
+- Secret Hygiene run `32657628054`: PASS.
+
+This is CI closure only. The same canonical Windows mission still needs the
+real continuity, restart/reload, bounded complex execution and completion-
+certificate proof described by the project handoff. Phase 5 remains blocked;
+do not start it.
+
+## Six-phase tracker
+
+1. Phase 1 — `REAL MANUALLY VERIFIED`
+2. Phase 2 — `CI VERIFIED`; real continuity/restart proof pending
+3. Phase 3 — `CI VERIFIED`; real complex/unattended execution proof pending
+4. Phase 4 — `CI VERIFIED`; real evidence/correction/certificate/reload proof pending
+5. Phase 5 — `BLOCKED`
+6. Phase 6 — `BLOCKED`
+
+These statuses are based on the concrete CI runs above. Do not promote any
+phase to `REAL MANUALLY VERIFIED`, `BETA READY`, or `PRODUCTION READY` without
+the corresponding runtime evidence.
 
 ## Current objective
 
-Close the current Windows Beta release chain truthfully: verify repaired startup,
-run Rust gates under x64 MSVC, align the website `dist` download with the current
-x64 installer, and preserve explicit external/cross-platform blockers.
+Continue the same canonical Windows mission through Phase 2 continuity,
+Phase 3 bounded complex execution, and Phase 4 evidence/correction/
+certificate/reload verification. Preserve the existing mission and history;
+do not start Phase 5.
 
 ## Source-of-truth order
 
@@ -47,19 +69,16 @@ x64 installer, and preserve explicit external/cross-platform blockers.
   evidence.
 - Keep normal runtime machine-independent; development D: paths are not product
   configuration.
-- Do not touch GitHub or publish artifacts unless explicitly requested.
+- Keep GitHub changes limited to the requested `phase2-4-ci` branch / PR #1;
+  do not publish artifacts or make unrelated repository changes.
 - Keep website, desktop, cloud and AI-gateway changes scoped to the active task.
 - Do not treat an old binary, empty error log or UI label as complete runtime
   evidence without an exit code and the matching source/artifact hash.
 
 ## Current next task
 
-Add/run the updater configuration regression test, launch the repaired x64
-executable with an explicit exit code, run fmt/clippy/workspace tests under the
-pinned x64 MSVC toolchain, then rebuild and verify website `dist` against the
-current installer SHA-256:
-
-`95CD461A9D9EDF5598A1A406B257B373B0B24FA195F0A8046B27ED618EABC250`
-
-Stop and report a precise blocker if the MSVC toolchain, clean-machine harness,
-website deployment, or any required external service is unavailable.
+Use the existing canonical Windows workspace/mission and prove, through the
+normal UI, restart/reload continuity and recovery authority; then run the
+bounded complex/unattended execution proof and the P8 evidence, correction,
+certificate and reload proof. Only after those runtime gates pass may the
+tracker move beyond CI closure or Phase 5 unblock.

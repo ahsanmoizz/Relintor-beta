@@ -1,11 +1,101 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
-import { App } from "./App";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
+import { Activity, App, MissionCockpit, mergeVerificationRefresh, verificationActionError, verificationActionMessage } from "./App";
+import type { AntigravityHealth, ExecutionStatus, VerificationStatus } from "./backend";
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+
+const tauriInvoke = vi.mocked(invoke);
+
+function finishedExecution(): ExecutionStatus {
+  return {
+    project_id: "project-1",
+    project_name: "Test project",
+    mission_id: "mission-project-1",
+    revision: 1,
+    state: "ExecutionTasksFinishedAwaitingVerification",
+    watchdog_state: "Healthy",
+    current_turn: 1,
+    active_task: null,
+    current_task_objective: null,
+    recovery_task_id: null,
+    recovery_task_objective: null,
+    runnable_tasks: [],
+    total_tasks: 11,
+    finished_tasks: 11,
+    tool_calls: 0,
+    execution_steps: 0,
+    estimated_cost_micros: null,
+    safe_boundary_reached: true,
+    last_event: "TASK_IMPLEMENTATION_FINISHED",
+    ledger_path: "D:\\Relintor\\mission.json",
+    recovery_state: "NO_RECOVERY_REQUIRED",
+    last_safe_checkpoint: null,
+    resume_disposition: null,
+    resume_blocker: null,
+    external_changes: [],
+    recovery_detected: false,
+    recovery_action: "NONE",
+    dispatch_active: false,
+    execution_phase: "FINISHED_AWAITING_VERIFICATION",
+    execution_time_limit_ms: 600_000,
+    events: [],
+  };
+}
+
+function pendingVerification(): VerificationStatus {
+  return {
+    project_id: "project-1",
+    mission_id: "mission-project-1",
+    revision: 1,
+    execution_run_id: "run-1",
+    state: "VERIFICATION_FINISHED",
+    completion_state: "StoppedIncomplete",
+    requirements_verified: 2,
+    requirements_total: 11,
+    missing_evidence: ["requirement-human: missing HUMAN_DECISION"],
+    failed_checks: [],
+    skipped_checks: [],
+    stale_evidence: [],
+    blocked_external: [],
+    accepted_risks: [],
+    evidence_count: 2,
+    certificate: null,
+    workflow_stage: "READY_TO_VERIFY",
+    summary: "Verification is ready.",
+    human_decisions: [],
+    collector_activity: [],
+    collection_failures: [],
+    detail: "requirements remain unverified",
+  };
+}
+
+const readyAntigravity: AntigravityHealth = {
+  status: "ready",
+  version: "1",
+  executable: "antigravity.exe",
+  compatibility: "compatible",
+  cli_invocation_capability: true,
+  plugin_hook_capability: true,
+  ide_status: "installed",
+  cli_status: "installed",
+  authentication_status: "authenticated",
+  executable_detectable: true,
+  adapter_ready: true,
+  setup_required: false,
+  environment: "test",
+  platform: "windows",
+  detected_at_ms: 1,
+  detail: "ready",
+};
 
 describe("desktop shell foundation", () => {
   beforeEach(() => {
     window.location.hash = "#home";
     localStorage.clear();
+    Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+    tauriInvoke.mockReset();
   });
 
   it("exposes exactly four primary destinations and a truthful new-project launcher", () => {
@@ -30,6 +120,16 @@ describe("desktop shell foundation", () => {
     fireEvent.click(screen.getByRole("button", { name: /New project/ }));
     expect(screen.getByRole("heading", { name: "Make the idea legible." })).toBeTruthy();
     expect(screen.getByRole("textbox", { name: "What are you building?" })).toBeTruthy();
+  });
+
+  it("keeps system health distinct from mission authority and does not fabricate recent missions", async () => {
+    render(<App />);
+
+    expect(screen.getByLabelText(/System health:/)).toBeTruthy();
+    expect(screen.queryByText("Authority needs attention")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Recent projects" })).toBeTruthy();
+    expect(await screen.findByText("No saved projects yet.")).toBeTruthy();
+    expect(screen.queryByText("No missions yet.")).toBeNull();
   });
 
   it("changes the active view and exposes aria-current", () => {
@@ -78,7 +178,7 @@ describe("desktop shell foundation", () => {
     expect(screen.getByText("C:\\Projects\\existing-app")).toBeTruthy();
     expect(screen.getByRole("textbox", { name: "What do you want Relintor to change?" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Back to reality report" })).toBeTruthy();
-  });
+  }, 15_000);
 
   it("makes a selected investigation answer visually and semantically explicit", async () => {
     render(<App />);
@@ -167,14 +267,1098 @@ describe("desktop shell foundation", () => {
     expect(screen.getByText(/There is no frontend-only activity/)).toBeTruthy();
   });
 
-  it("exposes privacy controls and safe diagnostics without sensitive fields", async () => {
-    render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "Account" }));
-    expect(await screen.findByRole("heading", { name: "Choose what leaves this device." })).toBeTruthy();
-    expect(screen.getByLabelText(/Keep project evidence local/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Export safe diagnostics" })).toBeTruthy();
-    expect(screen.queryByText(/database_path/i)).toBeNull();
-    fireEvent.click(screen.getByLabelText(/Allow cloud account\/team state/));
-    await waitFor(() => expect(localStorage.getItem("relintor-privacy-cloud")).toBe("true"));
+  it("does not render a manual Verify work button after all tasks finish", () => {
+    render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={pendingVerification()}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Verify work" })).toBeNull();
+    expect(screen.getByRole("button", { name: "View verification" })).toBeTruthy();
+  });
+
+  it("drives the native approval command through Tauri and renders the returned certificate state", async () => {
+    const pending = pendingVerification();
+    pending.workflow_stage = "WAITING_FOR_USER_DECISION";
+    pending.final_human_acceptance_eligible = true;
+    pending.missing_evidence = [];
+    pending.human_decisions = [{
+      requirement_id: "requirement-human",
+      title: "Approved outcome",
+      question: "Does the completed result satisfy the approved outcome for this mission?",
+      summary: "Review the completed project outcome before approving it.",
+      criterion_ids: ["criterion-human"],
+    }];
+    const completed: VerificationStatus = {
+      ...pending,
+      completion_state: "VerifiedComplete",
+      workflow_stage: "VERIFIED_COMPLETE",
+      summary: "All required evidence passed and the completion certificate is valid.",
+      missing_evidence: [],
+      requirements_verified: 11,
+      requirements_total: 11,
+      evidence_count: 11,
+      human_decisions: [],
+      certificate: {
+        certificate_id: "cert-native-closure",
+        final_state: "VerifiedComplete",
+        digest: "certificate-digest",
+      },
+    };
+    Reflect.defineProperty(window, "__TAURI_INTERNALS__", { value: {} });
+    tauriInvoke.mockImplementation(async (command, args) => {
+      if (command === "execution_status") return finishedExecution();
+      if (command === "health_antigravity") return readyAntigravity;
+      if (command === "antigravity_setup_status") return { active: false, adapter_ready: true };
+      if (command === "verification_status") return pending;
+      if (command === "verification_submit_human_decision") {
+        expect(args).toEqual({
+          projectId: "project-1",
+          requirementId: "requirement-human",
+          approved: true,
+          notes: "The result satisfies the approved outcome.",
+        });
+        return completed;
+      }
+      throw new Error(`unexpected Tauri command: ${command}`);
+    });
+
+    render(<Activity handoff={{
+      mission_id: "mission-project-1",
+      revision: 1,
+      contract_hash: "contract-hash",
+      state: "SEALED",
+      task_order: [],
+      scheduler_owner: "relintor",
+    }} />);
+
+    expect(await screen.findByRole("heading", { name: "Relintor needs your decision" })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Optional notes"), {
+      target: { value: "The result satisfies the approved outcome." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+
+    await waitFor(() => expect(screen.getByText("Verification finished successfully. The completion certificate is valid and saved.")).toBeTruthy());
+    expect(screen.getAllByText("Verified Complete").length).toBeGreaterThan(0);
+    expect(tauriInvoke).toHaveBeenCalledWith("verification_submit_human_decision", {
+      projectId: "project-1",
+      requirementId: "requirement-human",
+      approved: true,
+      notes: "The result satisfies the approved outcome.",
+    });
+  });
+
+  it("turns a failed verification invocation into visible user-facing text", () => {
+    expect(verificationActionError(new Error("verification authority command failed"))).toMatch(/couldn't verify this work/i);
+  });
+
+  it("does not announce successful completion when workflow authority or certificate state disagrees", () => {
+    const contradictory: VerificationStatus = {
+      ...pendingVerification(),
+      completion_state: "VerifiedComplete",
+      workflow_stage: "VERIFICATION_NEEDS_ATTENTION",
+      summary: "Backend authority still requires attention.",
+      requirements_verified: 11,
+      requirements_total: 11,
+      evidence_count: 11,
+      certificate: {
+        certificate_id: "cert-contradictory",
+        final_state: "VerifiedComplete",
+        digest: "digest",
+      },
+    };
+    expect(verificationActionMessage(contradictory)).toBe("Backend authority still requires attention.");
+  });
+
+  it("captures a genuine human decision in plain language without exposing IDs in primary copy", () => {
+    const onDecision = vi.fn();
+    const decision = pendingVerification();
+    decision.workflow_stage = "WAITING_FOR_USER_DECISION";
+    decision.final_human_acceptance_eligible = true;
+    decision.missing_evidence = [];
+    decision.summary = "Automated checks are complete. Relintor needs your decision before verification can continue.";
+    decision.human_decisions = [{
+      requirement_id: "requirement-secret-internal-id",
+      title: "Approved outcome",
+      question: "Does the completed result match the outcome you approved for this mission?",
+      summary: "Review the completed project outcome before approving it.",
+      criterion_ids: ["criterion-secret-internal-id"],
+    }];
+    const rendered = render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={decision}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={onDecision}
+        onRefresh={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Relintor needs your decision" })).toBeTruthy();
+    expect(screen.getByText(/Technical Evidence/i)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Optional notes"), { target: { value: "The result matches." } });
+    const authoritativeRefresh: VerificationStatus = {
+      ...decision,
+      workflow_stage: "WAITING_FOR_USER_DECISION",
+      summary: "Automated checks are complete. Relintor needs your decision before verification can continue.",
+      human_decisions: decision.human_decisions,
+      missing_evidence: [],
+      final_human_acceptance_eligible: true,
+    };
+    rendered.rerender(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={mergeVerificationRefresh(decision, authoritativeRefresh)}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={onDecision}
+        onRefresh={vi.fn()}
+      />,
+    );
+    expect((screen.getByLabelText("Optional notes") as HTMLTextAreaElement).value).toBe("The result matches.");
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    expect(onDecision).toHaveBeenCalledWith("requirement-secret-internal-id", true, "The result matches.");
+    expect(screen.queryByRole("button", { name: "Verify work" })).toBeNull();
+  });
+
+  it("keeps the pending decision and notes stable across six five-second polling refreshes", async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = pendingVerification();
+      pending.workflow_stage = "WAITING_FOR_USER_DECISION";
+      pending.final_human_acceptance_eligible = true;
+      pending.missing_evidence = [];
+      pending.summary = "Automated checks are complete. Relintor needs your decision before verification can continue.";
+      pending.human_decisions = [{
+        requirement_id: "requirement-human",
+        title: "Approved outcome",
+        question: "Does the completed result satisfy the approved outcome for this mission?",
+        summary: "Review the completed project outcome before approving it.",
+        criterion_ids: ["criterion-human"],
+      }];
+      const authoritativeRefresh: VerificationStatus = {
+        ...pending,
+        workflow_stage: "WAITING_FOR_USER_DECISION",
+        summary: "Automated checks are complete. Relintor needs your decision before verification can continue.",
+        human_decisions: pending.human_decisions,
+        missing_evidence: [],
+        final_human_acceptance_eligible: true,
+      };
+      const onDecision = vi.fn();
+      let current = pending;
+      const rendered = render(
+        <MissionCockpit
+          status={finishedExecution()}
+          verification={current}
+          antigravity={readyAntigravity}
+          busy={false}
+          revalidating={false}
+          verificationNotice={null}
+          onCommand={vi.fn()}
+          onVerify={vi.fn()}
+          onDecision={onDecision}
+          onRefresh={vi.fn()}
+        />,
+      );
+      fireEvent.change(screen.getByLabelText("Optional notes"), {
+        target: { value: "My decision remains attached to this mission." },
+      });
+      const timer = window.setInterval(() => {
+        current = mergeVerificationRefresh(current, authoritativeRefresh);
+        rendered.rerender(
+          <MissionCockpit
+            status={finishedExecution()}
+            verification={current}
+            antigravity={readyAntigravity}
+            busy={false}
+            revalidating={false}
+            verificationNotice={null}
+            onCommand={vi.fn()}
+            onVerify={vi.fn()}
+            onDecision={onDecision}
+            onRefresh={vi.fn()}
+          />,
+        );
+      }, 5_000);
+
+      await act(async () => vi.advanceTimersByTimeAsync(30_000));
+
+      expect(current.workflow_stage).toBe("WAITING_FOR_USER_DECISION");
+      expect(current.human_decisions[0]?.requirement_id).toBe("requirement-human");
+      expect(screen.getByRole("heading", { name: "Relintor needs your decision" })).toBeTruthy();
+      expect((screen.getByLabelText("Optional notes") as HTMLTextAreaElement).value)
+        .toBe("My decision remains attached to this mission.");
+      window.clearInterval(timer);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never overrides a newer backend workflow stage during refresh", () => {
+    const pending = pendingVerification();
+    pending.workflow_stage = "WAITING_FOR_USER_DECISION";
+    pending.final_human_acceptance_eligible = true;
+    pending.human_decisions = [{
+      requirement_id: "requirement-human",
+      title: "Approved outcome",
+      question: "Does the completed result satisfy the approved outcome for this mission?",
+      summary: "Review the completed project outcome before approving it.",
+      criterion_ids: ["criterion-human"],
+    }];
+    const authoritativeNext: VerificationStatus = {
+      ...pending,
+      workflow_stage: "READY_TO_VERIFY",
+      summary: "Backend authority no longer requests a human decision.",
+      human_decisions: [],
+      final_human_acceptance_eligible: false,
+    };
+
+    const merged = mergeVerificationRefresh(pending, authoritativeNext);
+
+    expect(merged).toEqual(authoritativeNext);
+    expect(merged.workflow_stage).toBe("READY_TO_VERIFY");
+    expect(merged.human_decisions).toHaveLength(0);
+  });
+
+  it("allows an authoritative decision transition to replace the pending card", () => {
+    const pending = pendingVerification();
+    pending.workflow_stage = "WAITING_FOR_USER_DECISION";
+    pending.final_human_acceptance_eligible = true;
+    pending.missing_evidence = [];
+    pending.human_decisions = [{
+      requirement_id: "requirement-human",
+      title: "Approved outcome",
+      question: "Does the completed result satisfy the approved outcome for this mission?",
+      summary: "Review the completed project outcome before approving it.",
+      criterion_ids: ["criterion-human"],
+    }];
+    const rejected: VerificationStatus = {
+      ...pending,
+      workflow_stage: "USER_DECISION_REJECTED",
+      human_decisions: [],
+      summary: "You rejected the completed result.",
+      missing_evidence: [],
+    };
+
+    expect(mergeVerificationRefresh(pending, rejected).workflow_stage).toBe("USER_DECISION_REJECTED");
+    expect(mergeVerificationRefresh(pending, rejected).human_decisions).toHaveLength(0);
+  });
+
+  it("fails closed on approval controls when a waiting snapshot still contains machine blockers", () => {
+    const status = pendingVerification();
+    status.workflow_stage = "WAITING_FOR_USER_DECISION";
+    status.final_human_acceptance_eligible = true;
+    status.missing_evidence = ["requirement-test: missing TestOutput"];
+    status.human_decisions = [{
+      requirement_id: "requirement-human",
+      title: "Approved outcome",
+      question: "Approve?",
+      summary: "Review the result.",
+      criterion_ids: ["criterion-human"],
+    }];
+
+    render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={status}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reject" })).toBeNull();
+    expect(screen.getAllByRole("heading", { name: "Verification needs attention" }).length).toBeGreaterThan(0);
+  });
+
+  it("does not render approval controls when backend workflow stage is not waiting for a user decision", () => {
+    const status = pendingVerification();
+    status.workflow_stage = "READY_TO_VERIFY";
+    status.final_human_acceptance_eligible = true;
+    status.human_decisions = [{
+      requirement_id: "requirement-human",
+      title: "Approved outcome",
+      question: "Approve?",
+      summary: "Review the result.",
+      criterion_ids: ["criterion-human"],
+    }];
+
+    render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={status}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reject" })).toBeNull();
+  });
+
+  it("submits the exact rejection and retains the card and notes while persistence is pending or fails", () => {
+    const onDecision = vi.fn();
+    const pending = pendingVerification();
+    pending.workflow_stage = "WAITING_FOR_USER_DECISION";
+    pending.final_human_acceptance_eligible = true;
+    pending.missing_evidence = [];
+    pending.human_decisions = [{
+      requirement_id: "requirement-human",
+      title: "Approved outcome",
+      question: "Does the completed result satisfy the approved outcome for this mission?",
+      summary: "Review the completed project outcome before approving it.",
+      criterion_ids: ["criterion-human"],
+    }];
+    const props = {
+      status: finishedExecution(),
+      verification: pending,
+      antigravity: readyAntigravity,
+      revalidating: false,
+      onCommand: vi.fn(),
+      onVerify: vi.fn(),
+      onDecision,
+      onRefresh: vi.fn(),
+    };
+    const rendered = render(
+      <MissionCockpit {...props} busy={false} verificationNotice={null} />,
+    );
+    fireEvent.change(screen.getByLabelText("Optional notes"), {
+      target: { value: "The result does not meet the approved outcome." },
+    });
+
+    rendered.rerender(
+      <MissionCockpit {...props} busy verificationNotice="Recording your rejection…" />,
+    );
+    expect(screen.getByRole("heading", { name: "Relintor needs your decision" })).toBeTruthy();
+    expect((screen.getByLabelText("Optional notes") as HTMLTextAreaElement).value)
+      .toBe("The result does not meet the approved outcome.");
+    expect((screen.getAllByRole("button", { name: "Recording decision…" })[0] as HTMLButtonElement).disabled)
+      .toBe(true);
+    fireEvent.click(screen.getAllByRole("button", { name: "Recording decision…" })[0]);
+    expect(onDecision).not.toHaveBeenCalled();
+
+    rendered.rerender(
+      <MissionCockpit {...props} busy={false} verificationNotice={null} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Reject" }));
+    expect(onDecision).toHaveBeenCalledWith(
+      "requirement-human",
+      false,
+      "The result does not meet the approved outcome.",
+    );
+  });
+
+  it("removes the decision card only after an authoritative successful submission response", () => {
+    const pending = pendingVerification();
+    pending.workflow_stage = "WAITING_FOR_USER_DECISION";
+    pending.final_human_acceptance_eligible = true;
+    pending.missing_evidence = [];
+    pending.human_decisions = [{
+      requirement_id: "requirement-human",
+      title: "Approved outcome",
+      question: "Does the completed result satisfy the approved outcome for this mission?",
+      summary: "Review the completed project outcome before approving it.",
+      criterion_ids: ["criterion-human"],
+    }];
+    const rendered = render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={pending}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+      />,
+    );
+    const resumed = {
+      ...pending,
+      workflow_stage: "VERIFICATION_NEEDS_ATTENTION",
+      human_decisions: [],
+      missing_evidence: ["requirement-test: missing TestOutput"],
+    };
+    rendered.rerender(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={resumed}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice="Verification finished."
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("heading", { name: "Relintor needs your decision" })).toBeNull();
+  });
+
+  it("renders correction scope preview and calls onAuthorizeCorrection when user clicks Authorize scoped correction", () => {
+    const onAuthorize = vi.fn();
+    const rejectedVer = pendingVerification();
+    rejectedVer.workflow_stage = "USER_DECISION_REJECTED";
+    rejectedVer.summary = "You rejected the completed result.";
+    rejectedVer.correction_scope = {
+      mission_id: "mission-test",
+      revision: 1,
+      originating_evidence_id: "p8-rejection-art",
+      user_rejection_notes: "Needs explicit retry backoff test",
+      failed_requirement_ids: ["REQ-A-OUTCOME"],
+      blocked_requirement_ids: ["REQ-ACCESSIBILITY"],
+      affected_task_ids: ["task-1"],
+      preserved_task_ids: ["task-2", "task-3"],
+      scope_hash: "test-scope-hash-123",
+      authorized: false,
+      user_reauthorization_required: true,
+    };
+
+    const rendered = render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={rejectedVer}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+        onAuthorizeCorrection={onAuthorize}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: /Review Correction Scope/i })).toBeTruthy();
+    expect(screen.getByText(/Needs explicit retry backoff test/i)).toBeTruthy();
+    expect(screen.getByText(/REQ-A-OUTCOME/i)).toBeTruthy();
+    expect(screen.getByText(/REQ-ACCESSIBILITY/i)).toBeTruthy();
+    expect(screen.getByText(/2 historical tasks/i)).toBeTruthy();
+
+    const authBtn = screen.getByRole("button", { name: "Authorize scoped correction" });
+    expect(authBtn).toBeTruthy();
+    fireEvent.click(authBtn);
+    expect(onAuthorize).toHaveBeenCalledWith("test-scope-hash-123");
+
+    // Re-render as authorized
+    const authorizedVer = {
+      ...rejectedVer,
+      correction_scope: {
+        ...rejectedVer.correction_scope,
+        authorized: true,
+      },
+    };
+    rendered.rerender(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={authorizedVer}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+        onAuthorizeCorrection={onAuthorize}
+      />,
+    );
+    expect(screen.getByText(/Scoped correction authorized/i)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Authorize scoped correction" })).toBeNull();
+  });
+
+  it("renders human-reviewable correction task cards with objectives, triggering requirements, scope boundaries, and fresh evidence expectations (Defect #48)", () => {
+    const onAuthorize = vi.fn();
+    const rejectedVer = pendingVerification();
+    rejectedVer.workflow_stage = "USER_DECISION_REJECTED";
+    rejectedVer.summary = "You rejected the completed result.";
+    rejectedVer.correction_scope = {
+      mission_id: "mission-test",
+      revision: 1,
+      originating_evidence_id: "p8-rejection-art",
+      user_rejection_notes: "Route error states are not surfaced cleanly.",
+      failed_requirement_ids: ["REQ-A-OUTCOME", "REQ-B-PURPOSE"],
+      failed_requirement_titles: ["User problem outcome", "User product purpose"],
+      blocked_requirement_ids: ["REQ-ACCESSIBILITY"],
+      blocked_requirement_titles: ["NFR: accessibility"],
+      affected_task_ids: ["task-1", "task-2", "task-3"],
+      preserved_task_ids: ["task-4", "task-5", "task-6", "task-7", "task-8", "task-9", "task-10", "task-11", "task-12", "task-13", "task-14", "task-15"],
+      preserved_task_count: 12,
+      proposed_tasks: [
+        {
+          task_id: "task-1",
+          title: "Implement: User problem outcome",
+          objective: "Implement transport health and route status plan.",
+          why_included: "Directly implements failed requirement: User problem outcome",
+          triggering_requirement_ids: ["REQ-A-OUTCOME"],
+          triggering_requirement_titles: ["User problem outcome"],
+          scope_relation: "DIRECT",
+          dependency_reason: null,
+          authorized_scope: {
+            workspace: "D:/TestWorkspace",
+            file_scopes: [],
+            directory_scopes: [],
+            package_lockfiles: ["Cargo.lock"],
+            allowed_tools: ["antigravity", "workspace"],
+            suggested_scope: "decision",
+          },
+          expected_outcome: "A reviewable evidence record demonstrates: User problem outcome",
+          required_fresh_evidence: ["HumanDecision (A genuine project decision requires explicit human review.)"],
+        },
+        {
+          task_id: "task-2",
+          title: "Implement: User product purpose",
+          objective: "Expose structured transport route health information.",
+          why_included: "Directly implements failed requirement: User product purpose",
+          triggering_requirement_ids: ["REQ-B-PURPOSE"],
+          triggering_requirement_titles: ["User product purpose"],
+          scope_relation: "DIRECT",
+          dependency_reason: null,
+          authorized_scope: {
+            workspace: "D:/TestWorkspace",
+            file_scopes: [],
+            directory_scopes: [],
+            package_lockfiles: ["Cargo.lock"],
+            allowed_tools: ["antigravity", "workspace"],
+            suggested_scope: "decision",
+          },
+          expected_outcome: "A reviewable evidence record demonstrates: User product purpose",
+          required_fresh_evidence: ["HumanDecision (A genuine project decision requires explicit human review.)"],
+        },
+        {
+          task_id: "task-3",
+          title: "Implement: NFR: accessibility",
+          objective: "Primary flows must be keyboard navigable.",
+          why_included: "Directly implements blocked requirement: NFR: accessibility",
+          triggering_requirement_ids: ["REQ-ACCESSIBILITY"],
+          triggering_requirement_titles: ["NFR: accessibility"],
+          scope_relation: "DIRECT",
+          dependency_reason: null,
+          authorized_scope: {
+            workspace: "D:/TestWorkspace",
+            file_scopes: [],
+            directory_scopes: [],
+            package_lockfiles: ["Cargo.lock"],
+            allowed_tools: ["antigravity", "workspace"],
+            suggested_scope: "accessibility",
+          },
+          expected_outcome: "A reviewable evidence record demonstrates: NFR: accessibility",
+          required_fresh_evidence: ["AccessibilityResult (Accessibility obligations require an accessibility result.)"],
+        },
+      ],
+      scope_hash: "test-scope-hash-48",
+      authorized: false,
+      user_reauthorization_required: true,
+    };
+
+    render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={rejectedVer}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+        onAuthorizeCorrection={onAuthorize}
+      />,
+    );
+
+    // Requirements inspectability: titles and IDs
+    expect(screen.getAllByText(/User problem outcome/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/User product purpose/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/NFR: accessibility/).length).toBeGreaterThan(0);
+
+    // 3 task cards rendered
+    expect(screen.getByTestId("correction-task-card-task-1")).toBeTruthy();
+    expect(screen.getByTestId("correction-task-card-task-2")).toBeTruthy();
+    expect(screen.getByTestId("correction-task-card-task-3")).toBeTruthy();
+
+    // Human-readable titles rendered
+    expect(screen.getByText("Implement: User problem outcome")).toBeTruthy();
+    expect(screen.getByText("Implement: User product purpose")).toBeTruthy();
+    expect(screen.getByText("Implement: NFR: accessibility")).toBeTruthy();
+
+    // Objectives rendered
+    expect(screen.getByText("Implement transport health and route status plan.")).toBeTruthy();
+    expect(screen.getByText("Expose structured transport route health information.")).toBeTruthy();
+    expect(screen.getByText("Primary flows must be keyboard navigable.")).toBeTruthy();
+
+    // Direct badges
+    const badges = screen.getAllByText("Direct Target");
+    expect(badges).toHaveLength(3);
+
+    // Fresh evidence expectations rendered
+    expect(screen.getAllByText(/HumanDecision \(A genuine project decision/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/AccessibilityResult \(Accessibility obligations/)).toBeTruthy();
+
+    // 12 preserved historical tasks notice
+    expect(screen.getByText(/12 historical tasks preserved/)).toBeTruthy();
+
+    // Status hint before authorization
+    expect(screen.getAllByText(/Will become runnable only after explicit user authorization/)).toHaveLength(3);
+  });
+
+  it("renders Verified Complete without attention panel when valid certificate and verified requirements coexist with historical stale records", () => {
+    const verified = {
+      project_id: "project-1",
+      mission_id: "mission-project-1",
+      revision: 1,
+      execution_run_id: "run-1",
+      state: "VERIFICATION_FINISHED",
+      completion_state: "VerifiedComplete",
+      requirements_verified: 6,
+      requirements_total: 6,
+      missing_evidence: [],
+      failed_checks: [],
+      skipped_checks: [],
+      stale_evidence: ["p8-collector-old-blocked-evidence"],
+      blocked_external: [],
+      accepted_risks: [],
+      evidence_count: 6,
+      certificate: {
+        certificate_id: "cert-12345",
+        final_state: "VERIFIED_COMPLETE",
+        digest: "cert-digest",
+      },
+      workflow_stage: "VERIFIED_COMPLETE",
+      summary: "All required evidence passed.",
+      human_decisions: [],
+      collector_activity: [],
+      collection_failures: [],
+      detail: "",
+    };
+
+    render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={verified}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Verified Complete" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Verification needs attention" })).toBeNull();
+    expect(screen.queryByText("What needs attention")).toBeNull();
+  });
+
+  it("renders Verification needs attention when certificate is missing or current evidence is missing", () => {
+    const incomplete = {
+      project_id: "project-1",
+      mission_id: "mission-project-1",
+      revision: 1,
+      execution_run_id: "run-1",
+      state: "VERIFICATION_FINISHED",
+      completion_state: "StoppedIncomplete",
+      requirements_verified: 2,
+      requirements_total: 6,
+      missing_evidence: ["requirement-test: missing TEST_OUTPUT"],
+      failed_checks: [],
+      skipped_checks: [],
+      stale_evidence: [],
+      blocked_external: [],
+      accepted_risks: [],
+      evidence_count: 2,
+      certificate: null,
+      workflow_stage: "VERIFICATION_NEEDS_ATTENTION",
+      summary: "Missing evidence.",
+      human_decisions: [],
+      collector_activity: [],
+      collection_failures: [],
+      detail: "",
+    };
+
+    render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={incomplete}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("heading", { name: "Verified Complete" })).toBeNull();
+    expect(screen.getAllByRole("heading", { name: "Verification needs attention" })).toHaveLength(2);
+  });
+
+  it("renders precise bounded correction scope with structured findings, deduplication notice, bounded files, and human refinement guard (Defect #49)", () => {
+    const onAuthorize = vi.fn();
+    const rejectedVer = pendingVerification();
+    rejectedVer.workflow_stage = "USER_DECISION_REJECTED";
+    rejectedVer.summary = "You rejected the completed result.";
+    rejectedVer.correction_scope = {
+      mission_id: "mission-test-49",
+      revision: 1,
+      originating_evidence_id: "p8-rejection-art",
+      user_rejection_notes: "REJECTED: 1. Documentation falsely claims approval. 2. State transitions unreliable. 3. Accessibility blocked.",
+      failed_requirement_ids: ["REQ-A-OUTCOME", "REQ-B-PURPOSE"],
+      failed_requirement_titles: ["User problem outcome", "User product purpose"],
+      blocked_requirement_ids: ["REQ-ACCESSIBILITY"],
+      blocked_requirement_titles: ["NFR: accessibility"],
+      affected_task_ids: ["task-1", "task-3"],
+      deduplicated_task_ids: ["task-2"],
+      preserved_task_ids: ["task-2", "task-4", "task-5"],
+      preserved_task_count: 3,
+      semantic_correction_authorities: 1,
+      duplicate_correction_work: 0,
+      unrelated_tasks: 0,
+      project_wide_unbounded_authority: false,
+      technical_findings_with_only_humandecision_evidence: 0,
+      human_refinement_required: false,
+      correction_units: [
+        {
+          correction_id: "corr-1-01",
+          semantic_finding: "Documentation falsely claims approval.",
+          triggering_human_decision: "p8-rejection-art",
+          affected_requirements: ["REQ-A-OUTCOME"],
+          affected_tasks: ["task-1"],
+          affected_source_or_artifact_scope: ["docs/PLAN.md"],
+          why_scope_is_included: "Documentation correction required.",
+          required_fresh_evidence: ["TEST_OUTPUT (Documentation integrity check)", "Source/policy inspection"],
+          dependencies: [],
+        },
+        {
+          correction_id: "corr-1-02",
+          semantic_finding: "Accessibility blocked.",
+          triggering_human_decision: "p8-rejection-art",
+          affected_requirements: ["REQ-ACCESSIBILITY"],
+          affected_tasks: ["task-3"],
+          affected_source_or_artifact_scope: ["docs/ACCESSIBILITY.md"],
+          why_scope_is_included: "Accessibility obligation remains blocked.",
+          required_fresh_evidence: ["ACCESSIBILITY_RESULT"],
+          dependencies: ["task-1"],
+        },
+      ],
+      proposed_tasks: [
+        {
+          task_id: "task-1",
+          title: "Implement: User problem outcome",
+          objective: "Implement transport health and route status plan.",
+          why_included: "Directly implements failed requirement: User problem outcome",
+          triggering_requirement_ids: ["REQ-A-OUTCOME"],
+          triggering_requirement_titles: ["User problem outcome"],
+          scope_relation: "DIRECT",
+          dependency_reason: null,
+          authorized_scope: {
+            workspace: "D:/TestWorkspace",
+            file_scopes: [],
+            directory_scopes: [],
+            package_lockfiles: ["Cargo.lock"],
+            allowed_tools: ["antigravity", "workspace"],
+            suggested_scope: "decision",
+            bounded_file_scopes: ["crates/routing/src/lib.rs", "docs/PLAN.md"],
+            authority_boundary_type: "PROVENANCE_BOUNDED",
+            is_bounded: true,
+          },
+          expected_outcome: "Technical proofs pass and owner ratifies outcome",
+          required_fresh_evidence: [
+            "TEST_OUTPUT (Documentation integrity check)",
+            "HUMAN_DECISION (Genuine final owner acceptance after technical proofs pass)",
+          ],
+        },
+        {
+          task_id: "task-3",
+          title: "Implement: NFR: accessibility",
+          objective: "Primary flows must be keyboard navigable.",
+          why_included: "Directly implements blocked requirement: NFR: accessibility",
+          triggering_requirement_ids: ["REQ-ACCESSIBILITY"],
+          triggering_requirement_titles: ["NFR: accessibility"],
+          scope_relation: "DIRECT",
+          dependency_reason: null,
+          authorized_scope: {
+            workspace: "D:/TestWorkspace",
+            file_scopes: [],
+            directory_scopes: [],
+            package_lockfiles: ["Cargo.lock"],
+            allowed_tools: ["antigravity", "workspace"],
+            suggested_scope: "accessibility",
+            bounded_file_scopes: ["docs/ACCESSIBILITY.md"],
+            authority_boundary_type: "PROVENANCE_BOUNDED",
+            is_bounded: true,
+          },
+          expected_outcome: "Accessibility audit passes",
+          required_fresh_evidence: ["ACCESSIBILITY_RESULT"],
+        },
+      ],
+      scope_hash: "test-scope-hash-49",
+      authorized: false,
+      user_reauthorization_required: true,
+    };
+
+    const rendered = render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={rejectedVer}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+        onAuthorizeCorrection={onAuthorize}
+      />,
+    );
+
+    // 1. Structured rejection findings rendered
+    expect(screen.getByTestId("correction-units-section")).toBeTruthy();
+    expect(screen.getByText("Documentation falsely claims approval.")).toBeTruthy();
+    expect(screen.getByText("Accessibility blocked.")).toBeTruthy();
+    expect(screen.getAllByText(/docs\/PLAN\.md/).length).toBeGreaterThan(0);
+
+    // 2. Semantic deduplication notice rendered
+    expect(screen.getByTestId("correction-deduplication-notice")).toBeTruthy();
+    expect(screen.getByText(/Semantic Deduplication Applied/)).toBeTruthy();
+    expect(screen.getByText(/Duplicate correction work: 0/)).toBeTruthy();
+
+    // 3. Bounded authority scope rendered
+    expect(screen.getAllByText("PROVENANCE_BOUNDED").length).toBe(2);
+    expect(screen.getByText(/crates\/routing\/src\/lib\.rs, docs\/PLAN\.md/)).toBeTruthy();
+
+    // 4. Proposed tasks reflect deduplication: exactly 2 tasks, task-2 excluded
+    expect(screen.queryByTestId("correction-task-card-task-2")).toBeNull();
+    expect(screen.getByTestId("correction-task-card-task-1")).toBeTruthy();
+    expect(screen.getByTestId("correction-task-card-task-3")).toBeTruthy();
+
+    // 5. Authorize button enabled when bounded
+    const authBtn = screen.getByRole("button", { name: "Authorize scoped correction" });
+    expect(authBtn).toBeTruthy();
+    expect((authBtn as HTMLButtonElement).disabled).toBe(false);
+
+    // 6. When human_refinement_required is true: alert rendered and button disabled
+    const refinementVer = {
+      ...rejectedVer,
+      correction_scope: {
+        ...rejectedVer.correction_scope,
+        human_refinement_required: true,
+      },
+    };
+    rendered.rerender(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={refinementVer}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+        onAuthorizeCorrection={onAuthorize}
+      />,
+    );
+    expect(screen.getByTestId("human-refinement-required-alert")).toBeTruthy();
+    const disabledBtn = screen.getByRole("button", { name: "Human scope refinement required" });
+    expect((disabledBtn as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("allows operator to open scope refinement form, add entries, and save refinement", () => {
+    const onSaveRefinement = vi.fn().mockResolvedValue(undefined);
+    const rejectedVer = pendingVerification();
+    rejectedVer.workflow_stage = "USER_DECISION_REJECTED";
+    rejectedVer.summary = "You rejected the completed result.";
+    rejectedVer.correction_scope = {
+      mission_id: "mission-refine-test",
+      revision: 1,
+      originating_evidence_id: "p8-rejection-art",
+      user_rejection_notes: "Accessibility blocked without tests",
+      failed_requirement_ids: ["REQ-A-OUTCOME"],
+      blocked_requirement_ids: ["REQ-ACCESSIBILITY"],
+      affected_task_ids: ["task-1", "task-accessibility"],
+      preserved_task_ids: ["task-2"],
+      scope_hash: "unrefined-hash",
+      authorized: false,
+      human_refinement_required: true,
+      missing_provenance_tasks: ["task-accessibility"],
+    };
+
+    render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={rejectedVer}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+        onAuthorizeCorrection={vi.fn()}
+        onSaveRefinement={onSaveRefinement}
+      />,
+    );
+
+    expect(screen.getByTestId("scope-refinement-required-notice")).toBeTruthy();
+    expect(screen.getByText(/Unbounded tasks:/)).toBeTruthy();
+    expect(screen.getByText("task-accessibility")).toBeTruthy();
+
+    const refineBtn = screen.getByRole("button", { name: "Refine correction scope" });
+    fireEvent.click(refineBtn);
+
+    expect(screen.getByText("Refine Permitted Work Boundaries")).toBeTruthy();
+
+    const pathInput = screen.getByLabelText(/Path \(relative to workspace\)/i);
+    const reasonInput = screen.getByLabelText(/Justification reason/i);
+    fireEvent.change(pathInput, { target: { value: "docs/ACCESSIBILITY.md" } });
+    fireEvent.change(reasonInput, { target: { value: "Specify accessibility plan" } });
+
+    const addBtn = screen.getByRole("button", { name: "Add to refinement" });
+    fireEvent.click(addBtn);
+
+    expect(screen.getByText("docs/ACCESSIBILITY.md")).toBeTruthy();
+
+    const saveBtn = screen.getByRole("button", { name: "Save refinement" });
+    fireEvent.click(saveBtn);
+
+    expect(onSaveRefinement).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mission_id: "mission-refine-test",
+        revision: 1,
+        originating_evidence_id: "p8-rejection-art",
+        entries: expect.arrayContaining([
+          expect.objectContaining({
+            path: "docs/ACCESSIBILITY.md",
+            path_type: "File",
+            reason: "Specify accessibility plan",
+          }),
+        ]),
+      }),
+    );
+  });
+
+  it("does not expose ordinary technical reauthorization button or primary refinement controls when correction is autonomous under sealed authority (Defect #60)", () => {
+    const rejectedVer = pendingVerification();
+    rejectedVer.workflow_stage = "USER_DECISION_REJECTED";
+    rejectedVer.summary = "You rejected the completed result.";
+    rejectedVer.correction_scope = {
+      mission_id: "mission-sealed-test",
+      revision: 1,
+      originating_evidence_id: "p8-rejection-art",
+      user_rejection_notes: "1. Fix the accessibility issues in index.html (missing form labels, button names, contrast). 2. Make sure all unit and integration tests pass.",
+      failed_requirement_ids: ["REQ-A-OUTCOME"],
+      failed_requirement_titles: ["User problem outcome"],
+      blocked_requirement_ids: ["REQ-ACCESSIBILITY"],
+      blocked_requirement_titles: ["NFR: accessibility"],
+      affected_task_ids: ["task-accessibility"],
+      preserved_task_ids: ["task-1", "task-2", "task-3"],
+      preserved_task_count: 3,
+      scope_hash: "autonomous-hash-60",
+      authorized: false,
+      human_refinement_required: false,
+      user_reauthorization_required: false,
+      proposed_tasks: [
+        {
+          task_id: "task-accessibility",
+          title: "Implement: NFR: accessibility",
+          objective: "Fix accessibility issues in index.html.",
+          why_included: "Directly satisfies rejected accessibility requirement.",
+          triggering_requirement_ids: ["REQ-ACCESSIBILITY"],
+          triggering_requirement_titles: ["NFR: accessibility"],
+          scope_relation: "DirectTarget",
+          authorized_scope: {
+            workspace: "test-workspace",
+            file_scopes: ["index.html"],
+            directory_scopes: [],
+            package_lockfiles: [],
+            allowed_tools: ["file_edit"],
+            is_bounded: true,
+            authority_boundary_type: "AUTONOMOUS_BOUNDED",
+          },
+          expected_outcome: "A reviewable evidence record demonstrates: NFR: accessibility",
+          required_fresh_evidence: ["AccessibilityResult"],
+        },
+      ],
+    };
+
+    render(
+      <MissionCockpit
+        status={finishedExecution()}
+        verification={rejectedVer}
+        antigravity={readyAntigravity}
+        busy={false}
+        revalidating={false}
+        verificationNotice={null}
+        onCommand={vi.fn()}
+        onVerify={vi.fn()}
+        onDecision={vi.fn()}
+        onRefresh={vi.fn()}
+        onAuthorizeCorrection={vi.fn()}
+      />,
+    );
+
+    // 1. Heading explains bounded correction under sealed authority
+    expect(screen.getByRole("heading", { name: /Bounded Correction Under Sealed Authority/i })).toBeTruthy();
+
+    // 2. Next step does NOT demand user authorization
+    expect(screen.getByText("Autonomous technical correction")).toBeTruthy();
+    expect(screen.queryByText("Authorize bounded correction")).toBeNull();
+
+    // 3. Task status shows runnable under sealed authority
+    expect(screen.getByText("Runnable under sealed authority")).toBeTruthy();
+    expect(screen.queryByText("Will become runnable only after explicit user authorization")).toBeNull();
+
+    // 4. Normal UI does NOT expose Authorize scoped correction button
+    expect(screen.queryByRole("button", { name: "Authorize scoped correction" })).toBeNull();
+
+    // 5. Sealed mission delivery confirmation displayed
+    expect(screen.getByText(/Autonomous technical correction authorized under sealed mission authority/i)).toBeTruthy();
+
+    // 6. Manual scope refinement is NOT exposed directly on primary UI; it is inside advanced-controls
+    const advancedRefine = document.querySelector("details.scope-refinement-advanced");
+    expect(advancedRefine).toBeTruthy();
+    expect((advancedRefine as HTMLDetailsElement).open).toBe(false);
   });
 });

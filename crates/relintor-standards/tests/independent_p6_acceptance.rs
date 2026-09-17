@@ -4,7 +4,6 @@ use relintor_standards::*;
 use rusqlite::Connection;
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
 
 fn signed_registry() -> (StandardsRegistry, TrustedSignerSet, SigningKey) {
     let key = SigningKey::from_bytes(&[11_u8; 32]);
@@ -383,7 +382,10 @@ fn authority_registry_and_sealed_revision_persist_and_reload() {
     let (engine, draft, trusted) = draft_for(&["backend", "database"]);
     let (registry, _, _) = signed_registry();
     let (sealed, _) = engine.seal(&draft, &trusted, "fixed").unwrap();
-    let path = PathBuf::from("D:\\Relintor\\target\\p6-authority-persistence.sqlite");
+    let path = std::env::temp_dir().join(format!(
+        "relintor-p6-authority-persistence-{}.sqlite",
+        std::process::id()
+    ));
     let _ = fs::remove_file(&path);
     let connection = Connection::open(&path).unwrap();
     connection
